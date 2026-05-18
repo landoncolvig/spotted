@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!--
+      Spotted ships a PyInstaller-bundled Python sidecar binary. PyInstaller
+      embeds the Python framework + native libs inside the binary and
+      extracts them to /tmp at launch. Those embedded libs retain their
+      original Team IDs (Apple / python.org / Homebrew), which mismatch
+      Spotted's ad-hoc signing — Sequoia's library validation then refuses
+      to load them with "(non-platform) have different Team IDs".
+
+      Disabling library validation lets the parent app load libs from
+      sources with different Team IDs. This is the standard pattern for
+      ad-hoc-signed apps that include third-party-signed bundles.
+
+      Once we get a proper Apple Developer cert ($99/yr) and notarize,
+      these entitlements can come off.
+    -->
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+    <key>com.apple.security.cs.allow-dyld-environment-variables</key>
+    <true/>
+</dict>
+</plist>
