@@ -115,16 +115,18 @@ async fn write_markers(app: AppHandle, window: Window) -> Result<i32, String> {
     run_sidecar(app, window, vec!["markers-write".into()]).await
 }
 
-/// Spawn the Flask label-web in a long-lived background task. Returns the
-/// port once Flask has had a moment to bind. The child is kept alive by
-/// moving it into the background task; it gets killed when the Tauri
-/// process exits.
+/// Spawn the Flask label-web in a long-lived background task. Polls the
+/// localhost URL until Flask actually responds (or until timeout). The
+/// child is kept alive by moving it into the background task; it gets
+/// killed when the Tauri process exits.
 #[tauri::command]
 async fn start_label_server(
     app: AppHandle,
     window: Window,
     port: u16,
 ) -> Result<u16, String> {
+    use std::sync::{Arc, Mutex};
+
     let sidecar = app
         .shell()
         .sidecar("spotted-sidecar")
@@ -140,15 +142,24 @@ async fn start_label_server(
         .spawn()
         .map_err(|e| format!("sidecar spawn: {e}"))?;
 
-    // Background task forwards output and keeps the child alive.
+    // Capture stderr in a shared buffer so we can surface it if Flask
+    // never comes up.
+    let last_err: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let last_err_clone = last_err.clone();
     let window_for_task = window.clone();
     tauri::async_runtime::spawn(async move {
-        let _keepalive = child; // dropped at task end, killing the sidecar
+        let _keepalive = child;
         while let Some(event) = rx.recv().await {
             match event {
                 CommandEvent::Stdout(bytes) | CommandEvent::Stderr(bytes) => {
                     let line = String::from_utf8_lossy(&bytes).trim_end().to_string();
                     if !line.is_empty() {
+                        if let Ok(mut buf) = last_err_clone.lock() {
+                            buf.push(line.clone());
+                            if buf.len() > 12 {
+                                buf.remove(0);
+                            }
+                        }
                         let _ = window_for_task.emit(
                             "sidecar://line",
                             SidecarLine { kind: "stdout", line },
@@ -160,9 +171,41 @@ async fn start_label_server(
         }
     });
 
-    // Give Flask a moment to bind before the webview iframes it.
-    tokio::time::sleep(Duration::from_millis(900)).await;
-    Ok(port)
+    // Poll until Flask actually responds on the port. Flask's cold start
+    // inside the PyInstaller-extracted environment can take 2-5 seconds
+    // on a slower Mac, so the old 900ms fixed sleep wasn't enough.
+    let url = format!("http://127.0.0.1:{port}/");
+    let timeout = Duration::from_secs(20);
+    let start = std::time::Instant::now();
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_millis(500))
+        .build()
+        .map_err(|e| format!("http client: {e}"))?;
+
+    while start.elapsed() < timeout {
+        match client.get(&url).send().await {
+            Ok(resp) if resp.status().is_success() => {
+                return Ok(port);
+            }
+            _ => {
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
+        }
+    }
+
+    let tail = last_err
+        .lock()
+        .map(|b| b.join("\n"))
+        .unwrap_or_default();
+    if tail.is_empty() {
+        Err(format!(
+            "Labeling server didn't respond on port {port} after {}s. \
+             Try quitting and reopening Spotted.",
+            timeout.as_secs()
+        ))
+    } else {
+        Err(format!("Labeling server failed to start:\n{tail}"))
+    }
 }
 
 #[tauri::command]
