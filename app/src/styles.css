@@ -4,9 +4,9 @@
   --surface-2: #24262C;
   --border: #2B2C32;
   --border-strong: #3A3C44;
-  --primary: #E0833B;
-  --primary-hover: #EA9450;
-  --primary-press: #C46A28;
+  --primary: #F08220;
+  --primary-hover: #FF9438;
+  --primary-press: #D26810;
   --accent: #5BB6E0;
   --text: #F5F5F0;
   --text-dim: #9B9890;
@@ -167,18 +167,18 @@ body {
   cursor: pointer;
   border-radius: var(--r-xl);
   background:
-    radial-gradient(120% 80% at 50% 0%, rgba(224,131,59,.06), transparent 60%),
+    radial-gradient(120% 80% at 50% 0%, rgba(240,130,32,.06), transparent 60%),
     var(--surface);
   transition: background .2s ease, transform .15s ease;
 }
 .dropzone:hover { background:
-    radial-gradient(120% 80% at 50% 0%, rgba(224,131,59,.10), transparent 60%),
+    radial-gradient(120% 80% at 50% 0%, rgba(240,130,32,.12), transparent 60%),
     var(--surface-2);
 }
 .dropzone:active { transform: scale(.998); }
 .dropzone.is-hot {
   background:
-    radial-gradient(120% 80% at 50% 0%, rgba(224,131,59,.16), transparent 60%),
+    radial-gradient(120% 80% at 50% 0%, rgba(240,130,32,.20), transparent 60%),
     var(--surface-2);
 }
 .dropzone.is-hot .dropzone__frame { border-color: var(--primary); }

@@ -21,9 +21,9 @@ except ImportError:
 HERE = Path(__file__).resolve().parent
 ICONSET = HERE / "spotted.iconset"
 
-BG_INNER = (234, 148, 80, 255)
-BG_OUTER = (196, 99, 40, 255)
-FG = (245, 245, 240, 255)
+BG_INNER = (255, 178, 80, 255)   # #FFB250 — bright peach highlight
+BG_OUTER = (232, 112, 20, 255)   # #E87014 — saturated vivid orange
+FG = (255, 255, 255, 255)        # pure white
 
 
 def squircle_mask(size: int) -> Image.Image:
@@ -45,15 +45,19 @@ def squircle_mask(size: int) -> Image.Image:
 
 
 def radial_gradient(size: int) -> Image.Image:
+    """Small bright highlight upper-left, saturated orange dominates the rest."""
     img = Image.new("RGBA", (size, size), BG_OUTER)
     pixels = img.load()
-    cx, cy = size * 0.32, size * 0.28
-    max_d = math.hypot(size - cx, size - cy)
+    # Tight highlight in upper-left
+    cx, cy = size * 0.33, size * 0.28
+    # Larger max_d → faster transition to outer → orange dominates
+    max_d = math.hypot(size * 1.1, size * 1.1)
     for y in range(size):
         for x in range(size):
-            d = math.hypot(x - cx, y - cy) / max_d
-            d = min(1.0, d)
-            t = 1.0 - (1.0 - d) * (1.0 - d)
+            d = min(1.0, math.hypot(x - cx, y - cy) / max_d)
+            # Ease-in (slow start, fast end) so the bright spot fades
+            # quickly into the saturated orange body
+            t = d
             r = int(BG_INNER[0] * (1 - t) + BG_OUTER[0] * t)
             g = int(BG_INNER[1] * (1 - t) + BG_OUTER[1] * t)
             b = int(BG_INNER[2] * (1 - t) + BG_OUTER[2] * t)
@@ -62,9 +66,9 @@ def radial_gradient(size: int) -> Image.Image:
 
 
 def draw_brackets(draw: ImageDraw.ImageDraw, size: int) -> None:
-    inset = size * 0.20
-    arm = size * 0.18
-    thickness = max(2, int(size * 0.035))
+    inset = size * 0.19
+    arm = size * 0.20
+    thickness = max(3, int(size * 0.055))  # thicker for presence
     color = FG
     tl = (inset, inset)
     draw.line([tl, (tl[0] + arm, tl[1])], fill=color, width=thickness)
@@ -81,7 +85,7 @@ def draw_brackets(draw: ImageDraw.ImageDraw, size: int) -> None:
 
 
 def draw_center_dot(draw: ImageDraw.ImageDraw, size: int) -> None:
-    r = size * 0.07
+    r = size * 0.09  # slightly bigger
     cx = cy = size / 2.0
     draw.ellipse([cx - r, cy - r, cx + r, cy + r], fill=FG)
 
@@ -98,15 +102,8 @@ def render(size: int) -> Image.Image:
     draw_brackets(d, s)
     draw_center_dot(d, s)
     canvas = Image.alpha_composite(canvas, marks)
-
-    # Inner shadow: blur the mask edge, dim it, paint as overlay
-    edge_blur = mask.filter(ImageFilter.GaussianBlur(s * 0.04))
-    edge_dim = edge_blur.point(lambda v: min(70, v // 4))
-    shadow = Image.new("RGBA", (s, s), (0, 0, 0, 0))
-    shadow.putalpha(edge_dim)
-    canvas = Image.alpha_composite(
-        canvas, Image.composite(shadow, Image.new("RGBA", (s, s), (0, 0, 0, 0)), mask)
-    )
+    # No inner shadow — it muddied the foreground. The flat punchy look
+    # reads brighter in dark mode anyway.
 
     return canvas.resize((size, size), Image.Resampling.LANCZOS)
 
