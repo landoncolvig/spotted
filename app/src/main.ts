@@ -2,7 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 
-type State = "idle" | "working" | "label" | "done";
+type State = "idle" | "tags" | "working" | "label" | "done";
 type SidecarLine = { kind: "stdout" | "stderr"; line: string };
 type SpottedEvent =
   | { event: "scan-start"; total: number }
@@ -16,6 +16,10 @@ type SpottedEvent =
   | { event: "tag-video"; name: string; names: string[]; index: number; total: number }
   | { event: "tag-error"; name: string; message: string }
   | { event: "tag-complete"; total: number }
+  | { event: "markers-start"; total: number }
+  | { event: "markers-video"; name: string; count: number; index: number; total: number }
+  | { event: "markers-error"; name: string; message: string }
+  | { event: "markers-complete"; total: number }
   | { event: "library-stats"; videos: number; faces: number; clusters: number; named: number; people: { name: string; clips: number; faces: number }[] }
   | { event: "error"; stage: string; message: string };
 
@@ -29,6 +33,10 @@ const progressBar = document.getElementById("progress-bar") as HTMLElement;
 const doneSub = document.getElementById("done-sub") as HTMLElement;
 const btnAgain = document.getElementById("btn-again") as HTMLButtonElement;
 const btnReveal = document.getElementById("btn-reveal") as HTMLButtonElement;
+const tagsPath = document.getElementById("tags-path") as HTMLElement;
+const tagsInput = document.getElementById("tags-input") as HTMLInputElement;
+const tagsStart = document.getElementById("tags-start") as HTMLButtonElement;
+const tagsSkip = document.getElementById("tags-skip") as HTMLButtonElement;
 
 const LABEL_PORT = 8765;
 let currentPath: string | null = null;
@@ -47,8 +55,53 @@ async function loadVersion() {
 async function pickFolder() {
   const path = await open({ directory: true, multiple: false });
   if (typeof path === "string") {
-    await runBatch(path);
+    askForTags(path);
   }
+}
+
+// Reasonable stop words to drop from auto-suggested tags.
+const STOP = new Set([
+  "the", "and", "a", "an", "of", "in", "on", "at", "for", "to",
+  "test", "tests", "video", "videos", "footage", "clip", "clips",
+  "mov", "mp4", "avi", "m4v",
+  "raw", "edit", "final", "draft", "v1", "v2", "v3",
+]);
+
+function suggestTagsFromPath(path: string): string {
+  const last = path.split("/").filter(Boolean).pop() || "";
+  const parts = last
+    .split(/[-_.\s]+/)
+    .map((s) => s.trim().toLowerCase())
+    .filter((s) => s && s.length > 1 && !STOP.has(s) && !/^\d+$/.test(s));
+  // Dedupe preserving order
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const p of parts) {
+    if (!seen.has(p)) {
+      seen.add(p);
+      out.push(p);
+    }
+  }
+  return out.slice(0, 5).join(", ");
+}
+
+function askForTags(path: string) {
+  currentPath = path;
+  tagsPath.textContent = path;
+  tagsInput.value = suggestTagsFromPath(path);
+  setState("tags");
+  // Focus + select-all so the user can immediately edit or hit Enter
+  setTimeout(() => {
+    tagsInput.focus();
+    tagsInput.select();
+  }, 50);
+}
+
+function readTagsInput(): string[] {
+  return tagsInput.value
+    .split(",")
+    .map((t) => t.trim().toLowerCase())
+    .filter(Boolean);
 }
 
 function setProgress(pct: number) {
@@ -133,6 +186,22 @@ function handleSpottedEvent(evt: SpottedEvent) {
       if (batch.tagTotal > 0) setProgress((evt.index / batch.tagTotal) * 100);
       break;
     case "tag-complete":
+      // Tag-write done; markers come next and finish at 100.
+      setProgress(60);
+      break;
+    case "markers-start":
+      workingLabel.textContent = "Writing timeline markers";
+      workingDetail.textContent = `Adding markers to ${evt.total} clips…`;
+      setProgress(65);
+      break;
+    case "markers-video":
+      workingDetail.textContent = `${evt.name} — ${evt.count} marker(s)`;
+      if (evt.total > 0) setProgress(60 + (evt.index / evt.total) * 40);
+      break;
+    case "markers-error":
+      console.warn("marker error:", evt.name, evt.message);
+      break;
+    case "markers-complete":
       setProgress(100);
       break;
     case "library-stats":
@@ -154,7 +223,7 @@ async function ensureSidecarListener() {
   });
 }
 
-async function runBatch(path: string) {
+async function runBatch(path: string, tags: string[] = []) {
   currentPath = path;
   setState("working");
   workingPath.textContent = path;
@@ -170,7 +239,7 @@ async function runBatch(path: string) {
   await ensureSidecarListener();
 
   try {
-    await invoke<number>("scan_folder", { path });
+    await invoke<number>("scan_folder", { path, tags });
     await invoke<number>("cluster_faces");
     workingLabel.textContent = "Naming people";
     workingDetail.textContent = "Opening labeler…";
@@ -228,11 +297,22 @@ function mountLabelScreen() {
 
 async function runTagWrite() {
   setState("working");
-  setProgress(50);
+  setProgress(0);
   workingLabel.textContent = "Writing keywords";
   workingDetail.textContent = "Running exiftool, per clip…";
   try {
     await invoke<number>("tag_videos");
+
+    // Markers are a bonus — Premiere/DaVinci-only feature. Failures here
+    // should not break the flow because keywords already succeeded.
+    workingLabel.textContent = "Writing timeline markers";
+    workingDetail.textContent = "For Premiere & DaVinci scrubber…";
+    try {
+      await invoke<number>("write_markers");
+    } catch (e) {
+      console.warn("marker write failed (non-fatal):", e);
+    }
+
     setProgress(100);
     const stats = await fetchLibraryStats();
     setState("done");
@@ -294,7 +374,7 @@ function wireDragDrop() {
       return;
     }
     const paths = e.payload?.paths ?? [];
-    if (paths.length > 0) runBatch(paths[0]);
+    if (paths.length > 0) askForTags(paths[0]);
   });
 }
 
@@ -337,8 +417,29 @@ function flashToast(msg: string, isError = false) {
   }, 2400);
 }
 
+function wireTagsScreen() {
+  tagsStart.addEventListener("click", () => {
+    if (!currentPath) return;
+    runBatch(currentPath, readTagsInput());
+  });
+  tagsSkip.addEventListener("click", () => {
+    if (!currentPath) return;
+    runBatch(currentPath, []);
+  });
+  tagsInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      tagsStart.click();
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      setState("idle");
+    }
+  });
+}
+
 window.addEventListener("DOMContentLoaded", () => {
   loadVersion();
   wireDragDrop();
   wireMenuEvents();
+  wireTagsScreen();
 });

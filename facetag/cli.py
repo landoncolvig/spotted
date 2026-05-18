@@ -16,6 +16,7 @@ from . import db as _db
 from . import detect as _detect
 from . import extract as _extract
 from . import label as _label
+from . import markers as _markers
 from . import tag as _tag
 from . import web as _web
 
@@ -46,12 +47,15 @@ def scan(
     sample_fps: float = typer.Option(1.0, "--fps", help="Frames per second to sample for face detection."),
     rescan: bool = typer.Option(False, "--rescan", help="Re-scan videos already in the index."),
     min_score: float = typer.Option(0.5, "--min-score", help="Minimum face detection confidence."),
+    tags: str = typer.Option("", "--tags", help="Comma-separated batch tags applied to every clip in this scan (e.g. 'baptism,kids')."),
 ):
     """Walk a path, sample frames, detect faces, store embeddings."""
     videos = _extract.walk_videos(path)
     if not videos:
         console.print(f"[red]No videos found under {path}[/red]")
         raise typer.Exit(1)
+
+    batch_tags = [t.strip().lower() for t in tags.split(",") if t.strip()] if tags else []
 
     conn = _db.connect(db_path)
     detector = _detect.Detector(min_score=min_score)
@@ -76,6 +80,8 @@ def scan(
         _emit("video-start", name=v.name, index=index, total=len(videos), duration_sec=duration)
 
         video_id = _db.add_video(conn, path_str, duration)
+        if batch_tags:
+            _db.set_batch_tags(conn, video_id, batch_tags)
         if rescan:
             _db.clear_video_faces(conn, video_id)
 
@@ -217,9 +223,9 @@ def tag_write(
     person name across the whole library.
     """
     conn = _db.connect(db_path)
-    mapping = _tag.videos_with_names(conn)
+    mapping = _tag.videos_with_keywords(conn)
     if not mapping:
-        console.print("[yellow]No videos with named people. Run `label-web` first.[/yellow]")
+        console.print("[yellow]Nothing to tag — no named people and no batch tags. Run `label-web` first.[/yellow]")
         raise typer.Exit(0)
 
     _emit("tag-start", total=len(mapping))
@@ -261,6 +267,58 @@ def tag_write(
     else:
         _emit("tag-complete", total=len(mapping))
         console.print(f"[bold green]Done.[/bold green] {len(mapping)} videos tagged.")
+
+
+@app.command("markers-write")
+def markers_write(
+    db_path: Path = typer.Option(DEFAULT_DB, "--db"),
+):
+    """Write per-face timeline markers (XMP-xmpDM:Markers) into each video.
+
+    Premiere Pro and DaVinci Resolve render these as clip markers on the
+    timeline scrubber. Each marker is one face detection: "Sarah at 0:03,
+    Dad at 0:08…". Editors can click a marker to jump to that frame.
+    """
+    conn = _db.connect(db_path)
+    videos = _markers.videos_with_named_faces(conn)
+    if not videos:
+        console.print("[yellow]No videos with named faces. Run `label-web` first.[/yellow]")
+        raise typer.Exit(0)
+
+    _emit("markers-start", total=len(videos))
+    console.print(f"Writing markers to [bold]{len(videos)}[/bold] video(s)…")
+    failed: list[tuple[str, str]] = []
+
+    with Progress(
+        TextColumn("[bold cyan]{task.description}"),
+        BarColumn(),
+        TextColumn("{task.completed}/{task.total}"),
+        TimeElapsedColumn(),
+        console=console,
+    ) as prog:
+        task = prog.add_task("markers", total=len(videos))
+        for idx, (vid, path_str) in enumerate(videos, start=1):
+            short = Path(path_str).name
+            events = _markers.face_events_for_video(conn, vid)
+            _emit("markers-video", name=short, count=len(events), index=idx, total=len(videos))
+            try:
+                _markers.write_markers(Path(path_str), events)
+            except _markers.ExiftoolMissing as e:
+                console.print(f"\n[red]{e}[/red]")
+                _emit("error", stage="markers-write", message=str(e))
+                raise typer.Exit(2)
+            except Exception as e:
+                failed.append((short, str(e)))
+                _emit("markers-error", name=short, message=str(e))
+            prog.update(task, advance=1)
+
+    if failed:
+        console.print(f"[red]{len(failed)} failure(s):[/red]")
+        for n, err in failed:
+            console.print(f"  [red]{n}[/red]  {err}")
+    else:
+        _emit("markers-complete", total=len(videos))
+        console.print(f"[bold green]Done.[/bold green] Wrote markers to {len(videos)} clips.")
 
 
 @app.command()

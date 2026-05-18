@@ -30,6 +30,28 @@
           <p class="hint">Spotted reads frames, finds faces, and writes who's who back into each clip's metadata.</p>
         </div>
 
+        <!-- TAGS -->
+        <div class="screen screen--tags">
+          <div class="tags-wrap">
+            <div class="tags__title">What's in this footage?</div>
+            <div class="tags__path" id="tags-path">—</div>
+            <input
+              type="text"
+              id="tags-input"
+              class="tags__input"
+              placeholder="e.g. baptism, kids, april"
+              autocomplete="off"
+              autocorrect="off"
+              spellcheck="false"
+            />
+            <div class="tags__hint">Comma-separated. Anything you'd want to find later in Finder.</div>
+            <div class="tags__actions">
+              <button class="btn btn--ghost" id="tags-skip">Skip</button>
+              <button class="btn" id="tags-start">Start</button>
+            </div>
+          </div>
+        </div>
+
         <!-- WORKING -->
         <div class="screen screen--working">
           <div class="status">

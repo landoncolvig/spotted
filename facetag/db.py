@@ -11,7 +11,8 @@ CREATE TABLE IF NOT EXISTS videos (
     id INTEGER PRIMARY KEY,
     path TEXT UNIQUE NOT NULL,
     duration_sec REAL,
-    scanned_at TEXT DEFAULT CURRENT_TIMESTAMP
+    scanned_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    batch_tags TEXT
 );
 
 CREATE TABLE IF NOT EXISTS faces (
@@ -39,7 +40,34 @@ def connect(db_path: Path) -> sqlite3.Connection:
     conn = sqlite3.connect(db_path)
     conn.execute("PRAGMA foreign_keys = ON")
     conn.executescript(SCHEMA)
+    _migrate(conn)
     return conn
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """In-place migrations for existing databases predating new columns."""
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(videos)").fetchall()}
+    if "batch_tags" not in cols:
+        conn.execute("ALTER TABLE videos ADD COLUMN batch_tags TEXT")
+    conn.commit()
+
+
+def set_batch_tags(conn: sqlite3.Connection, video_id: int, tags: list[str]) -> None:
+    """Store a comma-separated list of batch tags for a video.
+
+    Tags are normalized to lowercase and de-duplicated.
+    """
+    clean = sorted({t.strip().lower() for t in tags if t and t.strip()})
+    value = ",".join(clean) if clean else None
+    conn.execute("UPDATE videos SET batch_tags = ? WHERE id = ?", (value, video_id))
+    conn.commit()
+
+
+def get_batch_tags(conn: sqlite3.Connection, video_id: int) -> list[str]:
+    row = conn.execute("SELECT batch_tags FROM videos WHERE id = ?", (video_id,)).fetchone()
+    if not row or not row[0]:
+        return []
+    return [t for t in row[0].split(",") if t]
 
 
 def add_video(conn: sqlite3.Connection, path: str, duration_sec: float) -> int:

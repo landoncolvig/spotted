@@ -77,8 +77,18 @@ async fn run_sidecar(
 }
 
 #[tauri::command]
-async fn scan_folder(app: AppHandle, window: Window, path: String) -> Result<i32, String> {
-    run_sidecar(app, window, vec!["scan".into(), path]).await
+async fn scan_folder(
+    app: AppHandle,
+    window: Window,
+    path: String,
+    tags: Vec<String>,
+) -> Result<i32, String> {
+    let mut args = vec!["scan".to_string(), path];
+    if !tags.is_empty() {
+        args.push("--tags".to_string());
+        args.push(tags.join(","));
+    }
+    run_sidecar(app, window, args).await
 }
 
 #[tauri::command]
@@ -89,6 +99,11 @@ async fn cluster_faces(app: AppHandle, window: Window) -> Result<i32, String> {
 #[tauri::command]
 async fn tag_videos(app: AppHandle, window: Window) -> Result<i32, String> {
     run_sidecar(app, window, vec!["tag-write".into()]).await
+}
+
+#[tauri::command]
+async fn write_markers(app: AppHandle, window: Window) -> Result<i32, String> {
+    run_sidecar(app, window, vec!["markers-write".into()]).await
 }
 
 /// Spawn the Flask label-web in a long-lived background task. Returns the
@@ -289,6 +304,7 @@ pub fn run() {
             scan_folder,
             cluster_faces,
             tag_videos,
+            write_markers,
             start_label_server,
             fetch_status,
             reveal_in_finder,
