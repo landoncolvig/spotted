@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="stylesheet" href="/src/styles.css" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Spotted</title>
+    <script type="module" src="/src/main.ts" defer></script>
+  </head>
+  <body>
+    <main id="app">
+      <header class="topbar">
+        <div class="brand">
+          <span class="mark"></span>
+          <span class="wordmark">Spotted</span>
+        </div>
+        <div class="version" id="version">v0.0.1</div>
+      </header>
+
+      <section class="stage" id="stage" data-state="idle">
+        <!-- IDLE -->
+        <div class="screen screen--idle">
+          <div class="dropzone" id="dropzone">
+            <div class="dropzone__frame"></div>
+            <div class="dropzone__content">
+              <div class="dropzone__title">Drop footage here</div>
+              <div class="dropzone__sub">or click to choose a folder</div>
+            </div>
+          </div>
+          <p class="hint">Spotted reads frames, finds faces, and writes who's who back into each clip's metadata.</p>
+        </div>
+
+        <!-- WORKING -->
+        <div class="screen screen--working">
+          <div class="status">
+            <div class="status__label" id="working-label">Spotting</div>
+            <div class="status__path" id="working-path">—</div>
+            <div class="progress"><div class="progress__bar" id="progress-bar"></div></div>
+            <div class="status__detail" id="working-detail">Reading frames…</div>
+          </div>
+        </div>
+
+        <!-- DONE -->
+        <div class="screen screen--done">
+          <div class="done">
+            <div class="done__title">Done.</div>
+            <div class="done__sub" id="done-sub">—</div>
+            <div class="actions">
+              <button class="btn btn--ghost" id="btn-reveal">Reveal in Finder</button>
+              <button class="btn" id="btn-again">New batch</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <footer class="footer">
+        <span class="footer__left">Local. No cloud.</span>
+        <a class="footer__right" id="link-help" href="#">Help</a>
+      </footer>
+    </main>
+  </body>
+</html>

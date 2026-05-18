@@ -1,0 +1,111 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-macos:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: app/package-lock.json
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            app/src-tauri/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('app/src-tauri/Cargo.lock') }}
+
+      - name: Install JS deps
+        working-directory: app
+        run: npm ci
+
+      - name: Validate tag and extract version
+        id: ver
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          # Strict semver gate — refuse anything weird in the tag.
+          if ! [[ "$REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$ ]]; then
+            echo "::error::Tag '$REF_NAME' is not a valid semver tag (vX.Y.Z[-suffix])"
+            exit 1
+          fi
+          VERSION="${REF_NAME#v}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Build (universal)
+        working-directory: app
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
+        run: npm run tauri build -- --target universal-apple-darwin
+
+      - name: Build latest.json
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          SIG_PATH="app/src-tauri/target/universal-apple-darwin/release/bundle/macos/Spotted.app.tar.gz.sig"
+          SIG="$(cat "$SIG_PATH")"
+          PUB_DATE="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+          NOTES="See https://github.com/${REPO}/releases/tag/v${VERSION}"
+
+          # Use jq so VERSION, SIG, REPO, NOTES, PUB_DATE are passed as
+          # arguments (not shell-interpolated into the template). Prevents
+          # any injection via tag name or commit values.
+          jq -n \
+            --arg version "$VERSION" \
+            --arg notes "$NOTES" \
+            --arg pub_date "$PUB_DATE" \
+            --arg sig "$SIG" \
+            --arg repo "$REPO" \
+            '{
+              version: $version,
+              notes: $notes,
+              pub_date: $pub_date,
+              platforms: {
+                "darwin-aarch64": {
+                  signature: $sig,
+                  url: ("https://github.com/" + $repo + "/releases/download/v" + $version + "/Spotted.app.tar.gz")
+                },
+                "darwin-x86_64": {
+                  signature: $sig,
+                  url: ("https://github.com/" + $repo + "/releases/download/v" + $version + "/Spotted.app.tar.gz")
+                }
+              }
+            }' > app/latest.json
+          cat app/latest.json
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: Spotted ${{ steps.ver.outputs.version }}
+          generate_release_notes: true
+          files: |
+            app/src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg
+            app/src-tauri/target/universal-apple-darwin/release/bundle/macos/Spotted.app.tar.gz
+            app/src-tauri/target/universal-apple-darwin/release/bundle/macos/Spotted.app.tar.gz.sig
+            app/latest.json

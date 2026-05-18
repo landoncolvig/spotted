@@ -1,0 +1,60 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Spotted",
+  "version": "0.0.1",
+  "identifier": "app.spotted.desktop",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "label": "main",
+        "title": "Spotted",
+        "width": 760,
+        "height": 560,
+        "minWidth": 600,
+        "minHeight": 440,
+        "resizable": true,
+        "fullscreen": false,
+        "transparent": false,
+        "decorations": true,
+        "titleBarStyle": "Visible",
+        "dragDropEnabled": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["dmg", "app"],
+    "createUpdaterArtifacts": true,
+    "category": "Productivity",
+    "shortDescription": "Spot people in your video footage.",
+    "longDescription": "Local face tagging for editors. Drop a folder of footage, name who's who, and Spotted writes XMP keywords into each clip so Premiere and DaVinci can search by person.",
+    "copyright": "© 2026 Landon Colvig",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ]
+  },
+  "plugins": {
+    "updater": {
+      "active": true,
+      "dialog": true,
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDJFOEU2NUQwMEExNkI3NDcKUldSSHR4WUswR1dPTHRCV1FRd1p2cTJZZGV2cmRRb05haThwU3RMWGRjdDVEUUo3eUhDajFNK0YK",
+      "endpoints": [
+        "https://github.com/landoncolvig/spotted/releases/latest/download/latest.json"
+      ]
+    }
+  }
+}
