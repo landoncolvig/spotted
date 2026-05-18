@@ -1,0 +1,27 @@
+[project]
+name = "facetag"
+version = "0.1.0"
+description = "Face-tag a local video library and cut highlight reels per person."
+requires-python = ">=3.10"
+dependencies = [
+    "typer>=0.12",
+    "rich>=13",
+    "numpy>=1.26",
+    "opencv-python>=4.9",
+    "onnxruntime>=1.18",
+    "insightface>=0.7.3",
+    "scikit-learn>=1.4",
+    "hdbscan>=0.8.33",
+    "pillow>=10",
+    "flask>=3.0",
+]
+
+[project.scripts]
+facetag = "facetag.cli:app"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["facetag*"]

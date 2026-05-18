@@ -1,0 +1,50 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+build/
+dist/
+*.pyo
+
+# PyInstaller
+*.spec
+sidecar/build/
+sidecar/dist/
+
+# Node / Tauri
+node_modules/
+app/dist/
+app/src-tauri/target/
+app/src-tauri/gen/
+
+# Secrets — never commit
+.env
+.env.*
+*.key
+*.pem
+*credentials*.json
+*service-account*.json
+client_secret*.json
+tokens*.json
+*.p12
+*.p8
+
+# Tauri updater signing keys (private key never enters repo)
+*.tauri.key
+spotted.key
+
+# Local model + runtime caches
+data/
+out/
+*.onnx
+buffalo_l/
+
+# Local Claude Code session state
+.claude/
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/
+*.swp
