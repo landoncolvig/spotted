@@ -27,10 +27,19 @@ def _wire_frozen_paths() -> None:
     insightface_root = os.path.join(base, "insightface_root")
     if os.path.isdir(insightface_root):
         os.environ["INSIGHTFACE_HOME"] = insightface_root
-    # Bundled exiftool
-    bundled_exiftool = os.path.join(base, "exiftool")
-    if os.path.isfile(bundled_exiftool):
-        os.environ["PATH"] = bundled_exiftool + os.pathsep + os.path.dirname(bundled_exiftool) + os.pathsep + os.environ.get("PATH", "")
+
+    # Prepend bundled vendor binaries (exiftool, ffmpeg, ffprobe) to PATH so
+    # `subprocess.run("exiftool", ...)` etc. find them on machines without
+    # Homebrew. Order matters: vendor wins over system installs.
+    bundled_dirs: list[str] = []
+    for sub in ("exiftool", "ffmpeg"):
+        p = os.path.join(base, sub)
+        if os.path.isdir(p):
+            bundled_dirs.append(p)
+    if bundled_dirs:
+        os.environ["PATH"] = (
+            os.pathsep.join(bundled_dirs) + os.pathsep + os.environ.get("PATH", "")
+        )
 
 
 def main() -> None:

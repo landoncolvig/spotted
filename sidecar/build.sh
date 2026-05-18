@@ -53,6 +53,31 @@ if [[ -d "$EXIFTOOL_PREFIX/libexec/exiftool" ]]; then
   cp -R "$EXIFTOOL_PREFIX/libexec/exiftool" "$SIDECAR_DIR/vendor/exiftool/exiftool_perl"
 fi
 
+# 2b) Stage static ffmpeg + ffprobe (evermeet.cx universal builds).
+# These are required by facetag/extract.py — without them, Ellie's
+# non-developer Mac can't probe or decode video frames.
+FFMPEG_DIR="$SIDECAR_DIR/vendor/ffmpeg"
+if [[ ! -x "$FFMPEG_DIR/ffmpeg" || ! -x "$FFMPEG_DIR/ffprobe" ]]; then
+  echo "Downloading static ffmpeg + ffprobe from evermeet.cx…"
+  rm -rf "$FFMPEG_DIR"
+  mkdir -p "$FFMPEG_DIR"
+  curl -fsSL "https://evermeet.cx/ffmpeg/getrelease/ffmpeg/zip"  -o "$FFMPEG_DIR/ffmpeg.zip"
+  curl -fsSL "https://evermeet.cx/ffmpeg/getrelease/ffprobe/zip" -o "$FFMPEG_DIR/ffprobe.zip"
+  (cd "$FFMPEG_DIR" && unzip -oq ffmpeg.zip && unzip -oq ffprobe.zip)
+  rm -f "$FFMPEG_DIR"/*.zip
+  if [[ ! -x "$FFMPEG_DIR/ffmpeg" || ! -x "$FFMPEG_DIR/ffprobe" ]]; then
+    echo "ERROR: ffmpeg or ffprobe missing after unzip from evermeet.cx" >&2
+    exit 1
+  fi
+  chmod +x "$FFMPEG_DIR/ffmpeg" "$FFMPEG_DIR/ffprobe"
+  # Strip evermeet's developer signature and ad-hoc re-sign so all
+  # binaries in the .app have consistent signing identity. Without this
+  # macOS might reject the binary even with our library-validation
+  # entitlements.
+  codesign --force --sign - "$FFMPEG_DIR/ffmpeg"
+  codesign --force --sign - "$FFMPEG_DIR/ffprobe"
+fi
+
 # 3) Run PyInstaller.
 cd "$SIDECAR_DIR"
 rm -rf build dist

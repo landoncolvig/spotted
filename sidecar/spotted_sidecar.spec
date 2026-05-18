@@ -43,6 +43,15 @@ if os.path.isdir(exiftool_dir):
             dest_dir = "exiftool" if rel == "." else os.path.join("exiftool", rel)
             exiftool_binaries.append((src, dest_dir))
 
+# Bundle ffmpeg + ffprobe. build.sh downloads static builds from evermeet.cx.
+ffmpeg_dir = os.path.abspath("vendor/ffmpeg")
+ffmpeg_binaries = []
+if os.path.isdir(ffmpeg_dir):
+    for fn in ("ffmpeg", "ffprobe"):
+        src = os.path.join(ffmpeg_dir, fn)
+        if os.path.isfile(src):
+            ffmpeg_binaries.append((src, "ffmpeg"))
+
 a = Analysis(
     ["entry.py"],
     pathex=[os.path.abspath("..")],  # so `import facetag` resolves to the sibling package
@@ -53,6 +62,7 @@ a = Analysis(
         *sklearn_binaries,
         *hdbscan_binaries,
         *exiftool_binaries,
+        *ffmpeg_binaries,
     ],
     datas=[
         *insightface_datas,

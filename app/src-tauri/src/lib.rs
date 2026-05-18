@@ -29,13 +29,26 @@ async fn run_sidecar(
         .map_err(|e| format!("sidecar spawn: {e}"))?;
 
     let mut code = -1i32;
-    let mut last_stderr: Vec<String> = Vec::new();
+    // Tail of BOTH streams. facetag prints error messages via rich.console
+    // which goes to stdout, so stderr-only capture missed them in v0.0.7.
+    let mut last_lines: Vec<String> = Vec::new();
+    let push_line = |buf: &mut Vec<String>, line: String| {
+        buf.push(line);
+        if buf.len() > 8 {
+            buf.remove(0);
+        }
+    };
 
     while let Some(event) = rx.recv().await {
         match event {
             CommandEvent::Stdout(bytes) => {
                 let line = String::from_utf8_lossy(&bytes).trim_end().to_string();
                 if !line.is_empty() {
+                    // Skip structured events and rich progress-bar lines —
+                    // they're noise in user-facing error reports.
+                    if !line.starts_with("__SPOTTED__ ") && !line.contains('━') {
+                        push_line(&mut last_lines, line.clone());
+                    }
                     let _ = window.emit(
                         "sidecar://line",
                         SidecarLine { kind: "stdout", line },
@@ -45,11 +58,7 @@ async fn run_sidecar(
             CommandEvent::Stderr(bytes) => {
                 let line = String::from_utf8_lossy(&bytes).trim_end().to_string();
                 if !line.is_empty() {
-                    // Keep last few stderr lines for error reporting.
-                    last_stderr.push(line.clone());
-                    if last_stderr.len() > 6 {
-                        last_stderr.remove(0);
-                    }
+                    push_line(&mut last_lines, line.clone());
                     let _ = window.emit(
                         "sidecar://line",
                         SidecarLine { kind: "stderr", line },
@@ -67,11 +76,11 @@ async fn run_sidecar(
     if code == 0 {
         Ok(code)
     } else {
-        let tail = last_stderr.join("\n");
+        let tail = last_lines.join("\n");
         if tail.is_empty() {
             Err(format!("sidecar exited with code {code}"))
         } else {
-            Err(format!("sidecar exited with code {code}:\n{tail}"))
+            Err(tail)
         }
     }
 }

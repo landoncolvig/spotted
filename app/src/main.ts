@@ -31,6 +31,7 @@ const workingPath = document.getElementById("working-path") as HTMLElement;
 const workingDetail = document.getElementById("working-detail") as HTMLElement;
 const progressBar = document.getElementById("progress-bar") as HTMLElement;
 const doneSub = document.getElementById("done-sub") as HTMLElement;
+const doneTitle = document.getElementById("done-title") as HTMLElement;
 const btnAgain = document.getElementById("btn-again") as HTMLButtonElement;
 const btnReveal = document.getElementById("btn-reveal") as HTMLButtonElement;
 const tagsPath = document.getElementById("tags-path") as HTMLElement;
@@ -253,12 +254,36 @@ async function runBatch(path: string, tags: string[] = []) {
 
 function showError(message: string) {
   setState("done");
-  doneSub.textContent = message;
+  doneTitle.textContent = "Couldn't finish";
+  doneSub.textContent = friendlyError(message);
   doneSub.classList.add("done__sub--error");
 }
 
 function clearError() {
+  doneTitle.textContent = "Done.";
   doneSub.classList.remove("done__sub--error");
+}
+
+/** Map common sidecar failure modes to plain-English explanations. */
+function friendlyError(raw: string): string {
+  const r = raw.toLowerCase();
+  if (r.includes("no videos found")) {
+    return "That folder doesn't have any videos in it (or none in a format I recognize: .mov, .mp4, .m4v, .mkv, .avi).";
+  }
+  if (r.includes("no faces in index")) {
+    return "I scanned the folder but couldn't detect any faces. The clips might be too dark, faces too small in frame, or no people on camera.";
+  }
+  if (r.includes("ffprobe not on path") || r.includes("ffmpeg")) {
+    return "Video decoding failed — ffmpeg isn't available. This shouldn't happen in a packaged Spotted build; please report it.";
+  }
+  if (r.includes("exiftool not found")) {
+    return "Metadata writing failed — exiftool isn't available. This shouldn't happen in a packaged Spotted build; please report it.";
+  }
+  if (r.includes("address already in use")) {
+    return "The labeling page port is busy. Quit and reopen Spotted, then try again.";
+  }
+  // Fallback: show the raw error but trimmed to last reasonable chunk
+  return raw;
 }
 
 function makeEl<K extends keyof HTMLElementTagNameMap>(
