@@ -7,10 +7,10 @@ build/
 dist/
 *.pyo
 
-# PyInstaller
-*.spec
+# PyInstaller (build artifacts only; the spec file IS source)
 sidecar/build/
 sidecar/dist/
+sidecar/vendor/
 
 # Node / Tauri
 node_modules/

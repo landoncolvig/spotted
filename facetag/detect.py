@@ -27,6 +27,7 @@ class Detector:
     def _load(self):
         if self._app is not None:
             return
+        import os
         import onnxruntime as ort
         from insightface.app import FaceAnalysis
 
@@ -37,7 +38,15 @@ class Detector:
             ordered.append("CoreMLExecutionProvider")
         ordered.append("CPUExecutionProvider")
 
-        app = FaceAnalysis(name="buffalo_l", providers=ordered)
+        # When frozen by PyInstaller (the Spotted .app sidecar), entry.py
+        # sets INSIGHTFACE_HOME to the bundled model location. Pass it
+        # through so models load offline.
+        kwargs = {"name": "buffalo_l", "providers": ordered}
+        bundled_root = os.environ.get("INSIGHTFACE_HOME")
+        if bundled_root:
+            kwargs["root"] = bundled_root
+
+        app = FaceAnalysis(**kwargs)
         app.prepare(ctx_id=0, det_size=(self.det_size, self.det_size))
         self._app = app
 
