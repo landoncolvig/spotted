@@ -14,6 +14,7 @@ from . import db as _db
 from . import detect as _detect
 from . import extract as _extract
 from . import label as _label
+from . import tag as _tag
 from . import web as _web
 
 app = typer.Typer(add_completion=False, help="Face-tag a video library and cut highlight reels.")
@@ -178,6 +179,60 @@ def cut(
     console.print(f"Rendering [bold]{len(clips)}[/bold] clip(s) totaling {total:.1f}s → {output}")
     _cut.render_reel(clips, output, width=width, height=height)
     console.print(f"[bold green]Done.[/bold green] {output}")
+
+
+@app.command("tag-write")
+def tag_write(
+    db_path: Path = typer.Option(DEFAULT_DB, "--db"),
+    replace: bool = typer.Option(True, "--replace/--append", help="Replace existing keywords (default) vs append."),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Print what would be written, change nothing."),
+):
+    """Write per-video person keywords into each .mov via exiftool.
+
+    Premiere reads these as the Keywords column. DaVinci Resolve surfaces
+    them in the Media Pool. After running this, an editor can search by
+    person name across the whole library.
+    """
+    conn = _db.connect(db_path)
+    mapping = _tag.videos_with_names(conn)
+    if not mapping:
+        console.print("[yellow]No videos with named people. Run `label-web` first.[/yellow]")
+        raise typer.Exit(0)
+
+    console.print(f"Writing keywords to [bold]{len(mapping)}[/bold] video(s)…")
+    table = Table("video", "names")
+    failed: list[tuple[str, str]] = []
+
+    with Progress(
+        TextColumn("[bold cyan]{task.description}"),
+        BarColumn(),
+        TextColumn("{task.completed}/{task.total}"),
+        TimeElapsedColumn(),
+        console=console,
+    ) as prog:
+        task = prog.add_task("tagging", total=len(mapping))
+        for path_str, names in mapping.items():
+            short = Path(path_str).name
+            table.add_row(short, ", ".join(names))
+            if not dry_run:
+                try:
+                    _tag.write_keywords(Path(path_str), names, replace=replace)
+                except _tag.ExiftoolMissing as e:
+                    console.print(f"\n[red]{e}[/red]")
+                    raise typer.Exit(2)
+                except Exception as e:
+                    failed.append((short, str(e)))
+            prog.update(task, advance=1)
+
+    console.print(table)
+    if dry_run:
+        console.print(f"[dim]Dry run. No files changed.[/dim]")
+    elif failed:
+        console.print(f"[red]{len(failed)} failure(s):[/red]")
+        for name, err in failed:
+            console.print(f"  [red]{name}[/red]  {err}")
+    else:
+        console.print(f"[bold green]Done.[/bold green] {len(mapping)} videos tagged.")
 
 
 @app.command()
