@@ -1,8 +1,9 @@
 import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 
-type State = "idle" | "working" | "done";
+type State = "idle" | "working" | "label" | "done";
+type SidecarEvent = { kind: "stdout" | "stderr"; line: string };
 
 const stage = document.getElementById("stage") as HTMLElement;
 const dropzone = document.getElementById("dropzone") as HTMLElement;
@@ -14,6 +15,8 @@ const progressBar = document.getElementById("progress-bar") as HTMLElement;
 const doneSub = document.getElementById("done-sub") as HTMLElement;
 const btnAgain = document.getElementById("btn-again") as HTMLButtonElement;
 
+const LABEL_PORT = 8765;
+
 function setState(s: State) {
   stage.setAttribute("data-state", s);
 }
@@ -22,9 +25,7 @@ async function loadVersion() {
   try {
     const v = await invoke<string>("app_version");
     versionEl.textContent = `v${v}`;
-  } catch {
-    /* keep default */
-  }
+  } catch {}
 }
 
 async function pickFolder() {
@@ -34,58 +35,129 @@ async function pickFolder() {
   }
 }
 
+function setProgress(pct: number) {
+  progressBar.style.width = `${Math.max(0, Math.min(100, pct))}%`;
+}
+
 async function runBatch(path: string) {
   setState("working");
   workingPath.textContent = path;
-  workingLabel.textContent = "Spotting";
-  workingDetail.textContent = "Reading frames…";
-  progressBar.style.width = "0%";
+  let totalVideos = 0;
+  let scannedVideos = 0;
+  let totalFaces = 0;
 
-  // v0.0.1: placeholder pipeline.
-  // Real face detection + clustering + tagging arrive in v0.0.2 once the
-  // Python sidecar is bundled into the .app via PyInstaller.
-  await invoke<{ path: string; status: string }>("start_scan", { path });
+  const unlisten: UnlistenFn = await listen<SidecarEvent>("sidecar://line", (e) => {
+    const line = e.payload.line;
 
-  await fakeProgress();
+    let m = line.match(/Found\s+(\d+)\s+video/);
+    if (m) {
+      totalVideos = parseInt(m[1], 10);
+      workingDetail.textContent = `Reading ${totalVideos} clips`;
+    }
 
-  setState("done");
-  doneSub.textContent = "Pipeline shell wired. Face detection lands in v0.0.2.";
-}
+    m = line.match(/\.mov.*?(\d+)\/(\d+)\s+frames\s+(\d+)\s+faces/);
+    if (m) {
+      scannedVideos = Math.min(totalVideos, scannedVideos + 1);
+      totalFaces += parseInt(m[3], 10);
+      if (totalVideos > 0) setProgress((scannedVideos / totalVideos) * 100);
+      workingDetail.textContent = `${scannedVideos}/${totalVideos} clips, ${totalFaces} faces`;
+    }
 
-async function fakeProgress() {
-  for (let i = 0; i <= 100; i += 4) {
-    progressBar.style.width = `${i}%`;
-    if (i === 40) workingDetail.textContent = "Detecting faces…";
-    if (i === 70) workingDetail.textContent = "Clustering…";
-    if (i === 92) workingDetail.textContent = "Writing keywords…";
-    await new Promise((r) => setTimeout(r, 60));
+    m = line.match(/Done\.\s+(\d+)\s+faces indexed/);
+    if (m) {
+      totalFaces = parseInt(m[1], 10);
+      setProgress(100);
+    }
+  });
+
+  try {
+    workingLabel.textContent = "Spotting";
+    workingDetail.textContent = "Reading frames…";
+    setProgress(2);
+    await invoke<number>("scan_folder", { path });
+
+    workingLabel.textContent = "Grouping faces";
+    workingDetail.textContent = "Clustering…";
+    setProgress(0);
+    await invoke<number>("cluster_faces");
+
+    workingLabel.textContent = "Naming people";
+    workingDetail.textContent = "Opening labeler…";
+    await invoke<number>("start_label_server", { port: LABEL_PORT });
+    mountLabelScreen();
+    setState("label");
+  } catch (err) {
+    workingLabel.textContent = "Something went wrong";
+    workingDetail.textContent = String(err);
+  } finally {
+    unlisten();
   }
 }
 
+function makeEl<K extends keyof HTMLElementTagNameMap>(
+  tag: K,
+  className?: string,
+): HTMLElementTagNameMap[K] {
+  const el = document.createElement(tag);
+  if (className) el.className = className;
+  return el;
+}
+
+function mountLabelScreen() {
+  if (document.querySelector(".screen--label")) return;
+
+  const screen = makeEl("div", "screen screen--label");
+  const wrap = makeEl("div", "label-wrap");
+
+  const frame = makeEl("iframe", "label-frame");
+  frame.src = `http://127.0.0.1:${LABEL_PORT}/`;
+  frame.title = "Spotted labeler";
+
+  const bar = makeEl("div", "label-bar");
+  const hint = makeEl("span", "label-hint");
+  hint.textContent = "Name each cluster, then:";
+  const tagBtn = makeEl("button", "btn");
+  tagBtn.id = "btn-tag";
+  tagBtn.textContent = "Tag & finish";
+  bar.append(hint, tagBtn);
+
+  wrap.append(frame, bar);
+  screen.appendChild(wrap);
+  stage.appendChild(screen);
+
+  tagBtn.addEventListener("click", runTagWrite);
+}
+
+async function runTagWrite() {
+  setState("working");
+  workingLabel.textContent = "Writing keywords";
+  workingDetail.textContent = "exiftool, per clip…";
+  setProgress(20);
+  try {
+    await invoke<number>("tag_videos");
+    setProgress(100);
+    setState("done");
+    doneSub.textContent = "Open the folder in Premiere or DaVinci — search by name.";
+  } catch (err) {
+    workingDetail.textContent = String(err);
+  }
+}
+
+btnAgain.addEventListener("click", () => {
+  setProgress(0);
+  setState("idle");
+});
+
 function wireDragDrop() {
   dropzone.addEventListener("click", pickFolder);
-
-  // Tauri 2 fires file-drop events at the window. The webview's own
-  // drag events are mostly suppressed by Tauri, so we listen on the
-  // global event bus for actual filesystem paths.
-  listen<{ paths: string[] }>("tauri://drag-enter", () => {
-    dropzone.classList.add("is-hot");
-  });
-  listen("tauri://drag-leave", () => {
-    dropzone.classList.remove("is-hot");
-  });
+  listen("tauri://drag-enter", () => dropzone.classList.add("is-hot"));
+  listen("tauri://drag-leave", () => dropzone.classList.remove("is-hot"));
   listen<{ paths: string[] }>("tauri://drag-drop", (e) => {
     dropzone.classList.remove("is-hot");
     const paths = e.payload?.paths ?? [];
     if (paths.length > 0) runBatch(paths[0]);
   });
 }
-
-btnAgain.addEventListener("click", () => setState("idle"));
-
-document.getElementById("btn-reveal")?.addEventListener("click", async () => {
-  // Stub for v0.0.1
-});
 
 window.addEventListener("DOMContentLoaded", () => {
   loadVersion();

@@ -68,12 +68,8 @@ esac
 
 DEST="$REPO/app/src-tauri/binaries"
 mkdir -p "$DEST"
-cp "dist/spotted-sidecar/spotted-sidecar" "$DEST/spotted-sidecar-$TARGET"
+cp "dist/spotted-sidecar" "$DEST/spotted-sidecar-$TARGET"
 chmod +x "$DEST/spotted-sidecar-$TARGET"
-
-# Also copy the support files PyInstaller scattered next to the binary.
-# (When Tauri's sidecar plugin spawns the binary, it works alongside these.)
-cp -R "dist/spotted-sidecar/." "$DEST/spotted-sidecar-${TARGET}-support/" 2>/dev/null || true
 
 echo
 echo "Built: $DEST/spotted-sidecar-$TARGET"

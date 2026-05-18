@@ -18,6 +18,9 @@ app/dist/
 app/src-tauri/target/
 app/src-tauri/gen/
 
+# Bundled sidecar binary (built by sidecar/build.sh; CI rebuilds per release)
+app/src-tauri/binaries/
+
 # Secrets — never commit
 .env
 .env.*

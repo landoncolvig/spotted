@@ -35,6 +35,7 @@
     "active": true,
     "targets": ["dmg", "app"],
     "createUpdaterArtifacts": true,
+    "externalBin": ["binaries/spotted-sidecar"],
     "category": "Productivity",
     "shortDescription": "Spot people in your video footage.",
     "longDescription": "Local face tagging for editors. Drop a folder of footage, name who's who, and Spotted writes XMP keywords into each clip so Premiere and DaVinci can search by person.",

@@ -27,6 +27,11 @@ jobs:
         with:
           targets: aarch64-apple-darwin,x86_64-apple-darwin
 
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
       - name: Cache cargo
         uses: actions/cache@v4
         with:
@@ -35,6 +40,26 @@ jobs:
             ~/.cargo/git
             app/src-tauri/target
           key: cargo-${{ runner.os }}-${{ hashFiles('app/src-tauri/Cargo.lock') }}
+
+      - name: Cache InsightFace model
+        uses: actions/cache@v4
+        with:
+          path: ~/.insightface
+          key: insightface-buffalo_l-v1
+
+      - name: Install exiftool
+        run: brew install exiftool
+
+      - name: Install Python deps
+        run: |
+          python3 -m venv .venv
+          .venv/bin/pip install --upgrade pip
+          .venv/bin/pip install -e . pyinstaller
+
+      - name: Build sidecar binary
+        run: |
+          cd sidecar
+          ./build.sh
 
       - name: Install JS deps
         working-directory: app
@@ -46,7 +71,6 @@ jobs:
           REF_NAME: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          # Strict semver gate — refuse anything weird in the tag.
           if ! [[ "$REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$ ]]; then
             echo "::error::Tag '$REF_NAME' is not a valid semver tag (vX.Y.Z[-suffix])"
             exit 1
@@ -54,12 +78,12 @@ jobs:
           VERSION="${REF_NAME#v}"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
-      - name: Build (universal)
+      - name: Build Tauri app (arm64)
         working-directory: app
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
-        run: npm run tauri build -- --target universal-apple-darwin
+        run: npm run tauri build -- --target aarch64-apple-darwin
 
       - name: Build latest.json
         env:
@@ -67,14 +91,11 @@ jobs:
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          SIG_PATH="app/src-tauri/target/universal-apple-darwin/release/bundle/macos/Spotted.app.tar.gz.sig"
+          SIG_PATH="app/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/Spotted.app.tar.gz.sig"
           SIG="$(cat "$SIG_PATH")"
           PUB_DATE="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
           NOTES="See https://github.com/${REPO}/releases/tag/v${VERSION}"
 
-          # Use jq so VERSION, SIG, REPO, NOTES, PUB_DATE are passed as
-          # arguments (not shell-interpolated into the template). Prevents
-          # any injection via tag name or commit values.
           jq -n \
             --arg version "$VERSION" \
             --arg notes "$NOTES" \
@@ -89,10 +110,6 @@ jobs:
                 "darwin-aarch64": {
                   signature: $sig,
                   url: ("https://github.com/" + $repo + "/releases/download/v" + $version + "/Spotted.app.tar.gz")
-                },
-                "darwin-x86_64": {
-                  signature: $sig,
-                  url: ("https://github.com/" + $repo + "/releases/download/v" + $version + "/Spotted.app.tar.gz")
                 }
               }
             }' > app/latest.json
@@ -105,7 +122,7 @@ jobs:
           name: Spotted ${{ steps.ver.outputs.version }}
           generate_release_notes: true
           files: |
-            app/src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg
-            app/src-tauri/target/universal-apple-darwin/release/bundle/macos/Spotted.app.tar.gz
-            app/src-tauri/target/universal-apple-darwin/release/bundle/macos/Spotted.app.tar.gz.sig
+            app/src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg
+            app/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/Spotted.app.tar.gz
+            app/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/Spotted.app.tar.gz.sig
             app/latest.json

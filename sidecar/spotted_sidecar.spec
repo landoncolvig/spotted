@@ -77,7 +77,8 @@ a = Analysis(
     runtime_hooks=[],
     excludes=[
         # Trim the bundle — these are huge and we don't need them.
-        "matplotlib",
+        # NOTE: matplotlib stays in. Something in the insightface/sklearn
+        # transitive graph imports it at runtime.
         "PySide6",
         "PyQt6",
         "PyQt5",
@@ -95,26 +96,19 @@ pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 exe = EXE(
     pyz,
     a.scripts,
+    a.binaries,
+    a.zipfiles,
+    a.datas,
     [],
-    exclude_binaries=True,
     name="spotted-sidecar",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
     upx=False,
+    runtime_tmpdir=None,
     console=True,  # CLI tool; Tauri captures stdout/stderr
     disable_windowed_traceback=False,
-    target_arch=None,  # Use host arch; build.sh handles cross-arch separately
+    target_arch=None,  # Host arch; CI builds universal by stitching arch binaries
     codesign_identity=None,
     entitlements_file=None,
-)
-
-coll = COLLECT(
-    exe,
-    a.binaries,
-    a.datas,
-    strip=False,
-    upx=False,
-    upx_exclude=[],
-    name="spotted-sidecar",
 )

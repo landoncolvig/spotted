@@ -87,9 +87,28 @@ body {
 }
 .stage[data-state="idle"]    .screen--idle,
 .stage[data-state="working"] .screen--working,
+.stage[data-state="label"]   .screen--label,
 .stage[data-state="done"]    .screen--done {
   opacity: 1; pointer-events: auto; transform: translateY(0);
 }
+
+/* LABEL */
+.screen--label { padding: 0; }
+.label-wrap {
+  width: 100%; height: 100%;
+  display: grid; grid-template-rows: 1fr auto;
+}
+.label-frame {
+  width: 100%; height: 100%;
+  border: 0; background: var(--bg);
+}
+.label-bar {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 10px 20px;
+  border-top: 1px solid var(--border);
+  background: var(--surface);
+}
+.label-hint { font-size: 12px; color: var(--text-dim); }
 
 /* DROPZONE */
 .dropzone {

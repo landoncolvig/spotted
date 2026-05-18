@@ -10,6 +10,17 @@
     "core:event:default",
     "opener:default",
     "dialog:default",
-    "updater:default"
+    "updater:default",
+    "shell:default",
+    {
+      "identifier": "shell:allow-execute",
+      "allow": [
+        {
+          "name": "binaries/spotted-sidecar",
+          "sidecar": true,
+          "args": true
+        }
+      ]
+    }
   ]
 }
