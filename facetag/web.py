@@ -91,38 +91,127 @@ def serve(db_path: Path, thumb_dir: Path, port: int = 8765, open_browser: bool =
 _PAGE = r"""<!doctype html>
 <html lang="en"><head>
 <meta charset="utf-8">
-<title>facetag — label clusters</title>
+<title>Spotted — name the people</title>
 <style>
-  :root { color-scheme: light dark; }
+  :root {
+    --bg: #0E0F12;
+    --surface: #1C1D22;
+    --surface-2: #24262C;
+    --border: #2B2C32;
+    --border-strong: #3A3C44;
+    --primary: #E0833B;
+    --primary-hover: #EA9450;
+    --primary-press: #C46327;
+    --accent: #5BB6E0;
+    --text: #F5F5F0;
+    --text-dim: #9B9890;
+    --text-faint: #6E6B66;
+    --success: #6FCF97;
+    --danger: #E06A6A;
+    color-scheme: dark;
+  }
   * { box-sizing: border-box; }
-  body { font-family: -apple-system, system-ui, sans-serif; margin: 0; background: #111; color: #eee; }
-  header { position: sticky; top: 0; z-index: 10; background: #111; padding: 14px 20px; border-bottom: 1px solid #333; display: flex; align-items: center; gap: 16px; }
-  header h1 { font-size: 16px; margin: 0; font-weight: 600; }
-  header .meta { color: #888; font-size: 13px; }
+  body {
+    font-family: -apple-system, "SF Pro Text", system-ui, sans-serif;
+    margin: 0; background: var(--bg); color: var(--text);
+    -webkit-font-smoothing: antialiased;
+  }
+  header {
+    position: sticky; top: 0; z-index: 10;
+    background: var(--bg); padding: 14px 20px;
+    border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; gap: 16px;
+  }
+  header h1 {
+    font-family: -apple-system, "SF Pro Display", system-ui, sans-serif;
+    font-size: 15px; margin: 0; font-weight: 600;
+    letter-spacing: -0.01em; color: var(--text);
+  }
+  header .meta { color: var(--text-faint); font-size: 12px; }
   header .actions { margin-left: auto; }
-  button { background: #2563eb; color: white; border: 0; padding: 9px 18px; border-radius: 6px; font-size: 14px; cursor: pointer; font-weight: 600; }
-  button:hover { background: #1d4ed8; }
-  button:disabled { background: #444; cursor: not-allowed; }
-  #toast { position: fixed; bottom: 20px; right: 20px; background: #16a34a; color: white; padding: 10px 16px; border-radius: 6px; opacity: 0; transition: opacity .2s; pointer-events: none; }
+  button {
+    font-family: inherit;
+    background: var(--primary); color: #1A0F06;
+    border: 1px solid transparent;
+    padding: 8px 16px; border-radius: 10px;
+    font-size: 13px; font-weight: 500; cursor: pointer;
+    transition: background .15s ease, transform .1s ease;
+  }
+  button:hover { background: var(--primary-hover); }
+  button:active { background: var(--primary-press); transform: translateY(1px); }
+  button:disabled { background: var(--surface-2); color: var(--text-faint); cursor: not-allowed; }
+  #toast {
+    position: fixed; bottom: 20px; right: 20px;
+    background: var(--success); color: #0E1A12;
+    padding: 9px 14px; border-radius: 10px;
+    font-size: 13px; font-weight: 500;
+    opacity: 0; transition: opacity .2s;
+    pointer-events: none;
+  }
   #toast.show { opacity: 1; }
-  #toast.err { background: #dc2626; }
-  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 14px; padding: 18px; }
-  .card { background: #1c1c1c; border: 1px solid #2a2a2a; border-radius: 8px; padding: 10px; display: flex; flex-direction: column; gap: 8px; }
-  .card .head { display: flex; justify-content: space-between; font-size: 12px; color: #888; }
-  .card .cid { font-weight: 600; color: #ccc; }
-  .card img { width: 100%; aspect-ratio: 1; object-fit: cover; border-radius: 4px; background: #000; }
-  .card input { background: #0c0c0c; border: 1px solid #333; color: #eee; padding: 8px 10px; border-radius: 4px; font-size: 14px; }
-  .card input:focus { outline: none; border-color: #2563eb; }
-  .hint { color: #888; font-size: 11px; }
-  .filter { background: #1c1c1c; border: 1px solid #333; color: #eee; padding: 7px 10px; border-radius: 6px; font-size: 13px; width: 200px; }
-  .filter:focus { outline: none; border-color: #2563eb; }
-  kbd { background: #2a2a2a; border: 1px solid #444; border-radius: 3px; padding: 1px 5px; font-size: 11px; }
+  #toast.err { background: var(--danger); color: #1A0808; }
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+    gap: 14px; padding: 18px;
+  }
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px; padding: 10px;
+    display: flex; flex-direction: column; gap: 8px;
+    transition: border-color .15s ease, background .15s ease;
+  }
+  .card:focus-within {
+    border-color: var(--primary);
+    background: var(--surface-2);
+  }
+  .card .head {
+    display: flex; justify-content: space-between;
+    font-size: 11px; color: var(--text-faint);
+    font-variant-numeric: tabular-nums;
+  }
+  .card .cid { font-weight: 500; color: var(--text-dim); }
+  .card img {
+    width: 100%; aspect-ratio: 1;
+    object-fit: cover; border-radius: 8px;
+    background: #000;
+  }
+  .card input {
+    font-family: inherit;
+    background: var(--bg);
+    border: 1px solid var(--border-strong);
+    color: var(--text);
+    padding: 8px 10px; border-radius: 8px;
+    font-size: 13px;
+    transition: border-color .15s ease;
+  }
+  .card input::placeholder { color: var(--text-faint); }
+  .card input:focus { outline: none; border-color: var(--primary); }
+  .hint { color: var(--text-faint); font-size: 11px; }
+  .filter {
+    font-family: inherit;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 7px 10px; border-radius: 8px;
+    font-size: 12px; width: 220px;
+    transition: border-color .15s ease;
+  }
+  .filter::placeholder { color: var(--text-faint); }
+  .filter:focus { outline: none; border-color: var(--primary); }
+  kbd {
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    background: var(--surface-2); border: 1px solid var(--border-strong);
+    border-radius: 4px; padding: 1px 5px;
+    font-size: 10px; color: var(--text-dim);
+  }
 </style>
 </head><body>
 <header>
-  <h1>facetag</h1>
-  <span class="meta">__COUNT__ clusters &middot; <kbd>Tab</kbd> to next, <kbd>⌘S</kbd> to save</span>
-  <input class="filter" id="filter" placeholder="filter by cluster id or name…" autocomplete="off">
+  <h1>Name the people</h1>
+  <span class="meta">__COUNT__ clusters &middot; <kbd>Tab</kbd> to advance, <kbd>⌘S</kbd> to save</span>
+  <input class="filter" id="filter" placeholder="filter…" autocomplete="off">
   <div class="actions">
     <button id="save">Save All</button>
   </div>

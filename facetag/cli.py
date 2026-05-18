@@ -1,6 +1,8 @@
 """CLI entry point. `facetag --help` to explore."""
 from __future__ import annotations
 
+import json
+import sys
 from pathlib import Path
 
 import typer
@@ -24,6 +26,19 @@ DEFAULT_DB = Path.home() / ".facetag" / "index.db"
 DEFAULT_LABEL_DIR = Path.home() / ".facetag" / "label_thumbs"
 
 
+def _emit(event: str, **fields) -> None:
+    """Print a structured progress event for the Spotted shell to consume.
+
+    Goes to stdout on its own line, prefixed so the parser can pick it out
+    of rich's interleaved progress bars. Best-effort — never raises.
+    """
+    try:
+        payload = json.dumps({"event": event, **fields}, separators=(",", ":"))
+        print(f"__SPOTTED__ {payload}", flush=True)
+    except Exception:
+        pass
+
+
 @app.command()
 def scan(
     path: Path = typer.Argument(..., exists=True, help="Video file or directory to scan."),
@@ -42,19 +57,23 @@ def scan(
     detector = _detect.Detector(min_score=min_score)
 
     console.print(f"Found [bold]{len(videos)}[/bold] video(s)")
+    _emit("scan-start", total=len(videos))
     total_faces = 0
     total_skipped = 0
 
-    for v in videos:
+    for index, v in enumerate(videos, start=1):
         path_str = str(v.resolve())
         if not rescan and _db.is_scanned(conn, path_str):
             total_skipped += 1
+            _emit("video-skip", name=v.name, index=index, total=len(videos))
             continue
         try:
             duration, _, _ = _extract.probe(v)
         except Exception as e:
             console.print(f"[yellow]Skipping {v.name}: probe failed ({e})[/yellow]")
+            _emit("video-skip", name=v.name, index=index, total=len(videos), reason="probe-failed")
             continue
+        _emit("video-start", name=v.name, index=index, total=len(videos), duration_sec=duration)
 
         video_id = _db.add_video(conn, path_str, duration)
         if rescan:
@@ -85,7 +104,9 @@ def scan(
             if rows:
                 _db.add_faces_bulk(conn, video_id, rows)
             total_faces += face_count
+        _emit("video-done", name=v.name, index=index, total=len(videos), faces=face_count)
 
+    _emit("scan-complete", total_faces=total_faces, total_skipped=total_skipped, total_videos=len(videos))
     console.print(f"\n[bold green]Done.[/bold green] {total_faces} faces indexed, {total_skipped} videos skipped (already scanned).")
 
 
@@ -102,12 +123,14 @@ def cluster(
         console.print("[red]No faces in index. Run `facetag scan` first.[/red]")
         raise typer.Exit(1)
 
+    _emit("cluster-start", faces=len(face_ids))
     console.print(f"Clustering {len(face_ids)} faces…")
     labels = _cluster.cluster_embeddings(embs, min_cluster_size=min_size, epsilon=epsilon)
     assignments = {fid: int(lbl) for fid, lbl in zip(face_ids, labels)}
     _db.set_clusters(conn, assignments)
 
     summary = _db.cluster_summary(conn)
+    _emit("cluster-complete", clusters=len(summary))
     console.print(f"[bold green]{len(summary)}[/bold green] clusters formed.")
     table = Table("cluster", "faces", "name")
     for cid, n, name in summary[:20]:
@@ -199,6 +222,7 @@ def tag_write(
         console.print("[yellow]No videos with named people. Run `label-web` first.[/yellow]")
         raise typer.Exit(0)
 
+    _emit("tag-start", total=len(mapping))
     console.print(f"Writing keywords to [bold]{len(mapping)}[/bold] video(s)…")
     table = Table("video", "names")
     failed: list[tuple[str, str]] = []
@@ -211,17 +235,20 @@ def tag_write(
         console=console,
     ) as prog:
         task = prog.add_task("tagging", total=len(mapping))
-        for path_str, names in mapping.items():
+        for idx, (path_str, names) in enumerate(mapping.items(), start=1):
             short = Path(path_str).name
             table.add_row(short, ", ".join(names))
+            _emit("tag-video", name=short, names=names, index=idx, total=len(mapping))
             if not dry_run:
                 try:
                     _tag.write_keywords(Path(path_str), names, replace=replace)
                 except _tag.ExiftoolMissing as e:
                     console.print(f"\n[red]{e}[/red]")
+                    _emit("error", stage="tag-write", message=str(e))
                     raise typer.Exit(2)
                 except Exception as e:
                     failed.append((short, str(e)))
+                    _emit("tag-error", name=short, message=str(e))
             prog.update(task, advance=1)
 
     console.print(table)
@@ -232,6 +259,7 @@ def tag_write(
         for name, err in failed:
             console.print(f"  [red]{name}[/red]  {err}")
     else:
+        _emit("tag-complete", total=len(mapping))
         console.print(f"[bold green]Done.[/bold green] {len(mapping)} videos tagged.")
 
 
@@ -239,7 +267,7 @@ def tag_write(
 def status(
     db_path: Path = typer.Option(DEFAULT_DB, "--db"),
 ):
-    """Show index summary."""
+    """Show index summary (videos, faces, clusters, per-person clip counts)."""
     conn = _db.connect(db_path)
     n_videos = conn.execute("SELECT COUNT(*) FROM videos").fetchone()[0]
     n_faces = conn.execute("SELECT COUNT(*) FROM faces").fetchone()[0]
@@ -247,14 +275,40 @@ def status(
         "SELECT COUNT(DISTINCT cluster_id) FROM faces WHERE cluster_id IS NOT NULL AND cluster_id >= 0"
     ).fetchone()[0]
     n_named = conn.execute("SELECT COUNT(*) FROM people").fetchone()[0]
+
+    # Per-person counts: how many distinct videos each named person appears in.
+    per_person_rows = conn.execute(
+        "SELECT p.name, "
+        "       COUNT(DISTINCT f.video_id) AS clips, "
+        "       COUNT(f.id) AS faces "
+        "FROM people p "
+        "JOIN faces f ON f.cluster_id = p.cluster_id "
+        "WHERE p.name IS NOT NULL AND p.name != '' "
+        "GROUP BY p.name "
+        "ORDER BY clips DESC, p.name ASC"
+    ).fetchall()
+    people = [{"name": n, "clips": c, "faces": fc} for n, c, fc in per_person_rows]
+
     table = Table("metric", "value")
     table.add_row("videos", str(n_videos))
     table.add_row("faces", str(n_faces))
     table.add_row("clusters", str(n_clusters))
     table.add_row("named people", str(n_named))
     console.print(table)
-    if n_named:
-        console.print("[bold]Named people:[/bold] " + ", ".join(_db.known_names(conn)))
+    if people:
+        pt = Table("person", "clips", "faces")
+        for p in people:
+            pt.add_row(p["name"], str(p["clips"]), str(p["faces"]))
+        console.print(pt)
+
+    _emit(
+        "library-stats",
+        videos=n_videos,
+        faces=n_faces,
+        clusters=n_clusters,
+        named=n_named,
+        people=people,
+    )
 
 
 if __name__ == "__main__":

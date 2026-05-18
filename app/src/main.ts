@@ -3,7 +3,21 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 
 type State = "idle" | "working" | "label" | "done";
-type SidecarEvent = { kind: "stdout" | "stderr"; line: string };
+type SidecarLine = { kind: "stdout" | "stderr"; line: string };
+type SpottedEvent =
+  | { event: "scan-start"; total: number }
+  | { event: "video-start"; name: string; index: number; total: number; duration_sec?: number }
+  | { event: "video-done"; name: string; index: number; total: number; faces: number }
+  | { event: "video-skip"; name: string; index: number; total: number; reason?: string }
+  | { event: "scan-complete"; total_faces: number; total_skipped: number; total_videos: number }
+  | { event: "cluster-start"; faces: number }
+  | { event: "cluster-complete"; clusters: number }
+  | { event: "tag-start"; total: number }
+  | { event: "tag-video"; name: string; names: string[]; index: number; total: number }
+  | { event: "tag-error"; name: string; message: string }
+  | { event: "tag-complete"; total: number }
+  | { event: "library-stats"; videos: number; faces: number; clusters: number; named: number; people: { name: string; clips: number; faces: number }[] }
+  | { event: "error"; stage: string; message: string };
 
 const stage = document.getElementById("stage") as HTMLElement;
 const dropzone = document.getElementById("dropzone") as HTMLElement;
@@ -14,8 +28,10 @@ const workingDetail = document.getElementById("working-detail") as HTMLElement;
 const progressBar = document.getElementById("progress-bar") as HTMLElement;
 const doneSub = document.getElementById("done-sub") as HTMLElement;
 const btnAgain = document.getElementById("btn-again") as HTMLButtonElement;
+const btnReveal = document.getElementById("btn-reveal") as HTMLButtonElement;
 
 const LABEL_PORT = 8765;
+let currentPath: string | null = null;
 
 function setState(s: State) {
   stage.setAttribute("data-state", s);
@@ -39,59 +55,141 @@ function setProgress(pct: number) {
   progressBar.style.width = `${Math.max(0, Math.min(100, pct))}%`;
 }
 
+function parseSpotted(line: string): SpottedEvent | null {
+  if (!line.startsWith("__SPOTTED__ ")) return null;
+  try {
+    return JSON.parse(line.slice("__SPOTTED__ ".length)) as SpottedEvent;
+  } catch {
+    return null;
+  }
+}
+
+let lastStats: SpottedEvent | null = null;
+
+async function fetchLibraryStats(): Promise<SpottedEvent | null> {
+  // Calls `facetag status`; the structured library-stats event is captured
+  // by the global sidecar://line listener and stored in lastStats.
+  lastStats = null;
+  try {
+    await invoke<string>("fetch_status");
+  } catch {}
+  // Give the event a tick to land.
+  await new Promise((r) => setTimeout(r, 100));
+  return lastStats;
+}
+
+// Cross-phase state for the current batch. Reset at runBatch entry, read by
+// the global sidecar event handler.
+const batch = {
+  scanTotal: 0,
+  scanDone: 0,
+  scanFaces: 0,
+  tagTotal: 0,
+};
+
+function handleSpottedEvent(evt: SpottedEvent) {
+  switch (evt.event) {
+    case "scan-start":
+      batch.scanTotal = evt.total;
+      batch.scanDone = 0;
+      batch.scanFaces = 0;
+      workingLabel.textContent = "Spotting";
+      workingDetail.textContent = `Reading ${evt.total} clips`;
+      setProgress(2);
+      break;
+    case "video-start":
+      workingDetail.textContent = `${evt.name} — clip ${evt.index} of ${evt.total}`;
+      break;
+    case "video-done":
+      batch.scanDone = evt.index;
+      batch.scanFaces += evt.faces;
+      if (batch.scanTotal > 0) {
+        setProgress((batch.scanDone / batch.scanTotal) * 80);
+      }
+      workingDetail.textContent = `${batch.scanDone}/${batch.scanTotal} clips · ${batch.scanFaces} faces · ${evt.name}`;
+      break;
+    case "scan-complete":
+      batch.scanFaces = evt.total_faces;
+      workingDetail.textContent = `${evt.total_videos} clips · ${evt.total_faces} faces`;
+      setProgress(82);
+      break;
+    case "cluster-start":
+      workingLabel.textContent = "Grouping faces";
+      workingDetail.textContent = `Clustering ${evt.faces} faces…`;
+      setProgress(85);
+      break;
+    case "cluster-complete":
+      workingDetail.textContent = `${evt.clusters} people candidates`;
+      setProgress(92);
+      break;
+    case "tag-start":
+      batch.tagTotal = evt.total;
+      workingLabel.textContent = "Writing keywords";
+      workingDetail.textContent = `Tagging ${evt.total} clips…`;
+      setProgress(0);
+      break;
+    case "tag-video":
+      workingDetail.textContent = `${evt.name} — ${evt.names.join(", ")}`;
+      if (batch.tagTotal > 0) setProgress((evt.index / batch.tagTotal) * 100);
+      break;
+    case "tag-complete":
+      setProgress(100);
+      break;
+    case "library-stats":
+      lastStats = evt;
+      break;
+    case "error":
+    case "tag-error":
+      console.warn(evt);
+      break;
+  }
+}
+
+let sidecarUnlisten: UnlistenFn | null = null;
+async function ensureSidecarListener() {
+  if (sidecarUnlisten) return;
+  sidecarUnlisten = await listen<SidecarLine>("sidecar://line", (e) => {
+    const evt = parseSpotted(e.payload.line);
+    if (evt) handleSpottedEvent(evt);
+  });
+}
+
 async function runBatch(path: string) {
+  currentPath = path;
   setState("working");
   workingPath.textContent = path;
-  let totalVideos = 0;
-  let scannedVideos = 0;
-  let totalFaces = 0;
+  setProgress(0);
+  workingLabel.textContent = "Spotting";
+  workingDetail.textContent = "Looking for footage…";
 
-  const unlisten: UnlistenFn = await listen<SidecarEvent>("sidecar://line", (e) => {
-    const line = e.payload.line;
+  batch.scanTotal = 0;
+  batch.scanDone = 0;
+  batch.scanFaces = 0;
+  batch.tagTotal = 0;
 
-    let m = line.match(/Found\s+(\d+)\s+video/);
-    if (m) {
-      totalVideos = parseInt(m[1], 10);
-      workingDetail.textContent = `Reading ${totalVideos} clips`;
-    }
-
-    m = line.match(/\.mov.*?(\d+)\/(\d+)\s+frames\s+(\d+)\s+faces/);
-    if (m) {
-      scannedVideos = Math.min(totalVideos, scannedVideos + 1);
-      totalFaces += parseInt(m[3], 10);
-      if (totalVideos > 0) setProgress((scannedVideos / totalVideos) * 100);
-      workingDetail.textContent = `${scannedVideos}/${totalVideos} clips, ${totalFaces} faces`;
-    }
-
-    m = line.match(/Done\.\s+(\d+)\s+faces indexed/);
-    if (m) {
-      totalFaces = parseInt(m[1], 10);
-      setProgress(100);
-    }
-  });
+  await ensureSidecarListener();
 
   try {
-    workingLabel.textContent = "Spotting";
-    workingDetail.textContent = "Reading frames…";
-    setProgress(2);
     await invoke<number>("scan_folder", { path });
-
-    workingLabel.textContent = "Grouping faces";
-    workingDetail.textContent = "Clustering…";
-    setProgress(0);
     await invoke<number>("cluster_faces");
-
     workingLabel.textContent = "Naming people";
     workingDetail.textContent = "Opening labeler…";
     await invoke<number>("start_label_server", { port: LABEL_PORT });
     mountLabelScreen();
     setState("label");
   } catch (err) {
-    workingLabel.textContent = "Something went wrong";
-    workingDetail.textContent = String(err);
-  } finally {
-    unlisten();
+    showError(String(err));
   }
+}
+
+function showError(message: string) {
+  setState("done");
+  doneSub.textContent = message;
+  doneSub.classList.add("done__sub--error");
+}
+
+function clearError() {
+  doneSub.classList.remove("done__sub--error");
 }
 
 function makeEl<K extends keyof HTMLElementTagNameMap>(
@@ -130,36 +228,117 @@ function mountLabelScreen() {
 
 async function runTagWrite() {
   setState("working");
+  setProgress(50);
   workingLabel.textContent = "Writing keywords";
-  workingDetail.textContent = "exiftool, per clip…";
-  setProgress(20);
+  workingDetail.textContent = "Running exiftool, per clip…";
   try {
     await invoke<number>("tag_videos");
     setProgress(100);
+    const stats = await fetchLibraryStats();
     setState("done");
-    doneSub.textContent = "Open the folder in Premiere or DaVinci — search by name.";
+    renderDone(stats);
   } catch (err) {
-    workingDetail.textContent = String(err);
+    showError(String(err));
   }
+}
+
+function renderDone(stats: SpottedEvent | null) {
+  clearError();
+  if (!stats || stats.event !== "library-stats" || stats.people.length === 0) {
+    doneSub.textContent = "Open the folder in Premiere or DaVinci — search by name.";
+    return;
+  }
+  const top = stats.people.slice(0, 6);
+  const breakdown = top.map((p) => `${p.name} (${p.clips})`).join(" · ");
+  const more = stats.people.length > top.length ? ` · +${stats.people.length - top.length} more` : "";
+  doneSub.textContent = `Tagged ${stats.people.length} people across ${stats.videos} clips — ${breakdown}${more}`;
 }
 
 btnAgain.addEventListener("click", () => {
   setProgress(0);
+  clearError();
   setState("idle");
 });
 
+btnReveal.addEventListener("click", async () => {
+  if (currentPath) {
+    try {
+      await invoke("reveal_in_finder", { path: currentPath });
+    } catch (e) {
+      console.warn("reveal failed:", e);
+    }
+  }
+});
+
+function isBusy(): boolean {
+  const s = stage.getAttribute("data-state");
+  return s === "working" || s === "label";
+}
+
 function wireDragDrop() {
-  dropzone.addEventListener("click", pickFolder);
-  listen("tauri://drag-enter", () => dropzone.classList.add("is-hot"));
+  dropzone.addEventListener("click", () => {
+    if (isBusy()) {
+      flashToast("Finish or cancel the current batch first.");
+      return;
+    }
+    pickFolder();
+  });
+  listen("tauri://drag-enter", () => {
+    if (!isBusy()) dropzone.classList.add("is-hot");
+  });
   listen("tauri://drag-leave", () => dropzone.classList.remove("is-hot"));
   listen<{ paths: string[] }>("tauri://drag-drop", (e) => {
     dropzone.classList.remove("is-hot");
+    if (isBusy()) {
+      flashToast("Finish or cancel the current batch first.");
+      return;
+    }
     const paths = e.payload?.paths ?? [];
     if (paths.length > 0) runBatch(paths[0]);
   });
 }
 
+function wireMenuEvents() {
+  listen("menu://open-folder", () => {
+    if (isBusy()) {
+      flashToast("Finish or cancel the current batch first.");
+      return;
+    }
+    pickFolder();
+  });
+  listen("menu://check-updates", async () => {
+    try {
+      const newVersion = await invoke<string | null>("check_for_updates");
+      if (!newVersion) {
+        flashToast(`You're on the latest version.`);
+      } else {
+        flashToast(`Update to v${newVersion} is available — restart to install.`);
+      }
+    } catch (e) {
+      flashToast(`Update check failed: ${e}`, true);
+    }
+  });
+}
+
+let toastTimer: number | null = null;
+function flashToast(msg: string, isError = false) {
+  let toast = document.getElementById("toast");
+  if (!toast) {
+    toast = makeEl("div");
+    toast.id = "toast";
+    document.body.appendChild(toast);
+  }
+  toast.textContent = msg;
+  toast.className = "toast" + (isError ? " toast--err" : "");
+  toast.classList.add("toast--show");
+  if (toastTimer !== null) window.clearTimeout(toastTimer);
+  toastTimer = window.setTimeout(() => {
+    toast!.classList.remove("toast--show");
+  }, 2400);
+}
+
 window.addEventListener("DOMContentLoaded", () => {
   loadVersion();
   wireDragDrop();
+  wireMenuEvents();
 });
