@@ -348,6 +348,23 @@ def tag_write(
         for name, err in failed:
             console.print(f"  [red]{name}[/red]  {err}")
     else:
+        # Verify on a sample clip so the UI can show concrete proof of
+        # what landed in each metadata namespace.
+        if mapping:
+            sample_path_str = next(iter(mapping.keys()))
+            sample_path = Path(sample_path_str)
+            try:
+                kw = _tag.read_keywords(sample_path)
+                comment = _finder.read_finder_comment(sample_path) or ""
+                _emit(
+                    "tag-verified",
+                    file=sample_path.name,
+                    xmp=kw.get("xmp", []),
+                    keys=kw.get("keys", []),
+                    comment=comment,
+                )
+            except Exception as e:
+                _emit("tag-verify-error", message=str(e))
         _emit("tag-complete", total=len(mapping))
         console.print(f"[bold green]Done.[/bold green] {len(mapping)} videos tagged.")
 

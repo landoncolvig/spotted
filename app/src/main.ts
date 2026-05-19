@@ -25,6 +25,8 @@ type SpottedEvent =
   | { event: "markers-video"; name: string; count: number; index: number; total: number }
   | { event: "markers-error"; name: string; message: string }
   | { event: "markers-complete"; total: number }
+  | { event: "tag-verified"; file: string; xmp: string[]; keys: string[]; comment: string }
+  | { event: "tag-verify-error"; message: string }
   | { event: "library-stats"; videos: number; faces: number; clusters: number; named: number; people: { name: string; cluster_id?: number; clips: number; faces: number }[] }
   | { event: "library-person"; name: string; clips: { path: string; name: string; times: number[] }[] }
   | { event: "library-detail-complete" }
@@ -212,6 +214,7 @@ function parseSpotted(line: string): SpottedEvent | null {
 }
 
 let lastStats: SpottedEvent | null = null;
+let lastVerification: Extract<SpottedEvent, { event: "tag-verified" }> | null = null;
 
 async function fetchLibraryStats(): Promise<SpottedEvent | null> {
   // Calls `facetag status`; the structured library-stats event is captured
@@ -301,6 +304,9 @@ function handleSpottedEvent(evt: SpottedEvent) {
     case "library-stats":
       lastStats = evt;
       handleLibraryEvent(evt);
+      break;
+    case "tag-verified":
+      lastVerification = evt;
       break;
     case "library-person":
       handleLibraryEvent(evt);
@@ -476,12 +482,68 @@ function renderDone(stats: SpottedEvent | null) {
   clearError();
   if (!stats || stats.event !== "library-stats" || stats.people.length === 0) {
     doneSub.textContent = "Open the folder in Premiere or DaVinci — search by name.";
-    return;
+  } else {
+    const top = stats.people.slice(0, 6);
+    const breakdown = top.map((p) => `${p.name} (${p.clips})`).join(" · ");
+    const more = stats.people.length > top.length ? ` · +${stats.people.length - top.length} more` : "";
+    doneSub.textContent = `Tagged ${stats.people.length} people across ${stats.videos} clips — ${breakdown}${more}`;
   }
-  const top = stats.people.slice(0, 6);
-  const breakdown = top.map((p) => `${p.name} (${p.clips})`).join(" · ");
-  const more = stats.people.length > top.length ? ` · +${stats.people.length - top.length} more` : "";
-  doneSub.textContent = `Tagged ${stats.people.length} people across ${stats.videos} clips — ${breakdown}${more}`;
+  renderVerification();
+}
+
+function renderVerification() {
+  let panel = document.getElementById("done-verify");
+  if (!panel) {
+    panel = document.createElement("div");
+    panel.id = "done-verify";
+    panel.className = "done-verify";
+    // Insert after doneSub, before the actions
+    doneSub.parentElement?.insertBefore(panel, doneSub.nextSibling);
+  }
+  panel.replaceChildren();
+
+  if (!lastVerification) return;
+  const v = lastVerification;
+
+  const header = document.createElement("div");
+  header.className = "done-verify__header";
+  header.textContent = `Verified on ${v.file}`;
+  panel.appendChild(header);
+
+  const rows: Array<{ label: string; values: string[]; help: string }> = [
+    {
+      label: "Keys (DaVinci, Finder)",
+      values: v.keys,
+      help: "Read by DaVinci Resolve's Keywords column and macOS Spotlight search.",
+    },
+    {
+      label: "XMP (Premiere)",
+      values: v.xmp,
+      help: "Read by Adobe Premiere Pro's Keywords column.",
+    },
+    {
+      label: "Spotlight Comment",
+      values: v.comment ? [v.comment] : [],
+      help: "Shown in Get Info → Comments. iCloud-synced files may strip this; Keys above keeps search working anyway.",
+    },
+  ];
+
+  for (const row of rows) {
+    const div = document.createElement("div");
+    div.className = "done-verify__row " + (row.values.length > 0 ? "is-ok" : "is-empty");
+    const dot = document.createElement("span");
+    dot.className = "done-verify__dot";
+    dot.textContent = row.values.length > 0 ? "✓" : "⚠";
+    const label = document.createElement("span");
+    label.className = "done-verify__label";
+    label.textContent = row.label;
+    const value = document.createElement("span");
+    value.className = "done-verify__value";
+    value.textContent = row.values.length > 0 ? row.values.join(", ") : "empty";
+    value.title = row.help;
+    div.append(dot, label, value);
+    panel.appendChild(div);
+  }
 }
 
 btnAgain.addEventListener("click", () => {
