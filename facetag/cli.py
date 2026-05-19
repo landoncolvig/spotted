@@ -219,6 +219,29 @@ def cut(
     console.print(f"[bold green]Done.[/bold green] {output}")
 
 
+@app.command()
+def merge(
+    db_path: Path = typer.Option(DEFAULT_DB, "--db"),
+):
+    """Manually consolidate clusters sharing a name.
+
+    Usually you don't need to run this — `label-web` auto-merges on Save.
+    But if you renamed clusters via the SQL DB directly or imported
+    labels from elsewhere, this CLI command does the same merge.
+    """
+    conn = _db.connect(db_path)
+    merged = _db.merge_clusters_by_name(conn)
+    if not merged:
+        console.print("[yellow]Nothing to merge.[/yellow]")
+        return
+    total = 0
+    for name, cids in merged.items():
+        n = len(cids) - 1
+        total += n
+        console.print(f"  {name}: merged {n} extra cluster(s) into cluster {cids[0]}")
+    console.print(f"[bold green]Done.[/bold green] Merged {total} duplicate cluster(s).")
+
+
 @app.command("tag-write")
 def tag_write(
     db_path: Path = typer.Option(DEFAULT_DB, "--db"),

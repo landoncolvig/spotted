@@ -32,6 +32,10 @@ CREATE TABLE IF NOT EXISTS people (
     name TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_people_name ON people(name);
+
+CREATE TABLE IF NOT EXISTS hidden_clusters (
+    cluster_id INTEGER PRIMARY KEY
+);
 """
 
 
@@ -49,6 +53,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
     cols = {row[1] for row in conn.execute("PRAGMA table_info(videos)").fetchall()}
     if "batch_tags" not in cols:
         conn.execute("ALTER TABLE videos ADD COLUMN batch_tags TEXT")
+    # hidden_clusters table is created by SCHEMA's IF NOT EXISTS — no migration needed.
     conn.commit()
 
 
@@ -131,15 +136,22 @@ def set_clusters(conn: sqlite3.Connection, assignments: dict[int, int]) -> None:
     conn.commit()
 
 
-def cluster_summary(conn: sqlite3.Connection) -> list[tuple[int, int, str | None]]:
-    """Return (cluster_id, face_count, name?) for clusters with cluster_id IS NOT NULL, sorted by size desc."""
+def cluster_summary(conn: sqlite3.Connection, include_hidden: bool = False) -> list[tuple[int, int, str | None]]:
+    """Return (cluster_id, face_count, name?) for clusters with cluster_id IS NOT NULL, sorted by size desc.
+
+    By default skips clusters the user has hidden via the labeler "X" button.
+    """
     rows = conn.execute(
         "SELECT f.cluster_id, COUNT(*) AS n, p.name "
         "FROM faces f LEFT JOIN people p ON p.cluster_id = f.cluster_id "
         "WHERE f.cluster_id IS NOT NULL AND f.cluster_id >= 0 "
         "GROUP BY f.cluster_id ORDER BY n DESC"
     ).fetchall()
-    return [(r[0], r[1], r[2]) for r in rows]
+    out = [(r[0], r[1], r[2]) for r in rows]
+    if include_hidden:
+        return out
+    hidden = hidden_cluster_ids(conn)
+    return [row for row in out if row[0] not in hidden]
 
 
 def name_cluster(conn: sqlite3.Connection, cluster_id: int, name: str) -> None:
@@ -204,3 +216,65 @@ def has_clusters(conn: sqlite3.Connection) -> bool:
         "SELECT 1 FROM faces WHERE cluster_id IS NOT NULL AND cluster_id >= 0 LIMIT 1"
     ).fetchone()
     return row is not None
+
+
+def hide_cluster(conn: sqlite3.Connection, cluster_id: int) -> None:
+    """Mark a cluster as hidden so it doesn't appear in the labeler anymore."""
+    conn.execute(
+        "INSERT OR IGNORE INTO hidden_clusters(cluster_id) VALUES (?)", (cluster_id,)
+    )
+    # Also drop any name on it — hiding implies it's not a person.
+    conn.execute("DELETE FROM people WHERE cluster_id = ?", (cluster_id,))
+    conn.commit()
+
+
+def unhide_cluster(conn: sqlite3.Connection, cluster_id: int) -> None:
+    conn.execute("DELETE FROM hidden_clusters WHERE cluster_id = ?", (cluster_id,))
+    conn.commit()
+
+
+def hidden_cluster_ids(conn: sqlite3.Connection) -> set[int]:
+    rows = conn.execute("SELECT cluster_id FROM hidden_clusters").fetchall()
+    return {r[0] for r in rows}
+
+
+def merge_clusters_by_name(conn: sqlite3.Connection) -> dict[str, list[int]]:
+    """Consolidate all clusters sharing a name into one canonical cluster
+    per name. Returns {name: [merged_cluster_ids_in_size_order]}.
+
+    Strategy: for each name with 2+ clusters, pick the cluster with the
+    most faces as canonical. Re-point all faces from the other clusters
+    to the canonical cluster_id. Delete the redundant people rows.
+
+    Idempotent — running it twice is a no-op.
+    """
+    rows = conn.execute(
+        "SELECT p.cluster_id, p.name, COUNT(f.id) AS cnt "
+        "FROM people p "
+        "LEFT JOIN faces f ON f.cluster_id = p.cluster_id "
+        "WHERE p.name IS NOT NULL AND p.name != '' "
+        "GROUP BY p.cluster_id, p.name "
+        "ORDER BY p.name, cnt DESC"
+    ).fetchall()
+
+    by_name: dict[str, list[tuple[int, int]]] = {}
+    for cid, name, cnt in rows:
+        by_name.setdefault(name, []).append((int(cid), int(cnt)))
+
+    merged: dict[str, list[int]] = {}
+    for name, entries in by_name.items():
+        if len(entries) <= 1:
+            continue
+        entries.sort(key=lambda x: -x[1])  # largest cluster first
+        canonical = entries[0][0]
+        others = [cid for cid, _ in entries[1:]]
+        for old_cid in others:
+            conn.execute(
+                "UPDATE faces SET cluster_id = ? WHERE cluster_id = ?",
+                (canonical, old_cid),
+            )
+            conn.execute("DELETE FROM people WHERE cluster_id = ?", (old_cid,))
+        merged[name] = [cid for cid, _ in entries]
+
+    conn.commit()
+    return merged

@@ -35,6 +35,7 @@ def create_app(db_path: Path, thumb_dir: Path) -> Flask:
               <div class="head">
                 <span class="cid">cluster {cid}</span>
                 <span class="cnt">{count} faces</span>
+                <button type="button" class="hide-btn" data-cluster="{cid}" title="Hide this cluster (not a person)">×</button>
               </div>
               <img loading="lazy" src="/thumb/{cid}.jpg" alt="cluster {cid}">
               <input type="text" name="name-{cid}" placeholder="name…" value="{existing}" autocomplete="off">
@@ -72,7 +73,25 @@ def create_app(db_path: Path, thumb_dir: Path) -> Flask:
                     continue
                 db.name_cluster(conn, int(cid_str), name)
                 saved += 1
-        return jsonify({"saved": saved})
+            # Auto-merge clusters sharing a name. If the user typed "Ellie"
+            # on 30 cards, this consolidates them into one cluster_id so
+            # future label sessions show ONE Ellie card with all faces.
+            merged = db.merge_clusters_by_name(conn)
+        merged_count = sum(max(0, len(v) - 1) for v in merged.values())
+        return jsonify({"saved": saved, "merged": merged_count, "merged_by": merged})
+
+    @app.route("/hide/<int:cluster_id>", methods=["POST"])
+    def hide(cluster_id: int):
+        """Mark a cluster as noise so it doesn't show up in future labeler runs."""
+        with _conn() as conn:
+            db.hide_cluster(conn, cluster_id)
+        return jsonify({"hidden": cluster_id})
+
+    @app.route("/unhide/<int:cluster_id>", methods=["POST"])
+    def unhide(cluster_id: int):
+        with _conn() as conn:
+            db.unhide_cluster(conn, cluster_id)
+        return jsonify({"unhidden": cluster_id})
 
     return app
 
@@ -189,6 +208,21 @@ _PAGE = r"""<!doctype html>
   .card input::placeholder { color: var(--text-faint); }
   .card input:focus { outline: none; border-color: var(--primary); }
   .hint { color: var(--text-faint); font-size: 11px; }
+  .hide-btn {
+    font-family: inherit;
+    background: transparent; color: var(--text-faint);
+    border: 1px solid transparent;
+    width: 20px; height: 20px;
+    border-radius: 6px;
+    padding: 0; line-height: 1;
+    font-size: 14px; cursor: pointer;
+    transition: background .15s ease, color .15s ease;
+  }
+  .hide-btn:hover {
+    background: rgba(224, 106, 106, 0.15);
+    color: var(--danger);
+  }
+  .card.is-hiding { opacity: 0.3; pointer-events: none; transition: opacity .2s ease; }
   .filter {
     font-family: inherit;
     background: var(--surface);
@@ -234,6 +268,7 @@ async function save() {
   btn.disabled = true; btn.textContent = "Saving…";
   const names = {};
   $$(".card").forEach(c => {
+    if (c.classList.contains("is-hiding")) return;
     const cid = c.dataset.cluster;
     const v = c.querySelector("input").value.trim();
     if (v) names[cid] = v;
@@ -245,11 +280,25 @@ async function save() {
       body: JSON.stringify({names}),
     });
     const j = await r.json();
-    toast(`Saved ${j.saved} cluster name(s)`);
+    let msg = `Saved ${j.saved} name(s)`;
+    if (j.merged > 0) msg += ` · merged ${j.merged} duplicate(s)`;
+    toast(msg);
   } catch (e) {
     toast("Save failed: " + e.message, true);
   } finally {
     btn.disabled = false; btn.textContent = "Save All";
+  }
+}
+
+async function hideCard(cid, cardEl) {
+  cardEl.classList.add("is-hiding");
+  try {
+    await fetch(`/hide/${cid}`, { method: "POST" });
+    // Remove from DOM after the fade
+    setTimeout(() => cardEl.remove(), 200);
+  } catch (e) {
+    cardEl.classList.remove("is-hiding");
+    toast("Hide failed: " + e.message, true);
   }
 }
 
@@ -258,6 +307,16 @@ window.addEventListener("keydown", (e) => {
   if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "s") {
     e.preventDefault(); save();
   }
+});
+
+// Hide-cluster buttons: dismiss noise clusters without naming them
+document.addEventListener("click", (e) => {
+  const btn = e.target.closest(".hide-btn");
+  if (!btn) return;
+  const card = btn.closest(".card");
+  if (!card) return;
+  const cid = btn.dataset.cluster;
+  hideCard(cid, card);
 });
 
 const filter = $("#filter");
