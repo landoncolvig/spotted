@@ -89,8 +89,179 @@ body {
 .stage[data-state="tags"]    .screen--tags,
 .stage[data-state="working"] .screen--working,
 .stage[data-state="label"]   .screen--label,
+.stage[data-state="library"] .screen--library,
 .stage[data-state="done"]    .screen--done {
   opacity: 1; pointer-events: auto; transform: translateY(0);
+}
+
+/* LIBRARY */
+.screen--library {
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+}
+.library-wrap {
+  flex: 1;
+  display: grid;
+  grid-template-columns: 220px 1fr;
+  overflow: hidden;
+}
+.library-sidebar {
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.library-header {
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.library-title {
+  font-family: var(--font-display);
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+.library-meta {
+  font-size: 11px;
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+}
+.library-search-wrap { padding: 10px 12px 0; }
+.library-search {
+  width: 100%;
+  font-family: inherit;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 6px 9px;
+  border-radius: 8px;
+  font-size: 12px;
+}
+.library-search:focus { outline: none; border-color: var(--primary); }
+.library-search::placeholder { color: var(--text-faint); }
+.library-people {
+  list-style: none;
+  padding: 6px 0;
+  margin: 0;
+  overflow-y: auto;
+  flex: 1;
+}
+.library-person-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  padding: 7px 16px;
+  cursor: pointer;
+  font-size: 13px;
+  border-left: 2px solid transparent;
+  transition: background .12s ease, border-color .12s ease;
+}
+.library-person-row:hover { background: var(--surface-2); }
+.library-person-row.active {
+  background: var(--surface-2);
+  border-left-color: var(--primary);
+}
+.library-person-row .name { color: var(--text); }
+.library-person-row .count {
+  font-size: 11px;
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+.library-detail {
+  padding: 20px 24px;
+  overflow-y: auto;
+  min-height: 0;
+}
+.library-empty {
+  color: var(--text-faint);
+  text-align: center;
+  margin-top: 60px;
+  font-size: 13px;
+}
+
+.person-header {
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 16px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.person-name {
+  font-family: var(--font-display);
+  font-size: 22px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--text);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  padding: 2px 6px;
+  margin: -2px -6px;
+  min-width: 0;
+  flex: 1;
+}
+.person-name:hover { background: var(--surface-2); }
+.person-name:focus {
+  outline: none;
+  background: var(--surface);
+  border-color: var(--primary);
+}
+.person-meta {
+  font-size: 12px;
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+}
+.person-actions { margin-left: auto; }
+
+.person-clips { list-style: none; padding: 0; margin: 0; }
+.person-clip {
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.person-clip:last-child { border-bottom: none; }
+.person-clip-name {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text);
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.person-clip-times {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-faint);
+}
+.person-clip-reveal {
+  font-family: inherit;
+  font-size: 11px;
+  color: var(--text-dim);
+  background: transparent;
+  border: 1px solid var(--border-strong);
+  padding: 3px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background .15s, color .15s;
+}
+.person-clip-reveal:hover {
+  background: var(--surface-2);
+  color: var(--text);
+}
+
+.library-footer {
+  padding: 10px 16px;
+  border-top: 1px solid var(--border);
 }
 
 /* TAGS SCREEN */

@@ -242,6 +242,49 @@ def merge(
     console.print(f"[bold green]Done.[/bold green] Merged {total} duplicate cluster(s).")
 
 
+@app.command("rename-person")
+def rename_person(
+    old: str = typer.Argument(..., help="Current name."),
+    new: str = typer.Argument(..., help="New name."),
+    db_path: Path = typer.Option(DEFAULT_DB, "--db"),
+):
+    """Rename a person across all their clusters."""
+    conn = _db.connect(db_path)
+    rows = conn.execute(
+        "UPDATE people SET name = ? WHERE name = ? RETURNING cluster_id",
+        (new.strip(), old.strip()),
+    ).fetchall()
+    conn.commit()
+    if not rows:
+        console.print(f"[yellow]No person named {old!r}.[/yellow]")
+        raise typer.Exit(1)
+    console.print(f"Renamed {len(rows)} cluster(s) from {old!r} to {new!r}.")
+    _emit("person-renamed", old=old, new=new, clusters=len(rows))
+
+
+@app.command("delete-person")
+def delete_person(
+    name: str = typer.Argument(..., help="Person name to delete."),
+    db_path: Path = typer.Option(DEFAULT_DB, "--db"),
+):
+    """Remove a person from the library. Faces stay in DB but are unnamed.
+
+    The clips already on disk keep their existing XMP keywords until
+    `tag-write` is re-run. To strip them too, run `tag-write` after this.
+    """
+    conn = _db.connect(db_path)
+    rows = conn.execute(
+        "DELETE FROM people WHERE name = ? RETURNING cluster_id",
+        (name.strip(),),
+    ).fetchall()
+    conn.commit()
+    if not rows:
+        console.print(f"[yellow]No person named {name!r}.[/yellow]")
+        raise typer.Exit(1)
+    console.print(f"Deleted {len(rows)} cluster(s) named {name!r}.")
+    _emit("person-deleted", name=name, clusters=len(rows))
+
+
 @app.command("tag-write")
 def tag_write(
     db_path: Path = typer.Option(DEFAULT_DB, "--db"),
@@ -363,6 +406,7 @@ def markers_write(
 @app.command()
 def status(
     db_path: Path = typer.Option(DEFAULT_DB, "--db"),
+    detail: bool = typer.Option(False, "--detail", help="Include per-person clip lists (heavier query, used by Library view)."),
 ):
     """Show index summary (videos, faces, clusters, per-person clip counts)."""
     conn = _db.connect(db_path)
@@ -373,7 +417,6 @@ def status(
     ).fetchone()[0]
     n_named = conn.execute("SELECT COUNT(*) FROM people").fetchone()[0]
 
-    # Per-person counts: how many distinct videos each named person appears in.
     per_person_rows = conn.execute(
         "SELECT p.name, "
         "       COUNT(DISTINCT f.video_id) AS clips, "
@@ -406,6 +449,32 @@ def status(
         named=n_named,
         people=people,
     )
+
+    if detail:
+        # Per-person clip list with timestamps. One event per person so
+        # very large libraries stream incrementally and we don't blow up
+        # the JSON parser at the receiving end.
+        for p in people:
+            rows = conn.execute(
+                "SELECT v.path, GROUP_CONCAT(f.timestamp_sec, ',') AS times "
+                "FROM faces f "
+                "JOIN videos v ON v.id = f.video_id "
+                "JOIN people pp ON pp.cluster_id = f.cluster_id "
+                "WHERE pp.name = ? "
+                "GROUP BY v.id "
+                "ORDER BY v.path",
+                (p["name"],),
+            ).fetchall()
+            clips = [
+                {
+                    "path": path,
+                    "name": Path(path).name,
+                    "times": sorted([float(t) for t in times.split(",")]) if times else [],
+                }
+                for path, times in rows
+            ]
+            _emit("library-person", name=p["name"], clips=clips)
+        _emit("library-detail-complete")
 
 
 if __name__ == "__main__":

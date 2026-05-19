@@ -209,6 +209,50 @@ async fn start_label_server(
 }
 
 #[tauri::command]
+async fn fetch_library_detail(app: AppHandle, window: Window) -> Result<String, String> {
+    let sidecar = app
+        .shell()
+        .sidecar("spotted-sidecar")
+        .map_err(|e| format!("sidecar lookup: {e}"))?;
+    let (mut rx, _child) = sidecar
+        .args(["status".to_string(), "--detail".to_string()])
+        .spawn()
+        .map_err(|e| format!("sidecar spawn: {e}"))?;
+
+    while let Some(event) = rx.recv().await {
+        match event {
+            CommandEvent::Stdout(bytes) => {
+                let line = String::from_utf8_lossy(&bytes).trim_end().to_string();
+                if !line.is_empty() {
+                    let _ = window.emit(
+                        "sidecar://line",
+                        SidecarLine { kind: "stdout", line },
+                    );
+                }
+            }
+            CommandEvent::Terminated(_) => break,
+            _ => {}
+        }
+    }
+    Ok("done".into())
+}
+
+#[tauri::command]
+async fn rename_person(
+    app: AppHandle,
+    window: Window,
+    old: String,
+    new: String,
+) -> Result<i32, String> {
+    run_sidecar(app, window, vec!["rename-person".into(), old, new]).await
+}
+
+#[tauri::command]
+async fn delete_person(app: AppHandle, window: Window, name: String) -> Result<i32, String> {
+    run_sidecar(app, window, vec!["delete-person".into(), name]).await
+}
+
+#[tauri::command]
 async fn fetch_status(app: AppHandle, window: Window) -> Result<String, String> {
     // Capture the structured event from `facetag status`. We collect all
     // stdout, then return the raw lines for the frontend to parse.
@@ -292,6 +336,12 @@ pub fn run() {
                     .about(Some(about_meta))
                     .separator()
                     .item(
+                        &MenuItemBuilder::with_id("open_library", "Library")
+                            .accelerator("CmdOrCtrl+L")
+                            .build(app)?,
+                    )
+                    .separator()
+                    .item(
                         &MenuItemBuilder::with_id("check_updates", "Check for Updates…")
                             .build(app)?,
                     )
@@ -356,6 +406,11 @@ pub fn run() {
                             let _ = window.emit("menu://retag-library", ());
                         }
                     }
+                    "open_library" => {
+                        if let Some(window) = handle.get_webview_window("main") {
+                            let _ = window.emit("menu://open-library", ());
+                        }
+                    }
                     _ => {}
                 });
             }
@@ -368,6 +423,9 @@ pub fn run() {
             write_markers,
             start_label_server,
             fetch_status,
+            fetch_library_detail,
+            rename_person,
+            delete_person,
             reveal_in_finder,
             check_for_updates,
             app_version

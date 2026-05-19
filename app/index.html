@@ -62,6 +62,38 @@
           </div>
         </div>
 
+        <!-- LIBRARY -->
+        <div class="screen screen--library">
+          <div class="library-wrap">
+            <aside class="library-sidebar">
+              <header class="library-header">
+                <div class="library-title">Library</div>
+                <div class="library-meta" id="library-stats">—</div>
+              </header>
+              <div class="library-search-wrap">
+                <input class="library-search" id="library-search" placeholder="Filter people…" autocomplete="off" />
+              </div>
+              <ul class="library-people" id="library-people"></ul>
+            </aside>
+            <main class="library-detail">
+              <div class="library-empty" id="library-empty">Select someone to see their clips.</div>
+              <div class="library-person" id="library-person" hidden>
+                <header class="person-header">
+                  <input class="person-name" id="person-name" />
+                  <div class="person-meta" id="person-meta">—</div>
+                  <div class="person-actions">
+                    <button class="btn btn--ghost" id="person-delete">Delete</button>
+                  </div>
+                </header>
+                <ul class="person-clips" id="person-clips"></ul>
+              </div>
+            </main>
+          </div>
+          <div class="library-footer">
+            <button class="btn btn--ghost" id="library-back">← Back</button>
+          </div>
+        </div>
+
         <!-- LABEL (mounted dynamically) -->
 
         <!-- DONE -->

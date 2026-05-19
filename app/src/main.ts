@@ -2,7 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 
-type State = "idle" | "tags" | "working" | "label" | "done";
+type State = "idle" | "tags" | "working" | "label" | "library" | "done";
 type SidecarLine = { kind: "stdout" | "stderr"; line: string };
 type SpottedEvent =
   | { event: "scan-start"; total: number }
@@ -21,6 +21,10 @@ type SpottedEvent =
   | { event: "markers-error"; name: string; message: string }
   | { event: "markers-complete"; total: number }
   | { event: "library-stats"; videos: number; faces: number; clusters: number; named: number; people: { name: string; clips: number; faces: number }[] }
+  | { event: "library-person"; name: string; clips: { path: string; name: string; times: number[] }[] }
+  | { event: "library-detail-complete" }
+  | { event: "person-renamed"; old: string; new: string; clusters: number }
+  | { event: "person-deleted"; name: string; clusters: number }
   | { event: "error"; stage: string; message: string };
 
 const stage = document.getElementById("stage") as HTMLElement;
@@ -207,6 +211,10 @@ function handleSpottedEvent(evt: SpottedEvent) {
       break;
     case "library-stats":
       lastStats = evt;
+      handleLibraryEvent(evt);
+      break;
+    case "library-person":
+      handleLibraryEvent(evt);
       break;
     case "error":
     case "tag-error":
@@ -380,6 +388,215 @@ function isBusy(): boolean {
   return s === "working" || s === "label";
 }
 
+// ---------- LIBRARY ----------
+
+type LibraryClip = { path: string; name: string; times: number[] };
+type LibraryPerson = { name: string; clips: number; faces: number; clipsDetail: LibraryClip[] };
+
+const library: {
+  people: LibraryPerson[];
+  selected: string | null;
+  loading: boolean;
+} = {
+  people: [],
+  selected: null,
+  loading: false,
+};
+
+function libraryEl<T extends HTMLElement>(id: string): T {
+  return document.getElementById(id) as T;
+}
+
+async function openLibrary() {
+  setState("library");
+  await loadLibrary();
+}
+
+async function loadLibrary() {
+  if (library.loading) return;
+  library.loading = true;
+  // Reset cache; the listener will rebuild as events stream in
+  library.people = [];
+  renderLibrarySidebar();
+  await ensureSidecarListener();
+  try {
+    await invoke("fetch_library_detail");
+  } catch (e) {
+    flashToast("Couldn't load library: " + String(e), true);
+  } finally {
+    library.loading = false;
+  }
+}
+
+function handleLibraryEvent(evt: SpottedEvent) {
+  if (evt.event === "library-stats") {
+    library.people = evt.people.map((p) => ({
+      name: p.name,
+      clips: p.clips,
+      faces: p.faces,
+      clipsDetail: [],
+    }));
+    libraryEl("library-stats").textContent =
+      `${evt.named} ${evt.named === 1 ? "person" : "people"} · ${evt.videos} clips`;
+    renderLibrarySidebar();
+  } else if (evt.event === "library-person") {
+    const p = library.people.find((x) => x.name === evt.name);
+    if (p) p.clipsDetail = evt.clips;
+    if (library.selected === evt.name) renderLibraryDetail();
+  }
+}
+
+function renderLibrarySidebar() {
+  const list = libraryEl<HTMLUListElement>("library-people");
+  list.replaceChildren();
+  const filter = (libraryEl<HTMLInputElement>("library-search").value || "")
+    .toLowerCase()
+    .trim();
+  const filtered = filter
+    ? library.people.filter((p) => p.name.toLowerCase().includes(filter))
+    : library.people;
+  if (filtered.length === 0) {
+    const li = document.createElement("li");
+    li.className = "library-person-row";
+    li.style.opacity = "0.5";
+    li.style.cursor = "default";
+    li.textContent = library.people.length === 0 ? "No tagged people yet." : "No matches.";
+    list.appendChild(li);
+    return;
+  }
+  for (const p of filtered) {
+    const li = document.createElement("li");
+    li.className = "library-person-row";
+    if (p.name === library.selected) li.classList.add("active");
+    const name = document.createElement("span");
+    name.className = "name";
+    name.textContent = p.name;
+    const count = document.createElement("span");
+    count.className = "count";
+    count.textContent = String(p.clips);
+    li.append(name, count);
+    li.addEventListener("click", () => selectPerson(p.name));
+    list.appendChild(li);
+  }
+}
+
+function selectPerson(name: string) {
+  library.selected = name;
+  renderLibrarySidebar();
+  renderLibraryDetail();
+}
+
+function renderLibraryDetail() {
+  const emptyEl = libraryEl("library-empty");
+  const personEl = libraryEl("library-person");
+  if (!library.selected) {
+    emptyEl.hidden = false;
+    personEl.hidden = true;
+    return;
+  }
+  const p = library.people.find((x) => x.name === library.selected);
+  if (!p) {
+    emptyEl.hidden = false;
+    personEl.hidden = true;
+    return;
+  }
+  emptyEl.hidden = true;
+  personEl.hidden = false;
+
+  const nameInput = libraryEl<HTMLInputElement>("person-name");
+  nameInput.value = p.name;
+  libraryEl("person-meta").textContent =
+    `${p.clips} ${p.clips === 1 ? "clip" : "clips"} · ${p.faces} face detections`;
+
+  const clipsEl = libraryEl<HTMLUListElement>("person-clips");
+  clipsEl.replaceChildren();
+  if (p.clipsDetail.length === 0) {
+    const li = document.createElement("li");
+    li.className = "person-clip";
+    li.textContent = "Loading clip list…";
+    clipsEl.appendChild(li);
+    return;
+  }
+  for (const c of p.clipsDetail) {
+    const li = document.createElement("li");
+    li.className = "person-clip";
+    const nm = document.createElement("span");
+    nm.className = "person-clip-name";
+    nm.textContent = c.name;
+    nm.title = c.path;
+    const tms = document.createElement("span");
+    tms.className = "person-clip-times";
+    const summary = c.times.length === 1
+      ? `${c.times[0].toFixed(1)}s`
+      : `${c.times.length} appearances`;
+    tms.textContent = summary;
+    const reveal = document.createElement("button");
+    reveal.className = "person-clip-reveal";
+    reveal.textContent = "Reveal";
+    reveal.addEventListener("click", () => {
+      invoke("reveal_in_finder", { path: c.path }).catch(() => {});
+    });
+    li.append(nm, tms, reveal);
+    clipsEl.appendChild(li);
+  }
+}
+
+async function commitRename(newName: string) {
+  const old = library.selected;
+  if (!old) return;
+  newName = newName.trim();
+  if (!newName || newName === old) return;
+  try {
+    await invoke("rename_person", { old, new: newName });
+    // Update in-memory state
+    const p = library.people.find((x) => x.name === old);
+    if (p) p.name = newName;
+    library.selected = newName;
+    flashToast(`Renamed ${old} → ${newName}`);
+    renderLibrarySidebar();
+    renderLibraryDetail();
+  } catch (e) {
+    flashToast("Rename failed: " + String(e), true);
+    libraryEl<HTMLInputElement>("person-name").value = old;
+  }
+}
+
+async function deletePerson() {
+  const name = library.selected;
+  if (!name) return;
+  if (!confirm(`Delete ${name} from the library?\n\nClips on disk keep their existing Keywords until you re-tag.`)) {
+    return;
+  }
+  try {
+    await invoke("delete_person", { name });
+    library.people = library.people.filter((x) => x.name !== name);
+    library.selected = null;
+    flashToast(`Deleted ${name}`);
+    renderLibrarySidebar();
+    renderLibraryDetail();
+  } catch (e) {
+    flashToast("Delete failed: " + String(e), true);
+  }
+}
+
+function wireLibrary() {
+  libraryEl("library-back").addEventListener("click", () => setState("idle"));
+  libraryEl<HTMLInputElement>("library-search").addEventListener("input", renderLibrarySidebar);
+  const nameInput = libraryEl<HTMLInputElement>("person-name");
+  nameInput.addEventListener("blur", () => commitRename(nameInput.value));
+  nameInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      nameInput.blur();
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      if (library.selected) nameInput.value = library.selected;
+      nameInput.blur();
+    }
+  });
+  libraryEl("person-delete").addEventListener("click", deletePerson);
+}
+
 function wireDragDrop() {
   dropzone.addEventListener("click", () => {
     if (isBusy()) {
@@ -410,6 +627,13 @@ function wireMenuEvents() {
       return;
     }
     pickFolder();
+  });
+  listen("menu://open-library", () => {
+    if (isBusy()) {
+      flashToast("Finish or cancel the current batch first.");
+      return;
+    }
+    openLibrary();
   });
   listen("menu://retag-library", async () => {
     if (isBusy()) {
@@ -475,4 +699,5 @@ window.addEventListener("DOMContentLoaded", () => {
   wireDragDrop();
   wireMenuEvents();
   wireTagsScreen();
+  wireLibrary();
 });
