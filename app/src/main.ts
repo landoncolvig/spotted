@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
@@ -25,7 +25,7 @@ type SpottedEvent =
   | { event: "markers-video"; name: string; count: number; index: number; total: number }
   | { event: "markers-error"; name: string; message: string }
   | { event: "markers-complete"; total: number }
-  | { event: "library-stats"; videos: number; faces: number; clusters: number; named: number; people: { name: string; clips: number; faces: number }[] }
+  | { event: "library-stats"; videos: number; faces: number; clusters: number; named: number; people: { name: string; cluster_id?: number; clips: number; faces: number }[] }
   | { event: "library-person"; name: string; clips: { path: string; name: string; times: number[] }[] }
   | { event: "library-detail-complete" }
   | { event: "person-renamed"; old: string; new: string; clusters: number }
@@ -492,7 +492,13 @@ function isBusy(): boolean {
 // ---------- LIBRARY ----------
 
 type LibraryClip = { path: string; name: string; times: number[] };
-type LibraryPerson = { name: string; clips: number; faces: number; clipsDetail: LibraryClip[] };
+type LibraryPerson = {
+  name: string;
+  clusterId?: number;
+  clips: number;
+  faces: number;
+  clipsDetail: LibraryClip[];
+};
 
 const library: {
   people: LibraryPerson[];
@@ -521,6 +527,12 @@ async function loadLibrary() {
   await ensureSidecarListener();
   try {
     await invoke("fetch_library_detail");
+    // Generate per-person thumbnails in the background. Sidebar will
+    // re-render as they appear on disk; missing ones gracefully fall
+    // back to text-only rows.
+    invoke("generate_person_thumbs")
+      .then(() => renderLibrarySidebar())
+      .catch(() => {});
   } catch (e) {
     flashToast("Couldn't load library: " + String(e), true);
   } finally {
@@ -548,6 +560,7 @@ function handleLibraryEvent(evt: SpottedEvent) {
   if (evt.event === "library-stats") {
     library.people = evt.people.map((p) => ({
       name: p.name,
+      clusterId: p.cluster_id,
       clips: p.clips,
       faces: p.faces,
       clipsDetail: [],
@@ -560,6 +573,16 @@ function handleLibraryEvent(evt: SpottedEvent) {
     if (p) p.clipsDetail = evt.clips;
     if (library.selected === evt.name) renderLibraryDetail();
   }
+}
+
+function personThumbUrl(p: LibraryPerson): string | null {
+  if (p.clusterId == null) return null;
+  // ~/.facetag/person_thumbs/<cluster_id>.jpg via the Tauri asset protocol.
+  // We resolve $HOME via the standard convertFileSrc helper.
+  const home = (window as any).__TAURI_INTERNALS__?.metadata?.os?.platform
+    ? "/Users/" + ((window as any).__TAURI_INTERNALS__?.metadata?.os?.user || "qb")
+    : "/Users/qb";
+  return convertFileSrc(`${home}/.facetag/person_thumbs/${p.clusterId}.jpg`);
 }
 
 function renderLibrarySidebar() {
@@ -585,13 +608,32 @@ function renderLibrarySidebar() {
     const li = document.createElement("li");
     li.className = "library-person-row";
     if (p.name === library.selected) li.classList.add("active");
+
+    const left = document.createElement("span");
+    left.className = "library-person-left";
+    const thumbUrl = personThumbUrl(p);
+    if (thumbUrl) {
+      const img = document.createElement("img");
+      img.className = "library-thumb";
+      img.alt = "";
+      img.loading = "lazy";
+      img.src = thumbUrl;
+      img.onerror = () => img.classList.add("library-thumb--missing");
+      left.appendChild(img);
+    } else {
+      const placeholder = document.createElement("span");
+      placeholder.className = "library-thumb library-thumb--missing";
+      left.appendChild(placeholder);
+    }
     const name = document.createElement("span");
     name.className = "name";
     name.textContent = p.name;
+    left.appendChild(name);
+
     const count = document.createElement("span");
     count.className = "count";
     count.textContent = String(p.clips);
-    li.append(name, count);
+    li.append(left, count);
     li.addEventListener("click", () => selectPerson(p.name));
     list.appendChild(li);
   }

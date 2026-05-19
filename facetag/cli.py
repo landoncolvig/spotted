@@ -18,6 +18,7 @@ from . import extract as _extract
 from . import finder as _finder
 from . import label as _label
 from . import markers as _markers
+from . import person_thumb as _person_thumb
 from . import tag as _tag
 from . import web as _web
 
@@ -403,6 +404,22 @@ def markers_write(
         console.print(f"[bold green]Done.[/bold green] Wrote markers to {len(videos)} clips.")
 
 
+@app.command("person-thumbs")
+def person_thumbs(
+    db_path: Path = typer.Option(DEFAULT_DB, "--db"),
+    force: bool = typer.Option(False, "--force", help="Regenerate even if a thumb already exists on disk."),
+):
+    """Generate a 128x128 face thumbnail per named person.
+
+    Library view's sidebar reads these from ~/.facetag/person_thumbs/.
+    Idempotent — only generates what's missing unless --force.
+    """
+    conn = _db.connect(db_path)
+    cids = _person_thumb.generate_person_thumbs(conn, force=force)
+    _emit("person-thumbs-complete", count=len(cids), dir=str(_person_thumb.PERSON_THUMB_DIR))
+    console.print(f"[bold green]Done.[/bold green] {len(cids)} thumbnail(s) at {_person_thumb.PERSON_THUMB_DIR}")
+
+
 @app.command()
 def status(
     db_path: Path = typer.Option(DEFAULT_DB, "--db"),
@@ -419,6 +436,7 @@ def status(
 
     per_person_rows = conn.execute(
         "SELECT p.name, "
+        "       p.cluster_id, "
         "       COUNT(DISTINCT f.video_id) AS clips, "
         "       COUNT(f.id) AS faces "
         "FROM people p "
@@ -427,7 +445,10 @@ def status(
         "GROUP BY p.name "
         "ORDER BY clips DESC, p.name ASC"
     ).fetchall()
-    people = [{"name": n, "clips": c, "faces": fc} for n, c, fc in per_person_rows]
+    people = [
+        {"name": n, "cluster_id": int(cid), "clips": c, "faces": fc}
+        for n, cid, c, fc in per_person_rows
+    ]
 
     table = Table("metric", "value")
     table.add_row("videos", str(n_videos))

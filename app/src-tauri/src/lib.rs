@@ -209,6 +209,11 @@ async fn start_label_server(
 }
 
 #[tauri::command]
+async fn generate_person_thumbs(app: AppHandle, window: Window) -> Result<i32, String> {
+    run_sidecar(app, window, vec!["person-thumbs".into()]).await
+}
+
+#[tauri::command]
 async fn fetch_library_detail(app: AppHandle, window: Window) -> Result<String, String> {
     let sidecar = app
         .shell()
@@ -465,6 +470,7 @@ pub fn run() {
             start_label_server,
             fetch_status,
             fetch_library_detail,
+            generate_person_thumbs,
             rename_person,
             delete_person,
             reveal_in_finder,

@@ -196,6 +196,34 @@ body {
   transition: background .12s ease, border-color .12s ease, padding-left .12s ease;
   animation: lib-row-in .25s ease-out both;
 }
+.library-person-left {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+  flex: 1;
+}
+.library-thumb {
+  width: 24px; height: 24px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  object-fit: cover;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+}
+.library-thumb--missing {
+  width: 24px; height: 24px;
+  border-radius: 50%;
+  background:
+    linear-gradient(135deg, var(--surface-2) 0%, var(--surface) 100%);
+  border: 1px solid var(--border);
+  display: inline-block;
+}
+.library-person-row .name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .library-person-row:hover {
   background: var(--surface-2);
   padding-left: 18px;
