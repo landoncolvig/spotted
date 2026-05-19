@@ -1,6 +1,11 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
+import {
+  isPermissionGranted,
+  requestPermission,
+  sendNotification,
+} from "@tauri-apps/plugin-notification";
 
 type State = "idle" | "tags" | "working" | "label" | "library" | "done";
 type SidecarLine = { kind: "stdout" | "stderr"; line: string };
@@ -418,8 +423,36 @@ async function runTagWrite() {
     const stats = await fetchLibraryStats();
     setState("done");
     renderDone(stats);
+    notifyIfBackground("Spotted finished", summarizeDone(stats));
   } catch (err) {
     showError(String(err));
+  }
+}
+
+function summarizeDone(stats: SpottedEvent | null): string {
+  if (!stats || stats.event !== "library-stats" || stats.people.length === 0) {
+    return "Tags written. Open Spotted to see what changed.";
+  }
+  const top = stats.people.slice(0, 3).map((p) => p.name).join(", ");
+  const extra = stats.people.length > 3 ? ` and ${stats.people.length - 3} more` : "";
+  return `${top}${extra} — tagged across ${stats.videos} clips.`;
+}
+
+/** Fire a macOS notification only if the user isn't actively looking at
+ *  Spotted. If the window is focused, the in-app done screen is enough. */
+async function notifyIfBackground(title: string, body: string) {
+  if (document.visibilityState === "visible" && document.hasFocus()) return;
+  try {
+    let granted = await isPermissionGranted();
+    if (!granted) {
+      const r = await requestPermission();
+      granted = r === "granted";
+    }
+    if (!granted) return;
+    sendNotification({ title, body });
+  } catch (e) {
+    // Silently fail — notification is a nice-to-have, not a critical path
+    console.warn("notification failed:", e);
   }
 }
 

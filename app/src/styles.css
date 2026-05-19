@@ -115,8 +115,10 @@ body {
   align-items: center; justify-content: center;
   padding: 24px;
   opacity: 0; pointer-events: none;
-  transform: translateY(6px);
-  transition: opacity .25s ease, transform .25s ease;
+  transform: translateY(10px) scale(0.99);
+  transition:
+    opacity 0.28s cubic-bezier(0.2, 0.8, 0.2, 1),
+    transform 0.32s cubic-bezier(0.2, 0.8, 0.2, 1);
 }
 .stage[data-state="idle"]    .screen--idle,
 .stage[data-state="tags"]    .screen--tags,
@@ -124,7 +126,7 @@ body {
 .stage[data-state="label"]   .screen--label,
 .stage[data-state="library"] .screen--library,
 .stage[data-state="done"]    .screen--done {
-  opacity: 1; pointer-events: auto; transform: translateY(0);
+  opacity: 1; pointer-events: auto; transform: translateY(0) scale(1);
 }
 
 /* LIBRARY */

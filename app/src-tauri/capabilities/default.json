@@ -12,6 +12,7 @@
     "dialog:default",
     "updater:default",
     "shell:default",
+    "notification:default",
     {
       "identifier": "shell:allow-execute",
       "allow": [
