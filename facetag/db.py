@@ -193,3 +193,14 @@ def face_times_in_video(
 
 def known_names(conn: sqlite3.Connection) -> list[str]:
     return [r[0] for r in conn.execute("SELECT DISTINCT name FROM people ORDER BY name").fetchall()]
+
+
+def has_clusters(conn: sqlite3.Connection) -> bool:
+    """True if any face has been assigned to a cluster (i.e., a prior cluster
+    run happened). Used to skip re-clustering by default, since re-clustering
+    can re-shuffle cluster IDs and break already-saved cluster→name mappings.
+    """
+    row = conn.execute(
+        "SELECT 1 FROM faces WHERE cluster_id IS NOT NULL AND cluster_id >= 0 LIMIT 1"
+    ).fetchone()
+    return row is not None

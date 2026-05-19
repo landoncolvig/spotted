@@ -411,6 +411,14 @@ function wireMenuEvents() {
     }
     pickFolder();
   });
+  listen("menu://retag-library", async () => {
+    if (isBusy()) {
+      flashToast("Finish or cancel the current batch first.");
+      return;
+    }
+    await ensureSidecarListener();
+    await runTagWrite();
+  });
   listen("menu://check-updates", async () => {
     try {
       const newVersion = await invoke<string | null>("check_for_updates");

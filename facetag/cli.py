@@ -15,6 +15,7 @@ from . import cut as _cut
 from . import db as _db
 from . import detect as _detect
 from . import extract as _extract
+from . import finder as _finder
 from . import label as _label
 from . import markers as _markers
 from . import tag as _tag
@@ -121,6 +122,7 @@ def cluster(
     db_path: Path = typer.Option(DEFAULT_DB, "--db"),
     epsilon: float = typer.Option(0.55, "--eps", help="Cluster selection epsilon (lower = stricter)."),
     min_size: int = typer.Option(5, "--min-size", help="Min faces per cluster."),
+    recluster: bool = typer.Option(False, "--recluster", help="Force re-clustering even if clusters already exist. Will reshuffle cluster IDs and may break already-saved labels."),
 ):
     """Group all indexed faces into person clusters."""
     conn = _db.connect(db_path)
@@ -128,6 +130,13 @@ def cluster(
     if not face_ids:
         console.print("[red]No faces in index. Run `facetag scan` first.[/red]")
         raise typer.Exit(1)
+
+    if not recluster and _db.has_clusters(conn):
+        summary = _db.cluster_summary(conn)
+        console.print(f"[yellow]Already clustered ({len(summary)} clusters). Skipping. Use --recluster to redo.[/yellow]")
+        _emit("cluster-skipped", clusters=len(summary))
+        _emit("cluster-complete", clusters=len(summary))
+        return
 
     _emit("cluster-start", faces=len(face_ids))
     console.print(f"Clustering {len(face_ids)} faces…")
@@ -255,6 +264,13 @@ def tag_write(
                 except Exception as e:
                     failed.append((short, str(e)))
                     _emit("tag-error", name=short, message=str(e))
+                # Also write to Spotlight Comment so macOS Finder search
+                # finds the clip by name/tag. Non-fatal — XMP write is the
+                # critical path for Premiere/DaVinci.
+                try:
+                    _finder.write_finder_comment(Path(path_str), names)
+                except Exception as e:
+                    _emit("finder-error", name=short, message=str(e))
             prog.update(task, advance=1)
 
     console.print(table)

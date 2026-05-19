@@ -295,6 +295,10 @@ pub fn run() {
                         &MenuItemBuilder::with_id("check_updates", "Check for Updates…")
                             .build(app)?,
                     )
+                    .item(
+                        &MenuItemBuilder::with_id("retag_library", "Re-tag Library")
+                            .build(app)?,
+                    )
                     .separator()
                     .services()
                     .separator()
@@ -345,6 +349,11 @@ pub fn run() {
                     "check_updates" => {
                         if let Some(window) = handle.get_webview_window("main") {
                             let _ = window.emit("menu://check-updates", ());
+                        }
+                    }
+                    "retag_library" => {
+                        if let Some(window) = handle.get_webview_window("main") {
+                            let _ = window.emit("menu://retag-library", ());
                         }
                     }
                     _ => {}
