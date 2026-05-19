@@ -120,7 +120,7 @@ def scan(
 @app.command()
 def cluster(
     db_path: Path = typer.Option(DEFAULT_DB, "--db"),
-    epsilon: float = typer.Option(0.55, "--eps", help="Cluster selection epsilon (lower = stricter)."),
+    epsilon: float = typer.Option(0.68, "--eps", help="Cluster selection epsilon (lower = stricter, more clusters; higher = looser, fewer clusters)."),
     min_size: int = typer.Option(5, "--min-size", help="Min faces per cluster."),
     recluster: bool = typer.Option(False, "--recluster", help="Force re-clustering even if clusters already exist. Will reshuffle cluster IDs and may break already-saved labels."),
 ):
