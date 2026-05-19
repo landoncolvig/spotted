@@ -55,11 +55,44 @@ body {
   -webkit-app-region: drag;
 }
 .brand { display: flex; align-items: center; gap: 10px; -webkit-app-region: no-drag; }
+
+/* Topbar mark: scaled-down version of the app icon. Squircle with a
+   radial gradient + corner brackets + center dot — same brand language
+   the user sees on the dock. */
 .mark {
-  width: 16px; height: 16px;
-  border-radius: 4px;
-  background: radial-gradient(circle at 30% 30%, var(--primary-hover), var(--primary-press));
-  box-shadow: inset 0 0 0 1px rgba(255,255,255,.12);
+  width: 22px; height: 22px;
+  border-radius: 6px;
+  background:
+    radial-gradient(circle at 33% 28%, var(--primary-hover) 0%, var(--primary) 55%, var(--primary-press) 100%);
+  display: inline-flex;
+  align-items: center; justify-content: center;
+  position: relative;
+  box-shadow:
+    inset 0 0 0 0.5px rgba(255, 255, 255, 0.15),
+    0 1px 2px rgba(0, 0, 0, 0.4);
+}
+.mark__inner {
+  position: relative;
+  width: 100%; height: 100%;
+}
+.mark__bracket {
+  position: absolute;
+  width: 4px; height: 4px;
+  border-color: #fff;
+  border-style: solid;
+  border-width: 0;
+}
+.mark__bracket--tl { top: 4px; left: 4px;     border-top-width: 1.4px; border-left-width: 1.4px; }
+.mark__bracket--tr { top: 4px; right: 4px;    border-top-width: 1.4px; border-right-width: 1.4px; }
+.mark__bracket--bl { bottom: 4px; left: 4px;  border-bottom-width: 1.4px; border-left-width: 1.4px; }
+.mark__bracket--br { bottom: 4px; right: 4px; border-bottom-width: 1.4px; border-right-width: 1.4px; }
+.mark__dot {
+  position: absolute;
+  top: 50%; left: 50%;
+  width: 2.5px; height: 2.5px;
+  margin: -1.25px 0 0 -1.25px;
+  background: #fff;
+  border-radius: 50%;
 }
 .wordmark {
   font-family: var(--font-display);
@@ -152,18 +185,27 @@ body {
 }
 .library-person-row {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   justify-content: space-between;
-  padding: 7px 16px;
+  padding: 8px 16px;
   cursor: pointer;
   font-size: 13px;
   border-left: 2px solid transparent;
-  transition: background .12s ease, border-color .12s ease;
+  transition: background .12s ease, border-color .12s ease, padding-left .12s ease;
+  animation: lib-row-in .25s ease-out both;
 }
-.library-person-row:hover { background: var(--surface-2); }
+.library-person-row:hover {
+  background: var(--surface-2);
+  padding-left: 18px;
+}
 .library-person-row.active {
   background: var(--surface-2);
   border-left-color: var(--primary);
+  padding-left: 14px;
+}
+@keyframes lib-row-in {
+  from { opacity: 0; transform: translateX(-6px); }
+  to   { opacity: 1; transform: translateX(0); }
 }
 .library-person-row .name { color: var(--text); }
 .library-person-row .count {
@@ -182,6 +224,47 @@ body {
   text-align: center;
   margin-top: 60px;
   font-size: 13px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+}
+.library-empty::before {
+  content: "";
+  width: 40px; height: 40px;
+  border-radius: 10px;
+  background: var(--surface);
+  border: 1px dashed var(--border-strong);
+  position: relative;
+}
+
+/* Loading skeleton for library people */
+.library-skeleton {
+  list-style: none;
+  padding: 6px 0;
+  margin: 0;
+}
+.library-skeleton li {
+  padding: 9px 16px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.library-skeleton .bar {
+  height: 10px;
+  border-radius: 5px;
+  background: linear-gradient(90deg,
+    var(--surface) 0%,
+    var(--surface-2) 50%,
+    var(--surface) 100%);
+  background-size: 200% 100%;
+  animation: skeleton-shimmer 1.4s ease-in-out infinite;
+}
+.library-skeleton .bar--name { width: 70%; }
+.library-skeleton .bar--count { width: 24px; }
+@keyframes skeleton-shimmer {
+  0%   { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
 }
 
 .person-header {
@@ -340,26 +423,44 @@ body {
   background:
     radial-gradient(120% 80% at 50% 0%, rgba(240,130,32,.06), transparent 60%),
     var(--surface);
-  transition: background .2s ease, transform .15s ease;
+  transition: background .2s ease, transform .15s ease, box-shadow .2s ease;
 }
-.dropzone:hover { background:
+.dropzone:hover {
+  background:
     radial-gradient(120% 80% at 50% 0%, rgba(240,130,32,.12), transparent 60%),
     var(--surface-2);
 }
 .dropzone:active { transform: scale(.998); }
 .dropzone.is-hot {
   background:
-    radial-gradient(120% 80% at 50% 0%, rgba(240,130,32,.20), transparent 60%),
+    radial-gradient(120% 80% at 50% 0%, rgba(240,130,32,.22), transparent 60%),
     var(--surface-2);
+  box-shadow: 0 0 0 1px var(--primary), 0 0 30px rgba(240,130,32,0.15);
 }
-.dropzone.is-hot .dropzone__frame { border-color: var(--primary); }
+.dropzone.is-hot .dropzone__corner { color: var(--primary); }
 
+/* Corner brackets that breathe — focus-mark motif from the app icon. */
 .dropzone__frame {
-  position: absolute; inset: 12px;
-  border-radius: calc(var(--r-xl) - 6px);
-  border: 1px dashed var(--border-strong);
-  transition: border-color .15s ease;
+  position: absolute; inset: 18px;
   pointer-events: none;
+}
+.dropzone__corner {
+  position: absolute;
+  width: 26px; height: 26px;
+  color: var(--border-strong);
+  border: 0 solid currentColor;
+  transition: color .2s ease;
+  animation: dz-breathe 3s ease-in-out infinite;
+}
+.dropzone__corner--tl { top: 0; left: 0; border-top-width: 1.5px; border-left-width: 1.5px; border-top-left-radius: 4px; }
+.dropzone__corner--tr { top: 0; right: 0; border-top-width: 1.5px; border-right-width: 1.5px; border-top-right-radius: 4px; }
+.dropzone__corner--bl { bottom: 0; left: 0; border-bottom-width: 1.5px; border-left-width: 1.5px; border-bottom-left-radius: 4px; }
+.dropzone__corner--br { bottom: 0; right: 0; border-bottom-width: 1.5px; border-right-width: 1.5px; border-bottom-right-radius: 4px; }
+.dropzone:hover .dropzone__corner { color: var(--text-faint); }
+
+@keyframes dz-breathe {
+  0%, 100% { opacity: 0.65; }
+  50%      { opacity: 1.0; }
 }
 .dropzone__content { text-align: center; }
 .dropzone__title {
@@ -406,13 +507,29 @@ body {
   background: var(--border);
   border-radius: 999px;
   overflow: hidden;
+  position: relative;
 }
 .progress__bar {
   height: 100%;
   width: 0%;
   background: linear-gradient(90deg, var(--primary), var(--primary-hover));
   border-radius: 999px;
-  transition: width .25s ease;
+  transition: width .35s cubic-bezier(0.4, 0, 0.2, 1);
+  position: relative;
+}
+/* Shimmer sweep over the filled portion while moving */
+.progress__bar::after {
+  content: "";
+  position: absolute; inset: 0;
+  background: linear-gradient(90deg,
+    transparent 0%,
+    rgba(255, 255, 255, 0.18) 50%,
+    transparent 100%);
+  animation: progress-shimmer 1.8s ease-in-out infinite;
+}
+@keyframes progress-shimmer {
+  0%   { transform: translateX(-100%); }
+  100% { transform: translateX(100%); }
 }
 .status__detail {
   margin-top: 12px;
@@ -499,11 +616,22 @@ body {
 
 /* FOOTER */
 .footer {
-  display: flex; justify-content: space-between;
+  display: flex; justify-content: space-between; align-items: center;
   padding: 10px 20px;
   border-top: 1px solid var(--border);
   font-size: 11px;
   color: var(--text-faint);
 }
-.footer a { color: var(--text-dim); text-decoration: none; }
-.footer a:hover { color: var(--text); }
+.footer__left {
+  display: inline-flex; align-items: center; gap: 7px;
+}
+.footer__dot {
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  background: var(--success);
+  box-shadow: 0 0 6px rgba(111, 207, 151, 0.55);
+}
+.footer__right {
+  font-variant-numeric: tabular-nums;
+  color: var(--text-faint);
+}

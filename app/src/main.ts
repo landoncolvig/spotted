@@ -57,6 +57,28 @@ async function loadVersion() {
   } catch {}
 }
 
+type LibraryStatsEvent = Extract<SpottedEvent, { event: "library-stats" }>;
+
+async function refreshFooterStatus() {
+  try {
+    lastStats = null;
+    await invoke("fetch_status");
+    await new Promise((r) => setTimeout(r, 80));
+    const s = lastStats as SpottedEvent | null;
+    if (!s || s.event !== "library-stats") return;
+    const stats: LibraryStatsEvent = s;
+    const status = document.getElementById("footer-status");
+    if (!status) return;
+    if (stats.named > 0) {
+      status.textContent = `${stats.named} ${stats.named === 1 ? "person" : "people"} · ${stats.videos} clips`;
+    } else if (stats.videos > 0) {
+      status.textContent = `${stats.videos} clips · 0 named`;
+    } else {
+      status.textContent = "Library empty";
+    }
+  } catch {}
+}
+
 async function pickFolder() {
   const path = await open({ directory: true, multiple: false });
   if (typeof path === "string") {
@@ -415,9 +437,8 @@ async function openLibrary() {
 async function loadLibrary() {
   if (library.loading) return;
   library.loading = true;
-  // Reset cache; the listener will rebuild as events stream in
   library.people = [];
-  renderLibrarySidebar();
+  renderLibrarySkeleton();
   await ensureSidecarListener();
   try {
     await invoke("fetch_library_detail");
@@ -425,6 +446,22 @@ async function loadLibrary() {
     flashToast("Couldn't load library: " + String(e), true);
   } finally {
     library.loading = false;
+    refreshFooterStatus();
+  }
+}
+
+function renderLibrarySkeleton() {
+  const list = libraryEl<HTMLUListElement>("library-people");
+  list.replaceChildren();
+  list.className = "library-skeleton";
+  for (let i = 0; i < 6; i++) {
+    const li = document.createElement("li");
+    const name = document.createElement("span");
+    name.className = "bar bar--name";
+    const count = document.createElement("span");
+    count.className = "bar bar--count";
+    li.append(name, count);
+    list.appendChild(li);
   }
 }
 
@@ -448,6 +485,7 @@ function handleLibraryEvent(evt: SpottedEvent) {
 
 function renderLibrarySidebar() {
   const list = libraryEl<HTMLUListElement>("library-people");
+  list.className = "library-people";
   list.replaceChildren();
   const filter = (libraryEl<HTMLInputElement>("library-search").value || "")
     .toLowerCase()
@@ -700,4 +738,5 @@ window.addEventListener("DOMContentLoaded", () => {
   wireMenuEvents();
   wireTagsScreen();
   wireLibrary();
+  refreshFooterStatus();
 });

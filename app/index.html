@@ -11,7 +11,15 @@
     <main id="app">
       <header class="topbar">
         <div class="brand">
-          <span class="mark"></span>
+          <span class="mark" aria-hidden="true">
+            <span class="mark__inner">
+              <span class="mark__bracket mark__bracket--tl"></span>
+              <span class="mark__bracket mark__bracket--tr"></span>
+              <span class="mark__bracket mark__bracket--bl"></span>
+              <span class="mark__bracket mark__bracket--br"></span>
+              <span class="mark__dot"></span>
+            </span>
+          </span>
           <span class="wordmark">Spotted</span>
         </div>
         <div class="version" id="version">v0.0.1</div>
@@ -21,13 +29,18 @@
         <!-- IDLE -->
         <div class="screen screen--idle">
           <div class="dropzone" id="dropzone">
-            <div class="dropzone__frame"></div>
+            <div class="dropzone__frame">
+              <span class="dropzone__corner dropzone__corner--tl"></span>
+              <span class="dropzone__corner dropzone__corner--tr"></span>
+              <span class="dropzone__corner dropzone__corner--bl"></span>
+              <span class="dropzone__corner dropzone__corner--br"></span>
+            </div>
             <div class="dropzone__content">
-              <div class="dropzone__title">Drop footage here</div>
-              <div class="dropzone__sub">or click to choose a folder</div>
+              <div class="dropzone__title">Drop a folder of footage</div>
+              <div class="dropzone__sub">or click to browse</div>
             </div>
           </div>
-          <p class="hint">Spotted reads frames, finds faces, and writes who's who back into each clip's metadata.</p>
+          <p class="hint">Spotted reads frames, finds faces, and writes who's who into each clip — searchable in Finder, Premiere, and DaVinci.</p>
         </div>
 
         <!-- TAGS -->
@@ -110,8 +123,11 @@
       </section>
 
       <footer class="footer">
-        <span class="footer__left">Local. No cloud.</span>
-        <a class="footer__right" id="link-help" href="#">Help</a>
+        <span class="footer__left">
+          <span class="footer__dot" aria-hidden="true"></span>
+          Local. No cloud.
+        </span>
+        <span class="footer__right" id="footer-status">—</span>
       </footer>
     </main>
   </body>
