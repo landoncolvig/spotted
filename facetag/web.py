@@ -30,8 +30,10 @@ def create_app(db_path: Path, thumb_dir: Path) -> Flask:
         for cid, count, name in summary:
             existing = (name or "").replace('"', "&quot;")
             badge = f'<span class="hint">already: {existing}</span>' if name else ""
+            initial_class = " is-saved" if name else ""
             cards.append(f"""
-            <div class="card" data-cluster="{cid}">
+            <div class="card{initial_class}" data-cluster="{cid}">
+              <span class="card-status" aria-live="polite"></span>
               <div class="head">
                 <span class="cid">cluster {cid}</span>
                 <span class="cnt">{count} faces</span>
@@ -63,6 +65,12 @@ def create_app(db_path: Path, thumb_dir: Path) -> Flask:
 
     @app.route("/save", methods=["POST"])
     def save():
+        """Bulk save + final merge. Used by the "Done" button.
+
+        Per-card saves use /save-one — by the time the user hits Done,
+        most names are already persisted; this path just catches anything
+        in-flight and runs the auto-merge.
+        """
         data = request.get_json(force=True) or {}
         names: dict[str, str] = data.get("names", {})
         with _conn() as conn:
@@ -79,6 +87,28 @@ def create_app(db_path: Path, thumb_dir: Path) -> Flask:
             merged = db.merge_clusters_by_name(conn)
         merged_count = sum(max(0, len(v) - 1) for v in merged.values())
         return jsonify({"saved": saved, "merged": merged_count, "merged_by": merged})
+
+    @app.route("/save-one", methods=["POST"])
+    def save_one():
+        """Save a single cluster's name. Used by per-card auto-save.
+
+        Doesn't run the merge step — that's expensive and only matters
+        once the user is done with all clusters. Empty name clears any
+        previously-saved name for that cluster.
+        """
+        data = request.get_json(force=True) or {}
+        try:
+            cid = int(data.get("cluster_id"))
+        except (TypeError, ValueError):
+            return jsonify({"error": "cluster_id required"}), 400
+        name = (data.get("name") or "").strip()
+        with _conn() as conn:
+            if not name:
+                conn.execute("DELETE FROM people WHERE cluster_id = ?", (cid,))
+                conn.commit()
+            else:
+                db.name_cluster(conn, cid, name)
+        return jsonify({"cluster_id": cid, "name": name or None})
 
     @app.route("/hide/<int:cluster_id>", methods=["POST"])
     def hide(cluster_id: int):
@@ -180,11 +210,27 @@ _PAGE = r"""<!doctype html>
     border-radius: 12px; padding: 10px;
     display: flex; flex-direction: column; gap: 8px;
     transition: border-color .15s ease, background .15s ease;
+    position: relative;
   }
   .card:focus-within {
     border-color: var(--primary);
     background: var(--surface-2);
   }
+  /* Saved-state indicator on each card */
+  .card-status {
+    position: absolute; top: 8px; right: 32px;
+    font-size: 10px; font-weight: 500;
+    color: var(--text-faint);
+    opacity: 0; transition: opacity .15s ease, color .15s ease;
+    user-select: none;
+    pointer-events: none;
+  }
+  .card.is-saving .card-status { opacity: 1; color: var(--text-faint); }
+  .card.is-saving .card-status::before { content: "saving…"; }
+  .card.is-saved .card-status { opacity: 1; color: var(--success); }
+  .card.is-saved .card-status::before { content: "✓ saved"; }
+  .card.is-saveerror .card-status { opacity: 1; color: var(--danger); }
+  .card.is-saveerror .card-status::before { content: "× retry"; }
   .card .head {
     display: flex; justify-content: space-between;
     font-size: 11px; color: var(--text-faint);
@@ -244,10 +290,10 @@ _PAGE = r"""<!doctype html>
 </head><body>
 <header>
   <h1>Name the people</h1>
-  <span class="meta">__COUNT__ clusters &middot; <kbd>Tab</kbd> to advance, <kbd>⌘S</kbd> to save</span>
+  <span class="meta">__COUNT__ clusters &middot; saves as you type &middot; <kbd>Tab</kbd> to advance</span>
   <input class="filter" id="filter" placeholder="filter…" autocomplete="off">
   <div class="actions">
-    <button id="save">Save All</button>
+    <button id="save">Done</button>
   </div>
 </header>
 <div class="grid" id="grid">__CARDS__</div>
@@ -265,7 +311,10 @@ function toast(msg, err) {
 
 async function save() {
   const btn = $("#save");
-  btn.disabled = true; btn.textContent = "Saving…";
+  btn.disabled = true; btn.textContent = "Finishing…";
+  // Catch any still-in-flight names (rare if per-card autosave works,
+  // but covers the edge where user clicks Done immediately after typing
+  // before the debounce fires).
   const names = {};
   $$(".card").forEach(c => {
     if (c.classList.contains("is-hiding")) return;
@@ -286,7 +335,7 @@ async function save() {
   } catch (e) {
     toast("Save failed: " + e.message, true);
   } finally {
-    btn.disabled = false; btn.textContent = "Save All";
+    btn.disabled = false; btn.textContent = "Done";
   }
 }
 
@@ -294,12 +343,41 @@ async function hideCard(cid, cardEl) {
   cardEl.classList.add("is-hiding");
   try {
     await fetch(`/hide/${cid}`, { method: "POST" });
-    // Remove from DOM after the fade
     setTimeout(() => cardEl.remove(), 200);
   } catch (e) {
     cardEl.classList.remove("is-hiding");
     toast("Hide failed: " + e.message, true);
   }
+}
+
+// Per-card auto-save: writes each name to disk as the user types.
+// Debounced 350ms after the last keystroke; immediate on blur.
+const saveTimers = new Map();
+function setCardState(card, state) {
+  card.classList.remove("is-saving", "is-saved", "is-saveerror");
+  if (state) card.classList.add(state);
+}
+async function saveOne(card) {
+  const cid = card.dataset.cluster;
+  const input = card.querySelector("input");
+  const name = input.value.trim();
+  setCardState(card, "is-saving");
+  try {
+    const r = await fetch("/save-one", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({ cluster_id: Number(cid), name }),
+    });
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    setCardState(card, name ? "is-saved" : null);
+  } catch (e) {
+    setCardState(card, "is-saveerror");
+  }
+}
+function scheduleSave(card) {
+  const cid = card.dataset.cluster;
+  clearTimeout(saveTimers.get(cid));
+  saveTimers.set(cid, setTimeout(() => saveOne(card), 350));
 }
 
 $("#save").addEventListener("click", save);
@@ -318,6 +396,24 @@ document.addEventListener("click", (e) => {
   const cid = btn.dataset.cluster;
   hideCard(cid, card);
 });
+
+// Per-card auto-save listeners
+document.addEventListener("input", (e) => {
+  const input = e.target;
+  if (input.tagName !== "INPUT" || input.classList.contains("filter")) return;
+  const card = input.closest(".card");
+  if (!card) return;
+  scheduleSave(card);
+});
+document.addEventListener("blur", (e) => {
+  const input = e.target;
+  if (input.tagName !== "INPUT" || input.classList.contains("filter")) return;
+  const card = input.closest(".card");
+  if (!card) return;
+  // Flush any pending debounced save immediately on blur
+  clearTimeout(saveTimers.get(card.dataset.cluster));
+  saveOne(card);
+}, true);
 
 const filter = $("#filter");
 filter.addEventListener("input", () => {
