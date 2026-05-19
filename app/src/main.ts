@@ -68,15 +68,61 @@ async function refreshFooterStatus() {
     if (!s || s.event !== "library-stats") return;
     const stats: LibraryStatsEvent = s;
     const status = document.getElementById("footer-status");
-    if (!status) return;
-    if (stats.named > 0) {
-      status.textContent = `${stats.named} ${stats.named === 1 ? "person" : "people"} · ${stats.videos} clips`;
-    } else if (stats.videos > 0) {
-      status.textContent = `${stats.videos} clips · 0 named`;
-    } else {
-      status.textContent = "Library empty";
+    if (status) {
+      if (stats.named > 0) {
+        status.textContent = `${stats.named} ${stats.named === 1 ? "person" : "people"} · ${stats.videos} clips`;
+      } else if (stats.videos > 0) {
+        status.textContent = `${stats.videos} clips · 0 named`;
+      } else {
+        status.textContent = "Library empty";
+      }
     }
+    // Also reflect in the window title so it shows even when minimized.
+    let title = "Spotted";
+    if (stats.named > 0) {
+      title = `Spotted — ${stats.named} ${stats.named === 1 ? "person" : "people"} · ${stats.videos} clips`;
+    } else if (stats.videos > 0) {
+      title = `Spotted — ${stats.videos} clips`;
+    }
+    try { await invoke("set_window_title", { title }); } catch {}
   } catch {}
+}
+
+// ---------- WELCOME ----------
+const WELCOME_KEY = "spotted.hasSeenWelcome.v1";
+
+function maybeShowWelcome() {
+  try {
+    if (!localStorage.getItem(WELCOME_KEY)) {
+      showWelcome();
+    }
+  } catch {
+    /* localStorage might be blocked — skip welcome rather than crash */
+  }
+}
+
+function showWelcome() {
+  const w = document.getElementById("welcome");
+  if (w) w.hidden = false;
+}
+
+function dismissWelcome(persist = true) {
+  const w = document.getElementById("welcome");
+  if (w) w.hidden = true;
+  if (persist) {
+    try { localStorage.setItem(WELCOME_KEY, "1"); } catch {}
+  }
+}
+
+function wireWelcome() {
+  document.getElementById("welcome-cta")?.addEventListener("click", () => dismissWelcome(true));
+  document.getElementById("welcome-skip")?.addEventListener("click", () => dismissWelcome(true));
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") {
+      const w = document.getElementById("welcome");
+      if (w && !w.hidden) dismissWelcome(true);
+    }
+  });
 }
 
 async function pickFolder() {
@@ -681,6 +727,10 @@ function wireMenuEvents() {
     await ensureSidecarListener();
     await runTagWrite();
   });
+  listen("menu://show-welcome", () => {
+    try { localStorage.removeItem(WELCOME_KEY); } catch {}
+    showWelcome();
+  });
   listen("menu://check-updates", async () => {
     try {
       const newVersion = await invoke<string | null>("check_for_updates");
@@ -738,5 +788,7 @@ window.addEventListener("DOMContentLoaded", () => {
   wireMenuEvents();
   wireTagsScreen();
   wireLibrary();
+  wireWelcome();
+  maybeShowWelcome();
   refreshFooterStatus();
 });

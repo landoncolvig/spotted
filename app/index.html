@@ -9,6 +9,50 @@
   </head>
   <body>
     <main id="app">
+      <!-- WELCOME (first launch overlay) -->
+      <div id="welcome" class="welcome" hidden>
+        <div class="welcome__card">
+          <div class="welcome__mark" aria-hidden="true">
+            <span class="mark__inner">
+              <span class="mark__bracket mark__bracket--tl"></span>
+              <span class="mark__bracket mark__bracket--tr"></span>
+              <span class="mark__bracket mark__bracket--bl"></span>
+              <span class="mark__bracket mark__bracket--br"></span>
+              <span class="mark__dot"></span>
+            </span>
+          </div>
+          <h1 class="welcome__title">Welcome to Spotted</h1>
+          <p class="welcome__sub">Find anyone in your footage.</p>
+
+          <ol class="welcome__steps">
+            <li class="welcome__step">
+              <div class="welcome__step-num">1</div>
+              <div class="welcome__step-content">
+                <div class="welcome__step-title">Drop a folder</div>
+                <div class="welcome__step-text">Spotted reads every clip and detects faces locally on your Mac. No cloud.</div>
+              </div>
+            </li>
+            <li class="welcome__step">
+              <div class="welcome__step-num">2</div>
+              <div class="welcome__step-content">
+                <div class="welcome__step-title">Name the people</div>
+                <div class="welcome__step-text">One page of face grids. Type names as you go — auto-saved.</div>
+              </div>
+            </li>
+            <li class="welcome__step">
+              <div class="welcome__step-num">3</div>
+              <div class="welcome__step-content">
+                <div class="welcome__step-title">Search anywhere</div>
+                <div class="welcome__step-text">Finder, Premiere, DaVinci — search by name finds every clip.</div>
+              </div>
+            </li>
+          </ol>
+
+          <button class="btn welcome__cta" id="welcome-cta">Get started</button>
+          <button class="welcome__skip" id="welcome-skip">Skip</button>
+        </div>
+      </div>
+
       <header class="topbar">
         <div class="brand">
           <span class="mark" aria-hidden="true">
@@ -40,7 +84,8 @@
               <div class="dropzone__sub">or click to browse</div>
             </div>
           </div>
-          <p class="hint">Spotted reads frames, finds faces, and writes who's who into each clip — searchable in Finder, Premiere, and DaVinci.</p>
+          <p class="tagline">Find anyone in your footage.</p>
+          <p class="hint">Spotted reads frames, finds faces, and writes names into each clip — searchable in Finder, Premiere, and DaVinci.</p>
         </div>
 
         <!-- TAGS -->
@@ -89,7 +134,10 @@
               <ul class="library-people" id="library-people"></ul>
             </aside>
             <main class="library-detail">
-              <div class="library-empty" id="library-empty">Select someone to see their clips.</div>
+              <div class="library-empty" id="library-empty">
+                <p class="library-empty-title">Select someone</p>
+                <p class="library-empty-text">Pick a name from the sidebar to see every clip that person appears in.</p>
+              </div>
               <div class="library-person" id="library-person" hidden>
                 <header class="person-header">
                   <input class="person-name" id="person-name" />

@@ -297,6 +297,15 @@ async fn reveal_in_finder(path: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+async fn set_window_title(window: Window, title: String) -> Result<(), String> {
+    window.set_title(&title).map_err(|e| e.to_string())
+}
+
+fn open_url(url: &str) -> std::io::Result<()> {
+    std::process::Command::new("open").arg(url).spawn().map(|_| ())
+}
+
+#[tauri::command]
 async fn check_for_updates(app: AppHandle) -> Result<Option<String>, String> {
     match app.updater() {
         Ok(updater) => match updater.check().await {
@@ -349,6 +358,10 @@ pub fn run() {
                         &MenuItemBuilder::with_id("retag_library", "Re-tag Library")
                             .build(app)?,
                     )
+                    .item(
+                        &MenuItemBuilder::with_id("show_welcome", "Show Welcome…")
+                            .build(app)?,
+                    )
                     .separator()
                     .services()
                     .separator()
@@ -384,8 +397,24 @@ pub fn run() {
                     .close_window()
                     .build()?;
 
+                let help_submenu = SubmenuBuilder::new(app, "Help")
+                    .item(
+                        &MenuItemBuilder::with_id("show_welcome", "Show Welcome…")
+                            .build(app)?,
+                    )
+                    .separator()
+                    .item(
+                        &MenuItemBuilder::with_id("open_github", "View on GitHub")
+                            .build(app)?,
+                    )
+                    .item(
+                        &MenuItemBuilder::with_id("report_issue", "Report an Issue…")
+                            .build(app)?,
+                    )
+                    .build()?;
+
                 let menu = MenuBuilder::new(app)
-                    .items(&[&app_submenu, &file_submenu, &edit_submenu, &window_submenu])
+                    .items(&[&app_submenu, &file_submenu, &edit_submenu, &window_submenu, &help_submenu])
                     .build()?;
 
                 app.set_menu(menu)?;
@@ -411,6 +440,17 @@ pub fn run() {
                             let _ = window.emit("menu://open-library", ());
                         }
                     }
+                    "show_welcome" => {
+                        if let Some(window) = handle.get_webview_window("main") {
+                            let _ = window.emit("menu://show-welcome", ());
+                        }
+                    }
+                    "open_github" => {
+                        let _ = open_url("https://github.com/landoncolvig/spotted");
+                    }
+                    "report_issue" => {
+                        let _ = open_url("https://github.com/landoncolvig/spotted/issues/new");
+                    }
                     _ => {}
                 });
             }
@@ -427,6 +467,7 @@ pub fn run() {
             rename_person,
             delete_person,
             reveal_in_finder,
+            set_window_title,
             check_for_updates,
             app_version
         ])

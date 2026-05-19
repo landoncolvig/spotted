@@ -3645,7 +3645,7 @@ dependencies = [
 
 [[package]]
 name = "spotted"
-version = "0.0.13"
+version = "0.0.15"
 dependencies = [
  "reqwest 0.12.28",
  "serde",
