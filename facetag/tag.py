@@ -81,24 +81,37 @@ def videos_with_keywords(conn: sqlite3.Connection) -> dict[str, list[str]]:
 def write_keywords(video_path: Path, names: list[str], *, replace: bool = True) -> None:
     """Write keywords into a video file via exiftool.
 
-    Uses `XMP-dc:Subject` (the multi-value Bag field) rather than the
-    `-Keywords` alias, because the alias maps to IPTC:Keywords which
-    QuickTime .mov files don't support as a writable container — the
-    alias silently no-ops on .mov. Premiere Pro and DaVinci Resolve both
-    surface XMP-dc:Subject as the Keywords column.
+    Writes to two keyword namespaces so both editor families see the data:
 
-    `replace=True` (default) clears Subject first so the set is exactly
-    the new keywords. `replace=False` appends.
+    1. **XMP-dc:Subject** — Adobe XMP. Premiere Pro reads this directly
+       as Keywords in the Project panel.
+    2. **Keys:Keywords** — QuickTime `com.apple.quicktime.keywords` atom.
+       DaVinci Resolve, Final Cut Pro, and Apple Photos read this as the
+       Keywords field. The `-api QuickTimeHandler=1` flag is required for
+       exiftool to write into the Keys atom.
+
+    The IPTC:Keywords alias DOES NOT WORK on .mov files (silently no-ops);
+    that's why we write to the underlying namespaces directly.
+
+    `replace=True` (default) clears each namespace first so the set is
+    exactly the new keywords. `replace=False` appends.
     """
     if not names:
         return
     exe = _exiftool_path()
-    args = [exe, "-overwrite_original", "-q"]
+    args = [
+        exe, "-overwrite_original", "-q",
+        "-api", "QuickTimeHandler=1",
+    ]
     if replace:
-        # Empty assignment clears existing values
+        # XMP-dc:Subject is a multi-value Bag; clear before per-name +=
         args.append("-XMP-dc:Subject=")
     for name in names:
         args.append(f"-XMP-dc:Subject+={name}")
+    # Keys:Keywords is a single string (not a multi-value list under exiftool),
+    # so we set the whole comma-joined value once. Always replaces; behavior
+    # matches XMP since names came from one canonical mapping.
+    args.append(f"-Keys:Keywords={', '.join(names)}")
     args.append(str(video_path))
 
     result = subprocess.run(args, capture_output=True, text=True)
@@ -108,18 +121,18 @@ def write_keywords(video_path: Path, names: list[str], *, replace: bool = True) 
         )
 
 
-def read_keywords(video_path: Path) -> list[str]:
-    """Read back keywords from a file (for verification)."""
+def read_keywords(video_path: Path) -> dict[str, list[str]]:
+    """Read back keywords from each namespace. Useful for verification."""
     exe = _exiftool_path()
-    result = subprocess.run(
-        [exe, "-s", "-s", "-s", "-sep", ", ", "-XMP-dc:Subject", str(video_path)],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if result.returncode != 0:
-        return []
-    raw = result.stdout.strip()
-    if not raw:
-        return []
-    return [k.strip() for k in raw.split(",") if k.strip()]
+    out: dict[str, list[str]] = {}
+    for ns, tag in [("xmp", "-XMP-dc:Subject"), ("keys", "-Keys:Keywords")]:
+        result = subprocess.run(
+            [exe, "-s", "-s", "-s", "-sep", ", ", tag, str(video_path)],
+            capture_output=True, text=True, check=False,
+        )
+        if result.returncode == 0:
+            raw = result.stdout.strip()
+            out[ns] = [k.strip() for k in raw.split(",") if k.strip()] if raw else []
+        else:
+            out[ns] = []
+    return out

@@ -551,6 +551,8 @@ body {
   padding: 24px;
   animation: welcome-fade-in 0.3s ease-out;
 }
+/* HTML hidden attribute must win over .welcome's display:flex. */
+.welcome[hidden] { display: none !important; }
 @keyframes welcome-fade-in {
   from { opacity: 0; }
   to   { opacity: 1; }
@@ -691,7 +693,7 @@ body {
   transition: width .35s cubic-bezier(0.4, 0, 0.2, 1);
   position: relative;
 }
-/* Shimmer sweep over the filled portion while moving */
+/* Shimmer sweep over the filled portion while determinate */
 .progress__bar::after {
   content: "";
   position: absolute; inset: 0;
@@ -704,6 +706,30 @@ body {
 @keyframes progress-shimmer {
   0%   { transform: translateX(-100%); }
   100% { transform: translateX(100%); }
+}
+
+/* Indeterminate state — used during the gap between sidecar spawn and
+   the first progress event. Bar slides back and forth instead of
+   filling, signaling "something's happening, I just don't know how far". */
+.progress.is-indeterminate .progress__bar {
+  width: 30%;
+  transition: none;
+  animation: progress-indeterminate 1.5s ease-in-out infinite;
+}
+.progress.is-indeterminate .progress__bar::after {
+  animation: none;
+}
+@keyframes progress-indeterminate {
+  0%   { transform: translateX(-100%); }
+  50%  { transform: translateX(266%);   }
+  100% { transform: translateX(-100%); }
+}
+
+.working__cancel {
+  margin-top: 22px;
+  font-size: 11px;
+  padding: 6px 14px;
+  align-self: center;
 }
 .status__detail {
   margin-top: 12px;

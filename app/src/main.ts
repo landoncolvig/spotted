@@ -106,16 +106,24 @@ function maybeShowWelcome() {
   }
 }
 
-function showWelcome() {
-  const w = document.getElementById("welcome");
-  if (w) w.hidden = false;
-}
-
 function dismissWelcome(persist = true) {
   const w = document.getElementById("welcome");
-  if (w) w.hidden = true;
+  if (w) {
+    w.hidden = true;
+    // Belt and suspenders: even if a CSS rule wins over [hidden],
+    // inline display:none always wins.
+    w.style.display = "none";
+  }
   if (persist) {
     try { localStorage.setItem(WELCOME_KEY, "1"); } catch {}
+  }
+}
+
+function showWelcome() {
+  const w = document.getElementById("welcome");
+  if (w) {
+    w.hidden = false;
+    w.style.display = "";  // clear the inline override
   }
 }
 
@@ -183,7 +191,15 @@ function readTagsInput(): string[] {
 }
 
 function setProgress(pct: number) {
+  // Switch out of indeterminate mode the moment we get a real value
+  const wrap = document.getElementById("progress");
+  if (wrap) wrap.classList.remove("is-indeterminate");
   progressBar.style.width = `${Math.max(0, Math.min(100, pct))}%`;
+}
+
+function setProgressIndeterminate() {
+  const wrap = document.getElementById("progress");
+  if (wrap) wrap.classList.add("is-indeterminate");
 }
 
 function parseSpotted(line: string): SpottedEvent | null {
@@ -309,7 +325,7 @@ async function runBatch(path: string, tags: string[] = []) {
   currentPath = path;
   setState("working");
   workingPath.textContent = path;
-  setProgress(0);
+  setProgressIndeterminate();
   workingLabel.textContent = "Spotting";
   workingDetail.textContent = "Looking for footage…";
 
@@ -403,7 +419,7 @@ function mountLabelScreen() {
 
 async function runTagWrite() {
   setState("working");
-  setProgress(0);
+  setProgressIndeterminate();
   workingLabel.textContent = "Writing keywords";
   workingDetail.textContent = "Running exiftool, per clip…";
   try {
@@ -482,6 +498,26 @@ btnReveal.addEventListener("click", async () => {
       console.warn("reveal failed:", e);
     }
   }
+});
+
+const btnCancel = document.getElementById("btn-cancel") as HTMLButtonElement | null;
+btnCancel?.addEventListener("click", async () => {
+  const ok = confirm("Stop the current batch? Anything already detected stays in the index.");
+  if (!ok) return;
+  btnCancel.disabled = true;
+  btnCancel.textContent = "Cancelling…";
+  try {
+    await invoke<number>("cancel_work");
+    flashToast("Cancelled.");
+  } catch (e) {
+    flashToast("Cancel failed: " + String(e), true);
+  }
+  // Send the user back to idle. The sidecar might still emit a few
+  // events as it winds down — that's fine.
+  setState("idle");
+  setProgress(0);
+  btnCancel.disabled = false;
+  btnCancel.textContent = "Cancel";
 });
 
 function isBusy(): boolean {

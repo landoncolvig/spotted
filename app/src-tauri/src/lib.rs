@@ -1,9 +1,16 @@
 use serde::Serialize;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, Window};
 use tauri_plugin_shell::process::CommandEvent;
 use tauri_plugin_shell::ShellExt;
 use tauri_plugin_updater::UpdaterExt;
+
+/// Shared state: PIDs of currently-running sidecar processes. Cancel
+/// command signals all of them so a single click stops whatever phase
+/// the pipeline is in.
+#[derive(Default)]
+struct ActiveChildren(Arc<Mutex<Vec<u32>>>);
 
 #[derive(Serialize, Clone)]
 struct SidecarLine {
@@ -27,6 +34,30 @@ async fn run_sidecar(
         .args(args)
         .spawn()
         .map_err(|e| format!("sidecar spawn: {e}"))?;
+
+    // Register the child PID so cancel_work can find it.
+    let pid = _child.pid();
+    if let Some(state) = app.try_state::<ActiveChildren>() {
+        if let Ok(mut v) = state.0.lock() {
+            v.push(pid);
+        }
+    }
+    // Defer unregistration to a scope-exit guard so we always clean up
+    // even on early return.
+    struct PidGuard {
+        pid: u32,
+        bucket: Arc<Mutex<Vec<u32>>>,
+    }
+    impl Drop for PidGuard {
+        fn drop(&mut self) {
+            if let Ok(mut v) = self.bucket.lock() {
+                v.retain(|p| *p != self.pid);
+            }
+        }
+    }
+    let _guard = app
+        .try_state::<ActiveChildren>()
+        .map(|s| PidGuard { pid, bucket: s.0.clone() });
 
     let mut code = -1i32;
     // Tail of BOTH streams. facetag prints error messages via rich.console
@@ -311,6 +342,23 @@ fn open_url(url: &str) -> std::io::Result<()> {
 }
 
 #[tauri::command]
+async fn cancel_work(app: AppHandle) -> Result<u32, String> {
+    let pids: Vec<u32> = app
+        .try_state::<ActiveChildren>()
+        .and_then(|s| s.0.lock().ok().map(|v| v.clone()))
+        .unwrap_or_default();
+    let count = pids.len() as u32;
+    for pid in pids {
+        // SIGTERM first; sidecar's Python will exit cleanly.
+        let _ = std::process::Command::new("kill")
+            .arg("-TERM")
+            .arg(pid.to_string())
+            .status();
+    }
+    Ok(count)
+}
+
+#[tauri::command]
 async fn check_for_updates(app: AppHandle) -> Result<Option<String>, String> {
     match app.updater() {
         Ok(updater) => match updater.check().await {
@@ -330,12 +378,42 @@ fn app_version() -> String {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .manage(ActiveChildren::default())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
+            // Auto-check for updates on launch. Tauri v2 (unlike v1) does
+            // NOT auto-check the updater plugin — we have to invoke it
+            // ourselves. Without this call, the "dialog: true" config in
+            // tauri.conf.json never shows the update prompt and users get
+            // stranded on old versions.
+            let handle_for_update = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                // Give the window a moment to mount before showing any
+                // native dialog — also reduces chance of stepping on the
+                // welcome overlay on first launch.
+                tokio::time::sleep(Duration::from_secs(3)).await;
+                if let Ok(updater) = handle_for_update.updater() {
+                    match updater.check().await {
+                        Ok(Some(update)) => {
+                            // Drive the download+install inline. The
+                            // "dialog: true" config makes Tauri prompt
+                            // the user automatically before installing.
+                            let _ = update
+                                .download_and_install(|_, _| {}, || {})
+                                .await;
+                        }
+                        Ok(None) => { /* up to date */ }
+                        Err(e) => {
+                            eprintln!("updater check failed: {e}");
+                        }
+                    }
+                }
+            });
+
             // Wire macOS menu bar with native shortcuts.
             #[cfg(target_os = "macos")]
             {
@@ -475,6 +553,7 @@ pub fn run() {
             delete_person,
             reveal_in_finder,
             set_window_title,
+            cancel_work,
             check_for_updates,
             app_version
         ])
