@@ -174,9 +174,24 @@ def label_web(
     thumb_dir: Path = typer.Option(DEFAULT_LABEL_DIR, "--thumbs"),
     port: int = typer.Option(8765, "--port"),
     no_browser: bool = typer.Option(False, "--no-browser", help="Don't auto-open browser."),
+    scope_path: list[str] = typer.Option(
+        None,
+        "--scope-path",
+        help=(
+            "Restrict the labeler to clusters that contain at least one face "
+            "from a video matching this path (file) or under this directory. "
+            "Repeatable. Users can toggle 'show all' from the chip in the UI."
+        ),
+    ),
 ):
     """Open a one-page web labeler. See every cluster, type names, hit Save All."""
-    _web.serve(db_path, thumb_dir, port=port, open_browser=not no_browser)
+    _web.serve(
+        db_path,
+        thumb_dir,
+        port=port,
+        open_browser=not no_browser,
+        scope_paths=list(scope_path) if scope_path else None,
+    )
 
 
 @app.command()

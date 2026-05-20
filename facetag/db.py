@@ -154,6 +154,65 @@ def cluster_summary(conn: sqlite3.Connection, include_hidden: bool = False) -> l
     return [row for row in out if row[0] not in hidden]
 
 
+def cluster_summary_with_videos(
+    conn: sqlite3.Connection,
+    *,
+    include_hidden: bool = False,
+    scope_paths: list[str] | None = None,
+) -> list[tuple[int, int, str | None, list[str]]]:
+    """Return (cluster_id, face_count, name?, video_paths) per cluster.
+
+    `video_paths` is the full sorted list of videos that contain at least
+    one face in this cluster — the labeler uses it to display per-card
+    "seen in" hints so a user can tell which footage each unnamed cluster
+    came from before naming it.
+
+    `scope_paths`, if given, filters to clusters that include at least one
+    face from a video whose absolute path equals any scope path OR sits
+    inside a scope directory (prefix match on `<scope>/`). This lets the
+    labeler focus on "just the clip(s) I just dropped" instead of every
+    unnamed cluster in the library — the original sin that caused users
+    to label faces from old batches by mistake.
+    """
+    base = cluster_summary(conn, include_hidden=include_hidden)
+    if not base:
+        return []
+
+    cids = [c[0] for c in base]
+    placeholders = ",".join(["?"] * len(cids))
+    rows = conn.execute(
+        f"SELECT f.cluster_id, v.path "
+        f"FROM faces f JOIN videos v ON v.id = f.video_id "
+        f"WHERE f.cluster_id IN ({placeholders}) "
+        f"GROUP BY f.cluster_id, v.path "
+        f"ORDER BY f.cluster_id, v.path",
+        cids,
+    ).fetchall()
+    by_cluster: dict[int, list[str]] = {}
+    for cid, vp in rows:
+        by_cluster.setdefault(cid, []).append(vp)
+
+    def _in_scope(video_path: str, scopes: list[str]) -> bool:
+        for s in scopes:
+            if video_path == s or video_path.startswith(s.rstrip("/") + "/"):
+                return True
+        return False
+
+    if scope_paths:
+        # Resolve each scope path so a "~/Downloads" arg matches the
+        # absolute path stored in `videos.path`.
+        import os
+        scopes = [os.path.realpath(os.path.expanduser(p)) for p in scope_paths]
+        out: list[tuple[int, int, str | None, list[str]]] = []
+        for cid, count, name in base:
+            vids = by_cluster.get(cid, [])
+            if any(_in_scope(v, scopes) for v in vids):
+                out.append((cid, count, name, vids))
+        return out
+
+    return [(cid, count, name, by_cluster.get(cid, [])) for cid, count, name in base]
+
+
 def name_cluster(conn: sqlite3.Connection, cluster_id: int, name: str) -> None:
     conn.execute(
         "INSERT INTO people(cluster_id, name) VALUES (?, ?) "

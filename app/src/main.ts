@@ -347,7 +347,10 @@ async function runBatch(path: string, tags: string[] = []) {
     await invoke<number>("cluster_faces");
     workingLabel.textContent = "Naming people";
     workingDetail.textContent = "Opening labeler…";
-    await invoke<number>("start_label_server", { port: LABEL_PORT });
+    await invoke<number>("start_label_server", {
+      port: LABEL_PORT,
+      scopePaths: currentPath ? [currentPath] : null,
+    });
     mountLabelScreen();
     setState("label");
   } catch (err) {

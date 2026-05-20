@@ -155,6 +155,7 @@ async fn start_label_server(
     app: AppHandle,
     window: Window,
     port: u16,
+    scope_paths: Option<Vec<String>>,
 ) -> Result<u16, String> {
     use std::sync::{Arc, Mutex};
 
@@ -163,13 +164,25 @@ async fn start_label_server(
         .sidecar("spotted-sidecar")
         .map_err(|e| format!("sidecar lookup: {e}"))?;
 
+    // Build sidecar args. Append --scope-path for each batch path the
+    // frontend hands us so the labeler shows only clusters touching the
+    // freshly-dropped clip(s). The labeler still exposes a "show all"
+    // toggle in its header chip for cross-batch labeling.
+    let mut args: Vec<String> = vec![
+        "label-web".to_string(),
+        "--port".to_string(),
+        port.to_string(),
+        "--no-browser".to_string(),
+    ];
+    if let Some(paths) = scope_paths {
+        for p in paths {
+            args.push("--scope-path".to_string());
+            args.push(p);
+        }
+    }
+
     let (mut rx, child) = sidecar
-        .args([
-            "label-web".to_string(),
-            "--port".to_string(),
-            port.to_string(),
-            "--no-browser".to_string(),
-        ])
+        .args(args)
         .spawn()
         .map_err(|e| format!("sidecar spawn: {e}"))?;
 

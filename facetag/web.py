@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import io
+import os
 import threading
 import webbrowser
 from pathlib import Path
@@ -13,21 +14,65 @@ from . import db
 from .label import _crop_face, _make_grid
 
 
-def create_app(db_path: Path, thumb_dir: Path) -> Flask:
+def _render_seen_in(video_paths: list[str], max_shown: int = 3) -> str:
+    """Render the "Seen in: a.mov, b.mov, +N more" caption for a cluster card.
+
+    Shows up to `max_shown` basenames so the user can tell at a glance which
+    clip(s) the cluster came from before naming it. Empty list → empty string
+    (caller still gets a stable DOM structure to attach to).
+    """
+    if not video_paths:
+        return ""
+    names = [os.path.basename(p) for p in video_paths]
+    shown = names[:max_shown]
+    extra = len(names) - len(shown)
+    label = ", ".join(shown)
+    if extra > 0:
+        label += f", +{extra} more"
+    title = "&#10;".join(names)  # newline-separated for the hover tooltip
+    return f'<span class="seen-in" title="{title}">seen in: {label}</span>'
+
+
+def create_app(
+    db_path: Path,
+    thumb_dir: Path,
+    *,
+    scope_paths: list[str] | None = None,
+) -> Flask:
     thumb_dir.mkdir(parents=True, exist_ok=True)
     app = Flask(__name__)
     app.config["DB_PATH"] = db_path
     app.config["THUMB_DIR"] = thumb_dir
+    app.config["SCOPE_PATHS"] = list(scope_paths) if scope_paths else []
 
     def _conn():
         return db.connect(db_path)
 
+    def _scope_label() -> str:
+        """Short human label for the active scope filter, used in the chip."""
+        sp = app.config["SCOPE_PATHS"]
+        if not sp:
+            return ""
+        # If a single file: show its basename. If a dir: show its basename + "/".
+        # Multiple: "N paths".
+        import os
+        if len(sp) == 1:
+            p = sp[0].rstrip("/")
+            base = os.path.basename(p) or p
+            return base + ("/" if os.path.isdir(sp[0]) else "")
+        return f"{len(sp)} paths"
+
     @app.route("/")
     def index() -> str:
+        # ?show=all overrides the scope filter so the user can still see
+        # every unnamed cluster if they want to label cross-batch.
+        show_all = request.args.get("show") == "all"
+        scope = None if show_all else (app.config["SCOPE_PATHS"] or None)
         with _conn() as conn:
-            summary = db.cluster_summary(conn)
+            summary = db.cluster_summary_with_videos(conn, scope_paths=scope)
+
         cards = []
-        for cid, count, name in summary:
+        for cid, count, name, video_paths in summary:
             existing = (name or "").replace('"', "&quot;")
             badge = f'<span class="hint">already: {existing}</span>' if name else ""
             initial_class = " is-saved" if name else ""
@@ -42,9 +87,30 @@ def create_app(db_path: Path, thumb_dir: Path) -> Flask:
               <img loading="lazy" src="/thumb/{cid}.jpg" alt="cluster {cid}">
               <input type="text" name="name-{cid}" placeholder="name…" value="{existing}" autocomplete="off">
               {badge}
+              {_render_seen_in(video_paths)}
             </div>
             """)
-        return _PAGE.replace("__CARDS__", "\n".join(cards)).replace("__COUNT__", str(len(summary)))
+
+        scope_chip = ""
+        if app.config["SCOPE_PATHS"]:
+            label = _scope_label()
+            if show_all:
+                scope_chip = (
+                    f'<a class="scope-chip scope-chip--all" href="/">'
+                    f'<span class="dot"></span>Showing all clusters · back to {label}</a>'
+                )
+            else:
+                scope_chip = (
+                    f'<a class="scope-chip" href="/?show=all">'
+                    f'<span class="dot"></span>Filtered to {label} · show all</a>'
+                )
+
+        return (
+            _PAGE
+            .replace("__CARDS__", "\n".join(cards))
+            .replace("__COUNT__", str(len(summary)))
+            .replace("__SCOPE_CHIP__", scope_chip)
+        )
 
     @app.route("/thumb/<int:cluster_id>.jpg")
     def thumb(cluster_id: int):
@@ -126,8 +192,14 @@ def create_app(db_path: Path, thumb_dir: Path) -> Flask:
     return app
 
 
-def serve(db_path: Path, thumb_dir: Path, port: int = 8765, open_browser: bool = True) -> None:
-    app = create_app(db_path, thumb_dir)
+def serve(
+    db_path: Path,
+    thumb_dir: Path,
+    port: int = 8765,
+    open_browser: bool = True,
+    scope_paths: list[str] | None = None,
+) -> None:
+    app = create_app(db_path, thumb_dir, scope_paths=scope_paths)
     url = f"http://127.0.0.1:{port}/"
     if open_browser:
         threading.Timer(0.7, lambda: webbrowser.open(url)).start()
@@ -286,11 +358,37 @@ _PAGE = r"""<!doctype html>
     border-radius: 4px; padding: 1px 5px;
     font-size: 10px; color: var(--text-dim);
   }
+  .seen-in {
+    display: block;
+    font-size: 10px;
+    color: var(--text-faint);
+    margin-top: 4px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .scope-chip {
+    display: inline-flex; align-items: center; gap: 6px;
+    background: rgba(91, 182, 224, 0.10);
+    border: 1px solid rgba(91, 182, 224, 0.35);
+    color: var(--accent);
+    padding: 4px 10px; border-radius: 999px;
+    font-size: 11px; text-decoration: none;
+    transition: background .15s ease, border-color .15s ease;
+  }
+  .scope-chip:hover { background: rgba(91, 182, 224, 0.18); border-color: rgba(91, 182, 224, 0.55); }
+  .scope-chip .dot {
+    width: 6px; height: 6px; border-radius: 50%;
+    background: var(--accent);
+  }
+  .scope-chip--all { color: var(--text-dim); border-color: var(--border-strong); background: var(--surface-2); }
+  .scope-chip--all .dot { background: var(--text-faint); }
 </style>
 </head><body>
 <header>
   <h1>Name the people</h1>
   <span class="meta">__COUNT__ clusters &middot; saves as you type &middot; <kbd>Tab</kbd> to advance</span>
+  __SCOPE_CHIP__
   <input class="filter" id="filter" placeholder="filter…" autocomplete="off">
   <div class="actions">
     <button id="save">Done</button>
