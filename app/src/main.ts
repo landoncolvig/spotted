@@ -20,6 +20,8 @@ type SpottedEvent =
   | { event: "tag-start"; total: number }
   | { event: "tag-video"; name: string; names: string[]; index: number; total: number }
   | { event: "tag-error"; name: string; message: string }
+  | { event: "tag-empty"; message: string }
+  | { event: "tag-failed"; failed: number; total: number; first: string }
   | { event: "tag-complete"; total: number }
   | { event: "markers-start"; total: number }
   | { event: "markers-video"; name: string; count: number; index: number; total: number }
@@ -313,6 +315,10 @@ function handleSpottedEvent(evt: SpottedEvent) {
       break;
     case "error":
     case "tag-error":
+    case "tag-empty":
+    case "tag-failed":
+      // These are also surfaced through the sidecar exit-code path in
+      // runTagWrite()'s catch — log here for the devtools breadcrumb.
       console.warn(evt);
       break;
   }
@@ -384,6 +390,16 @@ function friendlyError(raw: string): string {
   }
   if (r.includes("exiftool not found")) {
     return "Metadata writing failed — exiftool isn't available. This shouldn't happen in a packaged Spotted build; please report it.";
+  }
+  if (r.includes("nothing to tag")) {
+    return "Nothing was tagged — you need to name at least one face cluster (or add a batch tag) before hitting Tag & finish.";
+  }
+  if (r.includes("can't locate image/exiftool.pm") || r.includes("image::exiftool")) {
+    return "The bundled metadata writer (exiftool) couldn't find its support files. This is a Spotted packaging bug; please report it and include the version number.";
+  }
+  if (r.match(/exiftool failed on \d+\/\d+ clip/)) {
+    // First line carries the per-clip error from exiftool's stderr.
+    return `Couldn't write metadata to your clips. ${raw} — common causes: the folder is in iCloud Drive / Dropbox (file is a placeholder, not downloaded), the volume is read-only, or the clips have a quarantine flag from being downloaded.`;
   }
   if (r.includes("address already in use")) {
     return "The labeling page port is busy. Quit and reopen Spotted, then try again.";

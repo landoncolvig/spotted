@@ -53,6 +53,30 @@ if [[ -d "$EXIFTOOL_PREFIX/libexec/exiftool" ]]; then
   cp -R "$EXIFTOOL_PREFIX/libexec/exiftool" "$SIDECAR_DIR/vendor/exiftool/exiftool_perl"
 fi
 
+# Homebrew's exiftool patches the Perl script with absolute @INC paths into
+# its own Cellar (e.g. /opt/homebrew/Cellar/exiftool/13.55/libexec/lib/perl5).
+# On any Mac without Homebrew (i.e. our testers), those paths don't exist —
+# exiftool runs but immediately dies with "Can't locate Image/ExifTool.pm in
+# @INC". The cli.py orchestrator currently swallows that error per-video, so
+# the app shows a successful "Done" while NOTHING gets written. Rewrite the
+# Cellar paths to use the $exeDir variable the script already computes in
+# its BEGIN block, so @INC resolves relative to wherever the binary lives.
+python3 - "$SIDECAR_DIR/vendor/exiftool/exiftool" <<'PY'
+import re, sys
+path = sys.argv[1]
+src = open(path).read()
+patched = re.sub(
+    r'unshift @INC, "/opt/homebrew/Cellar/exiftool/[^"]*/libexec/lib/perl5([^"]*)"',
+    r'unshift @INC, "$exeDir/lib/perl5\1"',
+    src,
+)
+if patched == src:
+    print("WARN: exiftool @INC patch matched nothing — Homebrew layout may have changed", file=sys.stderr)
+    sys.exit(1)
+open(path, "w").write(patched)
+print("Patched exiftool @INC paths to be Homebrew-independent.")
+PY
+
 # 2b) Stage static ffmpeg + ffprobe (evermeet.cx universal builds).
 # These are required by facetag/extract.py — without them, Ellie's
 # non-developer Mac can't probe or decode video frames.

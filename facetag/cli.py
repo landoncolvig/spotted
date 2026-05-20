@@ -357,8 +357,13 @@ def tag_write(
     conn = _db.connect(db_path)
     mapping = _tag.videos_with_keywords(conn)
     if not mapping:
-        console.print("[yellow]Nothing to tag — no named people and no batch tags. Run `label-web` first.[/yellow]")
-        raise typer.Exit(0)
+        # Treat as a hard error so the Tauri shell shows it via showError()
+        # instead of silently jumping to the Done screen. Otherwise the user
+        # sees "Done" with nothing actually written to any file.
+        msg = "Nothing to tag: no clusters were named and no batch tags were set."
+        console.print(f"[red]{msg}[/red]")
+        _emit("tag-empty", message=msg)
+        raise typer.Exit(2)
 
     _emit("tag-start", total=len(mapping))
     console.print(f"Writing keywords to [bold]{len(mapping)}[/bold] video(s)…")
@@ -400,9 +405,20 @@ def tag_write(
     if dry_run:
         console.print(f"[dim]Dry run. No files changed.[/dim]")
     elif failed:
-        console.print(f"[red]{len(failed)} failure(s):[/red]")
+        # Same surface logic as the empty-mapping case: bubble up to the
+        # Tauri shell with a non-zero exit so the user sees what broke,
+        # instead of a green "Done" while every file silently failed.
+        console.print(f"[red]{len(failed)} of {len(mapping)} clip(s) failed to tag:[/red]")
         for name, err in failed:
             console.print(f"  [red]{name}[/red]  {err}")
+        # First failure's message is usually the diagnostic signal (most
+        # failures here have the same root cause — exiftool config, perms,
+        # quarantine xattr). Surface it as a one-liner the UI can show.
+        first_name, first_err = failed[0]
+        summary = f"exiftool failed on {len(failed)}/{len(mapping)} clip(s). First: {first_name}: {first_err}"
+        console.print(f"[red]{summary}[/red]")
+        _emit("tag-failed", failed=len(failed), total=len(mapping), first=summary)
+        raise typer.Exit(3)
     else:
         # Verify on a sample clip so the UI can show concrete proof of
         # what landed in each metadata namespace.
