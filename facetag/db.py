@@ -128,6 +128,48 @@ def all_embeddings(conn: sqlite3.Connection) -> tuple[list[int], np.ndarray]:
     return ids, embs
 
 
+def unclustered_embeddings(conn: sqlite3.Connection) -> tuple[list[int], np.ndarray]:
+    """Faces with cluster_id IS NULL — the ones a fresh scan just added.
+
+    Used by the incremental cluster pass so dropping a new clip into a
+    library that already has labeled clusters doesn't reshuffle existing
+    cluster IDs (which would break previously saved labels).
+    """
+    rows = conn.execute(
+        "SELECT id, embedding FROM faces WHERE cluster_id IS NULL"
+    ).fetchall()
+    if not rows:
+        return [], np.empty((0, 512), dtype=np.float32)
+    ids = [r[0] for r in rows]
+    embs = np.stack([np.frombuffer(r[1], dtype=np.float32) for r in rows])
+    return ids, embs
+
+
+def cluster_centroids(conn: sqlite3.Connection) -> dict[int, np.ndarray]:
+    """Return {cluster_id: mean_embedding} for every non-noise cluster.
+
+    Used by incremental clustering to assign new faces to the nearest
+    existing person, inheriting any saved label automatically.
+    """
+    rows = conn.execute(
+        "SELECT cluster_id, embedding FROM faces "
+        "WHERE cluster_id IS NOT NULL AND cluster_id >= 0"
+    ).fetchall()
+    by_cluster: dict[int, list[np.ndarray]] = {}
+    for cid, blob in rows:
+        by_cluster.setdefault(cid, []).append(np.frombuffer(blob, dtype=np.float32))
+    return {cid: np.mean(np.stack(es), axis=0) for cid, es in by_cluster.items()}
+
+
+def max_cluster_id(conn: sqlite3.Connection) -> int:
+    """Highest non-noise cluster_id currently in use, or -1 if none."""
+    row = conn.execute(
+        "SELECT COALESCE(MAX(cluster_id), -1) "
+        "FROM faces WHERE cluster_id IS NOT NULL AND cluster_id >= 0"
+    ).fetchone()
+    return int(row[0]) if row else -1
+
+
 def set_clusters(conn: sqlite3.Connection, assignments: dict[int, int]) -> None:
     conn.executemany(
         "UPDATE faces SET cluster_id = ? WHERE id = ?",

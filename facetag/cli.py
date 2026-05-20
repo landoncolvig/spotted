@@ -125,25 +125,66 @@ def cluster(
     min_size: int = typer.Option(5, "--min-size", help="Min faces per cluster."),
     recluster: bool = typer.Option(False, "--recluster", help="Force re-clustering even if clusters already exist. Will reshuffle cluster IDs and may break already-saved labels."),
 ):
-    """Group all indexed faces into person clusters."""
+    """Group all indexed faces into person clusters.
+
+    Behavior depends on what's already in the DB:
+
+    - **Cold start (no clusters yet):** runs HDBSCAN over every face. This
+      is the original full-library cluster pass.
+    - **Incremental (clusters exist + new unclustered faces):** runs the
+      two-stage `incremental_assign` (centroid match + HDBSCAN on leftover)
+      so a newly-dropped clip's faces either join existing clusters
+      (inheriting saved labels) or form new ones, without reshuffling
+      existing cluster IDs. This is the path that fires when a user drops
+      a second batch into a library that already has labeled people.
+    - **Already clustered + nothing new:** no-op.
+    - **--recluster:** force the full pass; will reshuffle IDs and may
+      break already-saved labels (kept for diagnostic / manual repair).
+    """
     conn = _db.connect(db_path)
-    face_ids, embs = _db.all_embeddings(conn)
-    if not face_ids:
-        console.print("[red]No faces in index. Run `facetag scan` first.[/red]")
-        raise typer.Exit(1)
 
-    if not recluster and _db.has_clusters(conn):
-        summary = _db.cluster_summary(conn)
-        console.print(f"[yellow]Already clustered ({len(summary)} clusters). Skipping. Use --recluster to redo.[/yellow]")
-        _emit("cluster-skipped", clusters=len(summary))
-        _emit("cluster-complete", clusters=len(summary))
-        return
-
-    _emit("cluster-start", faces=len(face_ids))
-    console.print(f"Clustering {len(face_ids)} faces…")
-    labels = _cluster.cluster_embeddings(embs, min_cluster_size=min_size, epsilon=epsilon)
-    assignments = {fid: int(lbl) for fid, lbl in zip(face_ids, labels)}
-    _db.set_clusters(conn, assignments)
+    if recluster or not _db.has_clusters(conn):
+        face_ids, embs = _db.all_embeddings(conn)
+        if not face_ids:
+            console.print("[red]No faces in index. Run `facetag scan` first.[/red]")
+            raise typer.Exit(1)
+        _emit("cluster-start", faces=len(face_ids))
+        console.print(f"Clustering {len(face_ids)} faces…")
+        labels = _cluster.cluster_embeddings(embs, min_cluster_size=min_size, epsilon=epsilon)
+        assignments = {fid: int(lbl) for fid, lbl in zip(face_ids, labels)}
+        _db.set_clusters(conn, assignments)
+    else:
+        new_ids, new_embs = _db.unclustered_embeddings(conn)
+        if not new_ids:
+            summary = _db.cluster_summary(conn)
+            console.print(f"[yellow]Already clustered ({len(summary)} clusters) and no new faces to assign.[/yellow]")
+            _emit("cluster-skipped", clusters=len(summary))
+            _emit("cluster-complete", clusters=len(summary))
+            return
+        centroids = _db.cluster_centroids(conn)
+        next_cid = _db.max_cluster_id(conn) + 1
+        _emit("cluster-start", faces=len(new_ids))
+        console.print(
+            f"Incrementally clustering {len(new_ids)} new face(s) "
+            f"against {len(centroids)} existing cluster(s)…"
+        )
+        new_labels = _cluster.incremental_assign(
+            new_embs,
+            centroids,
+            next_cid,
+            min_cluster_size=min_size,
+            epsilon=epsilon,
+        )
+        assignments = {fid: lbl for fid, lbl in zip(new_ids, new_labels)}
+        _db.set_clusters(conn, assignments)
+        matched = sum(1 for l in new_labels if l in centroids)
+        new_formed = len({l for l in new_labels if l >= 0 and l not in centroids})
+        noise = sum(1 for l in new_labels if l < 0)
+        console.print(
+            f"[bold green]{matched}[/bold green] face(s) joined existing clusters, "
+            f"[bold green]{new_formed}[/bold green] new cluster(s) formed, "
+            f"{noise} marked as noise."
+        )
 
     summary = _db.cluster_summary(conn)
     _emit("cluster-complete", clusters=len(summary))
