@@ -95,29 +95,56 @@ def write_keywords(video_path: Path, names: list[str], *, replace: bool = True) 
 
     `replace=True` (default) clears each namespace first so the set is
     exactly the new keywords. `replace=False` appends.
+
+    Issued as TWO exiftool calls (XMP, then Keys) instead of one combined
+    invocation. Combining `-Tag=` (clear) and `-Tag+=X` (add) on the same
+    tag in a single command silently ignores the clear — exiftool processes
+    the operations as a sequence, but treats the clear as superseded by the
+    subsequent add, so XMP-dc:Subject duplicates on every run. Splitting
+    also surfaces per-namespace failures cleanly (e.g. a sidecar with a
+    busted Keys-atom write doesn't silently swallow Keys errors behind an
+    XMP success).
     """
     if not names:
         return
     exe = _exiftool_path()
-    args = [
-        exe, "-overwrite_original", "-q",
-        "-api", "QuickTimeHandler=1",
-    ]
-    if replace:
-        # XMP-dc:Subject is a multi-value Bag; clear before per-name +=
-        args.append("-XMP-dc:Subject=")
-    for name in names:
-        args.append(f"-XMP-dc:Subject+={name}")
-    # Keys:Keywords is a single string (not a multi-value list under exiftool),
-    # so we set the whole comma-joined value once. Always replaces; behavior
-    # matches XMP since names came from one canonical mapping.
-    args.append(f"-Keys:Keywords={', '.join(names)}")
-    args.append(str(video_path))
 
-    result = subprocess.run(args, capture_output=True, text=True)
-    if result.returncode != 0:
+    # --- 1) XMP-dc:Subject (Premiere) ---
+    # `-sep ", "` lets us write the entire bag in a single -XMP-dc:Subject=…
+    # assignment. exiftool splits the value into bag elements on the sep
+    # string. Without -sep, the only way to get N elements is N separate
+    # `-XMP-dc:Subject+=` adds, but mixing `=` and `+=` on the same tag in
+    # one command treats the `=` as an add (not a clear) — so re-running
+    # the write duplicates entries every time. -sep avoids that footgun.
+    xmp_args: list[str] = [exe, "-overwrite_original"]
+    if replace:
+        xmp_args += ["-sep", ", ", f"-XMP-dc:Subject={', '.join(names)}"]
+    else:
+        for name in names:
+            xmp_args.append(f"-XMP-dc:Subject+={name}")
+    xmp_args.append(str(video_path))
+    r1 = subprocess.run(xmp_args, capture_output=True, text=True)
+    if r1.returncode != 0:
         raise RuntimeError(
-            f"exiftool failed on {video_path.name}: {result.stderr.strip() or result.stdout.strip()}"
+            f"exiftool XMP write failed on {video_path.name}: "
+            f"{r1.stderr.strip() or r1.stdout.strip()}"
+        )
+
+    # --- 2) Keys:Keywords (DaVinci, FCP, Apple Photos) ---
+    # Single comma-joined string, always replaces. -api QuickTimeHandler=1
+    # is required for exiftool to write into the com.apple.quicktime.keywords
+    # atom (without it, the write silently no-ops on .mov / .mp4).
+    keys_args = [
+        exe, "-overwrite_original",
+        "-api", "QuickTimeHandler=1",
+        f"-Keys:Keywords={', '.join(names)}",
+        str(video_path),
+    ]
+    r2 = subprocess.run(keys_args, capture_output=True, text=True)
+    if r2.returncode != 0:
+        raise RuntimeError(
+            f"exiftool Keys write failed on {video_path.name}: "
+            f"{r2.stderr.strip() or r2.stdout.strip()}"
         )
 
 

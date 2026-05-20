@@ -96,6 +96,21 @@ mkdir -p "$DEST"
 cp "dist/spotted-sidecar" "$DEST/spotted-sidecar-$TARGET"
 chmod +x "$DEST/spotted-sidecar-$TARGET"
 
+# 5) Ad-hoc sign the sidecar WITH entitlements before Tauri picks it up.
+# PyInstaller embeds Python.framework, which carries python.org's Team ID.
+# Without disable-library-validation, the ad-hoc-signed sidecar can't dlopen
+# Python at runtime ("(non-platform) have different Team IDs"). Tauri's
+# bundler signs the parent .app with entitlements but does NOT propagate
+# them to sidecar binaries, so we do it here.
+ENTITLEMENTS="$REPO/app/src-tauri/entitlements.plist"
+if [[ -f "$ENTITLEMENTS" ]]; then
+  codesign --force --sign - --options runtime \
+    --entitlements "$ENTITLEMENTS" \
+    "$DEST/spotted-sidecar-$TARGET"
+else
+  echo "WARN: $ENTITLEMENTS not found; sidecar will fail to load Python at runtime." >&2
+fi
+
 echo
 echo "Built: $DEST/spotted-sidecar-$TARGET"
 echo "Size:  $(du -sh "$DEST/spotted-sidecar-$TARGET" | cut -f1)"
