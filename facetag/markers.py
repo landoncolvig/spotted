@@ -142,3 +142,69 @@ def read_markers(video_path: Path) -> str:
         check=False,
     )
     return r.stdout.strip()
+
+
+def sidecar_path_for(video_path: Path) -> Path:
+    """Return the XMP sidecar path Adobe Bridge/DaVinci look for, e.g.
+    `clip.mov` → `clip.mov.xmp`. Appended-extension form (vs replacing the
+    extension) is the Adobe convention for video/audio sidecars."""
+    return video_path.with_name(f"{video_path.name}.xmp")
+
+
+def write_markers_sidecar(video_path: Path, face_events: list[tuple[float, str]]) -> Path | None:
+    """Write a `clipname.mov.xmp` sidecar alongside the clip with markers.
+
+    DaVinci Resolve's in-file XMP marker reading is inconsistent across
+    versions (works for some, silently ignored by others). Sidecar XMPs
+    are read more reliably via DaVinci's "Sidecar Files" project option.
+    This is additive: write_markers still writes in-file XMP for Premiere
+    and any DaVinci version that does read it.
+
+    Returns the sidecar path on success, or None if there's nothing to
+    write. Idempotent: removes any existing sidecar first so re-running
+    doesn't double-write markers.
+    """
+    if not face_events:
+        return None
+    exe = _exiftool()
+    sidecar = sidecar_path_for(video_path)
+
+    # exiftool's -o refuses to overwrite an existing file. Wipe first so
+    # re-tagging a folder produces a fresh sidecar instead of stalling.
+    if sidecar.exists():
+        sidecar.unlink()
+
+    args: list[str] = [exe, "-q", "-o", str(sidecar)]
+    seen: set[tuple[int, str]] = set()
+    for t, name in sorted(face_events):
+        key = (int(round(t * 1000)), name)
+        if key in seen:
+            continue
+        seen.add(key)
+        safe = _sanitize(name)
+        args.append(
+            f"-XMP-xmpDM:Markers+={{Name={safe},StartTime={t:.3f}s,Duration=0.5s,Type=Cue}}"
+        )
+
+    result = subprocess.run(args, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"exiftool sidecar markers failed on {sidecar.name}: "
+            f"{result.stderr.strip() or result.stdout.strip()}"
+        )
+    return sidecar
+
+
+def read_markers_sidecar(video_path: Path) -> str:
+    """Return the raw Markers value from the sidecar XMP, for verification."""
+    sidecar = sidecar_path_for(video_path)
+    if not sidecar.exists():
+        return ""
+    exe = _exiftool()
+    r = subprocess.run(
+        [exe, "-s", "-s", "-s", "-struct", "-XMP-xmpDM:Markers", str(sidecar)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return r.stdout.strip()

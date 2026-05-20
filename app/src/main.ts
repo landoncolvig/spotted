@@ -29,6 +29,9 @@ type SpottedEvent =
   | { event: "markers-complete"; total: number }
   | { event: "tag-verified"; file: string; xmp: string[]; keys: string[]; comment: string }
   | { event: "tag-verify-error"; message: string }
+  | { event: "markers-verified"; file: string; event_count: number; in_file_present: boolean; sidecar_present: boolean }
+  | { event: "markers-verify-error"; message: string }
+  | { event: "markers-sidecar-error"; name: string; message: string }
   | { event: "library-stats"; videos: number; faces: number; clusters: number; named: number; people: { name: string; cluster_id?: number; clips: number; faces: number }[] }
   | { event: "library-person"; name: string; clips: { path: string; name: string; times: number[] }[] }
   | { event: "library-detail-complete" }
@@ -217,6 +220,7 @@ function parseSpotted(line: string): SpottedEvent | null {
 
 let lastStats: SpottedEvent | null = null;
 let lastVerification: Extract<SpottedEvent, { event: "tag-verified" }> | null = null;
+let lastMarkersVerification: Extract<SpottedEvent, { event: "markers-verified" }> | null = null;
 
 async function fetchLibraryStats(): Promise<SpottedEvent | null> {
   // Calls `facetag status`; the structured library-stats event is captured
@@ -309,6 +313,9 @@ function handleSpottedEvent(evt: SpottedEvent) {
       break;
     case "tag-verified":
       lastVerification = evt;
+      break;
+    case "markers-verified":
+      lastMarkersVerification = evt;
       break;
     case "library-person":
       handleLibraryEvent(evt);
@@ -529,6 +536,13 @@ function renderVerification() {
   header.textContent = `Verified on ${v.file}`;
   panel.appendChild(header);
 
+  const markers = lastMarkersVerification;
+  const markerCells: string[] = [];
+  if (markers) {
+    if (markers.in_file_present) markerCells.push(`in-file (${markers.event_count})`);
+    if (markers.sidecar_present) markerCells.push(`sidecar .xmp`);
+  }
+
   const rows: Array<{ label: string; values: string[]; help: string }> = [
     {
       label: "Keys (DaVinci, Finder)",
@@ -544,6 +558,11 @@ function renderVerification() {
       label: "Spotlight Comment",
       values: v.comment ? [v.comment] : [],
       help: "Shown in Get Info → Comments. iCloud-synced files may strip this; Keys above keeps search working anyway.",
+    },
+    {
+      label: "Markers (timeline)",
+      values: markerCells,
+      help: "Per-face timeline markers. In-file XMP for Premiere; sidecar .xmp next to the clip for DaVinci (enable 'Use Sidecar Files' in project settings).",
     },
   ];
 

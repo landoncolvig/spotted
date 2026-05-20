@@ -460,6 +460,8 @@ def markers_write(
     _emit("markers-start", total=len(videos))
     console.print(f"Writing markers to [bold]{len(videos)}[/bold] video(s)…")
     failed: list[tuple[str, str]] = []
+    sidecar_failed: list[tuple[str, str]] = []
+    last_written: tuple[Path, int] | None = None  # for the verification readback
 
     with Progress(
         TextColumn("[bold cyan]{task.description}"),
@@ -475,6 +477,7 @@ def markers_write(
             _emit("markers-video", name=short, count=len(events), index=idx, total=len(videos))
             try:
                 _markers.write_markers(Path(path_str), events)
+                last_written = (Path(path_str), len(events))
             except _markers.ExiftoolMissing as e:
                 console.print(f"\n[red]{e}[/red]")
                 _emit("error", stage="markers-write", message=str(e))
@@ -482,13 +485,43 @@ def markers_write(
             except Exception as e:
                 failed.append((short, str(e)))
                 _emit("markers-error", name=short, message=str(e))
+            # Sidecar XMP — additive, non-fatal. DaVinci reads sidecars
+            # more reliably than in-file XMP across versions; Premiere
+            # users still get the in-file write above.
+            try:
+                _markers.write_markers_sidecar(Path(path_str), events)
+            except Exception as e:
+                sidecar_failed.append((short, str(e)))
+                _emit("markers-sidecar-error", name=short, message=str(e))
             prog.update(task, advance=1)
 
     if failed:
-        console.print(f"[red]{len(failed)} failure(s):[/red]")
+        console.print(f"[red]{len(failed)} failure(s) writing in-file markers:[/red]")
         for n, err in failed:
             console.print(f"  [red]{n}[/red]  {err}")
-    else:
+    if sidecar_failed:
+        console.print(f"[yellow]{len(sidecar_failed)} sidecar XMP failure(s) (DaVinci fallback):[/yellow]")
+        for n, err in sidecar_failed:
+            console.print(f"  [yellow]{n}[/yellow]  {err}")
+
+    if not failed:
+        # Read back markers from a sample clip and surface to the UI so
+        # users see proof markers landed without opening the .mov in an
+        # editor. Same shape as the tag-verified event.
+        if last_written is not None:
+            sample_path, event_count = last_written
+            try:
+                in_file = _markers.read_markers(sample_path)
+                sidecar = _markers.read_markers_sidecar(sample_path)
+                _emit(
+                    "markers-verified",
+                    file=sample_path.name,
+                    event_count=event_count,
+                    in_file_present=bool(in_file),
+                    sidecar_present=bool(sidecar),
+                )
+            except Exception as e:
+                _emit("markers-verify-error", message=str(e))
         _emit("markers-complete", total=len(videos))
         console.print(f"[bold green]Done.[/bold green] Wrote markers to {len(videos)} clips.")
 
