@@ -18,6 +18,23 @@ struct SidecarLine {
     line: String,
 }
 
+#[derive(Serialize, Clone)]
+struct UpdaterAvailable {
+    version: String,
+    current_version: String,
+}
+
+#[derive(Serialize, Clone)]
+struct UpdaterProgress {
+    downloaded: u64,
+    total: Option<u64>,
+}
+
+#[derive(Serialize, Clone)]
+struct UpdaterMessage {
+    message: String,
+}
+
 /// Spawn the sidecar, stream its output as `sidecar://line` events on the
 /// window, await the child to exit, return its exit code.
 async fn run_sidecar(
@@ -383,6 +400,48 @@ async fn check_for_updates(app: AppHandle) -> Result<Option<String>, String> {
     }
 }
 
+/// Download + install the pending update, emitting progress events to the
+/// frontend so the user sees a visible toast instead of a silent black box.
+/// The frontend calls this after the user accepts the update dialog;
+/// `restart_app` is invoked separately to actually swap in the new bundle.
+#[tauri::command]
+async fn install_update(app: AppHandle) -> Result<(), String> {
+    let updater = app.updater().map_err(|e| format!("updater unavailable: {e}"))?;
+    let update = updater
+        .check()
+        .await
+        .map_err(|e| format!("update check failed: {e}"))?
+        .ok_or_else(|| "no update available".to_string())?;
+
+    let app_clone = app.clone();
+    let mut downloaded: u64 = 0;
+    update
+        .download_and_install(
+            move |chunk_len, content_length| {
+                downloaded += chunk_len as u64;
+                let _ = app_clone.emit(
+                    "updater://progress",
+                    UpdaterProgress {
+                        downloaded,
+                        total: content_length,
+                    },
+                );
+            },
+            || {},
+        )
+        .await
+        .map_err(|e| format!("install failed: {e}"))?;
+
+    Ok(())
+}
+
+/// Triggered by the frontend after a successful install. AppHandle::restart
+/// diverges (returns `!`), so the function never returns to the caller.
+#[tauri::command]
+fn restart_app(app: AppHandle) {
+    app.restart();
+}
+
 #[tauri::command]
 fn app_version() -> String {
     env!("CARGO_PKG_VERSION").into()
@@ -398,30 +457,41 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
-            // Auto-check for updates on launch. Tauri v2 (unlike v1) does
-            // NOT auto-check the updater plugin — we have to invoke it
-            // ourselves. Without this call, the "dialog: true" config in
-            // tauri.conf.json never shows the update prompt and users get
-            // stranded on old versions.
+            // Auto-check for updates on launch. Tauri v2 (unlike v1) ignores
+            // the `dialog: true` updater config and does not show any UI on
+            // its own — the previous version of this code called
+            // `download_and_install` directly with no-op callbacks, which
+            // meant updates either silently swapped without the user noticing
+            // (and got blamed for "never working") or silently failed with
+            // errors only visible in stderr. Now we emit an event that the
+            // frontend turns into a native confirm dialog + progress toast.
             let handle_for_update = app.handle().clone();
             tauri::async_runtime::spawn(async move {
-                // Give the window a moment to mount before showing any
-                // native dialog — also reduces chance of stepping on the
-                // welcome overlay on first launch.
+                // Give the window a moment to mount before any native
+                // dialog could appear over the welcome overlay.
                 tokio::time::sleep(Duration::from_secs(3)).await;
                 if let Ok(updater) = handle_for_update.updater() {
                     match updater.check().await {
                         Ok(Some(update)) => {
-                            // Drive the download+install inline. The
-                            // "dialog: true" config makes Tauri prompt
-                            // the user automatically before installing.
-                            let _ = update
-                                .download_and_install(|_, _| {}, || {})
-                                .await;
+                            let _ = handle_for_update.emit(
+                                "updater://available",
+                                UpdaterAvailable {
+                                    version: update.version.clone(),
+                                    current_version: env!("CARGO_PKG_VERSION").into(),
+                                },
+                            );
                         }
-                        Ok(None) => { /* up to date */ }
+                        Ok(None) => { /* up to date — stay quiet */ }
                         Err(e) => {
-                            eprintln!("updater check failed: {e}");
+                            // Background check failures are usually transient
+                            // network issues; surface them but don't toast —
+                            // the frontend listener decides whether to show.
+                            let _ = handle_for_update.emit(
+                                "updater://error",
+                                UpdaterMessage {
+                                    message: format!("update check failed: {e}"),
+                                },
+                            );
                         }
                     }
                 }
@@ -568,6 +638,8 @@ pub fn run() {
             set_window_title,
             cancel_work,
             check_for_updates,
+            install_update,
+            restart_app,
             app_version
         ])
         .run(tauri::generate_context!())

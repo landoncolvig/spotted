@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Spotted",
-  "version": "0.0.26",
+  "version": "0.0.27",
   "identifier": "app.spotted.desktop",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -60,7 +60,6 @@
   "plugins": {
     "updater": {
       "active": true,
-      "dialog": true,
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDJFOEU2NUQwMEExNkI3NDcKUldSSHR4WUswR1dPTHRCV1FRd1p2cTJZZGV2cmRRb05haThwU3RMWGRjdDVEUUo3eUhDajFNK0YK",
       "endpoints": [
         "https://github.com/landoncolvig/spotted/releases/latest/download/latest.json"

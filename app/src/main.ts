@@ -1,6 +1,6 @@
 import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { open } from "@tauri-apps/plugin-dialog";
+import { open, confirm } from "@tauri-apps/plugin-dialog";
 import {
   isPermissionGranted,
   requestPermission,
@@ -929,11 +929,63 @@ function wireMenuEvents() {
       if (!newVersion) {
         flashToast(`You're on the latest version.`);
       } else {
-        flashToast(`Update to v${newVersion} is available — restart to install.`);
+        await promptForUpdate(newVersion);
       }
     } catch (e) {
       flashToast(`Update check failed: ${e}`, true);
     }
+  });
+}
+
+/** Confirm dialog → install → restart, with visible feedback at every step.
+ *  Reused by the on-launch auto-check and the manual "Check for Updates…"
+ *  menu item so users get one consistent flow. */
+async function promptForUpdate(version: string, currentVersion?: string): Promise<void> {
+  const fromTo = currentVersion
+    ? `Spotted ${version} is available — you're on ${currentVersion}.`
+    : `Spotted ${version} is available.`;
+  const ok = await confirm(
+    `${fromTo}\n\nInstall and restart now?`,
+    { title: "Update available", okLabel: "Install & Restart", cancelLabel: "Later" }
+  );
+  if (!ok) return;
+  flashToast("Downloading update…");
+  try {
+    await invoke("install_update");
+    flashToast("Restarting Spotted…");
+    // Give the toast a moment to render before the process is replaced.
+    setTimeout(() => { invoke("restart_app").catch(() => {}); }, 400);
+  } catch (e) {
+    flashToast(`Update failed: ${e}`, true);
+  }
+}
+
+/** Wire updater events from Rust. The auto-check task in setup() emits
+ *  `updater://available` when a newer version is published; the user sees
+ *  a native dialog and decides whether to install. */
+function wireUpdaterEvents() {
+  listen<{ version: string; current_version: string }>(
+    "updater://available",
+    (e) => {
+      promptForUpdate(e.payload.version, e.payload.current_version).catch((err) => {
+        flashToast(`Update prompt failed: ${err}`, true);
+      });
+    },
+  );
+  listen<{ downloaded: number; total: number | null }>(
+    "updater://progress",
+    (e) => {
+      if (e.payload.total) {
+        const pct = Math.round((e.payload.downloaded / e.payload.total) * 100);
+        flashToast(`Downloading update… ${pct}%`);
+      }
+    },
+  );
+  listen<{ message: string }>("updater://error", (e) => {
+    // Auto-check errors are usually transient network issues — log them
+    // for the devtools but don't pop a toast on every launch. The user
+    // can still trigger a manual check from the menu.
+    console.warn("updater:", e.payload.message);
   });
 }
 
@@ -978,6 +1030,7 @@ window.addEventListener("DOMContentLoaded", () => {
   loadVersion();
   wireDragDrop();
   wireMenuEvents();
+  wireUpdaterEvents();
   wireTagsScreen();
   wireLibrary();
   wireWelcome();
