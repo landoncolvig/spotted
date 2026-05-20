@@ -159,6 +159,30 @@ async fn tag_videos(app: AppHandle, window: Window) -> Result<i32, String> {
 }
 
 #[tauri::command]
+async fn suggest_activities(app: AppHandle, window: Window) -> Result<i32, String> {
+    run_sidecar(app, window, vec!["activity-suggest".into()]).await
+}
+
+/// Wipe the per-user library — face index, embeddings, generated thumbs,
+/// person crops. Equivalent to deleting ~/.facetag/ and starting over. The
+/// frontend confirms with a native dialog before invoking this; from
+/// here on it's destructive and silent.
+#[tauri::command]
+fn reset_library() -> Result<(), String> {
+    use std::fs;
+    let home = dirs_home_dir().ok_or_else(|| "couldn't resolve $HOME".to_string())?;
+    let root = home.join(".facetag");
+    if root.exists() {
+        fs::remove_dir_all(&root).map_err(|e| format!("rm -rf {}: {e}", root.display()))?;
+    }
+    Ok(())
+}
+
+fn dirs_home_dir() -> Option<std::path::PathBuf> {
+    std::env::var_os("HOME").map(std::path::PathBuf::from)
+}
+
+#[tauri::command]
 async fn write_markers(app: AppHandle, window: Window) -> Result<i32, String> {
     run_sidecar(app, window, vec!["markers-write".into()]).await
 }
@@ -545,6 +569,11 @@ pub fn run() {
                             .accelerator("CmdOrCtrl+O")
                             .build(app)?,
                     )
+                    .separator()
+                    .item(
+                        &MenuItemBuilder::with_id("reset_library", "Reset Library…")
+                            .build(app)?,
+                    )
                     .build()?;
 
                 let edit_submenu = SubmenuBuilder::new(app, "Edit")
@@ -618,6 +647,11 @@ pub fn run() {
                     "report_issue" => {
                         let _ = open_url("https://github.com/landoncolvig/spotted/issues/new");
                     }
+                    "reset_library" => {
+                        if let Some(window) = handle.get_webview_window("main") {
+                            let _ = window.emit("menu://reset-library", ());
+                        }
+                    }
                     _ => {}
                 });
             }
@@ -640,6 +674,8 @@ pub fn run() {
             check_for_updates,
             install_update,
             restart_app,
+            suggest_activities,
+            reset_library,
             app_version
         ])
         .run(tauri::generate_context!())

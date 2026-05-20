@@ -48,11 +48,14 @@ def videos_with_names(conn: sqlite3.Connection) -> dict[str, list[str]]:
 def videos_with_keywords(conn: sqlite3.Connection) -> dict[str, list[str]]:
     """Return {video_path: [merged keywords]}.
 
-    Merges named-person tags AND batch-level tags. A video is included if it
-    has at least one of either (named cluster OR non-empty batch_tags). The
-    keyword list is de-duplicated and sorted for stable XMP output.
+    Merges three sources into the editor's single Keywords column:
+    1. Named-person tags (from face clustering + labeling).
+    2. Batch-level tags (the user types these in the welcome screen).
+    3. Auto-tags from the activity-suggest step (MobileCLIP zero-shot).
+
+    A video is included if any of the three sources has at least one entry.
+    The list is de-duplicated and sorted for stable XMP output.
     """
-    # Persons appearing in each video.
     person_rows = conn.execute(
         "SELECT DISTINCT v.path, p.name "
         "FROM faces f "
@@ -61,9 +64,12 @@ def videos_with_keywords(conn: sqlite3.Connection) -> dict[str, list[str]]:
         "WHERE p.name IS NOT NULL AND p.name != ''"
     ).fetchall()
 
-    # Batch tags per video (independent of whether faces were named).
     tag_rows = conn.execute(
         "SELECT path, batch_tags FROM videos WHERE batch_tags IS NOT NULL AND batch_tags != ''"
+    ).fetchall()
+
+    auto_rows = conn.execute(
+        "SELECT v.path, a.tag FROM auto_tags a JOIN videos v ON v.id = a.video_id"
     ).fetchall()
 
     merged: dict[str, set[str]] = {}
@@ -74,6 +80,8 @@ def videos_with_keywords(conn: sqlite3.Connection) -> dict[str, list[str]]:
             t = t.strip()
             if t:
                 merged.setdefault(path, set()).add(t)
+    for path, tag in auto_rows:
+        merged.setdefault(path, set()).add(tag)
 
     return {p: sorted(s) for p, s in merged.items()}
 

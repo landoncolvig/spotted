@@ -24,6 +24,12 @@ onnxruntime_datas, onnxruntime_binaries, onnxruntime_hidden = collect_all("onnxr
 sklearn_datas, sklearn_binaries, sklearn_hidden = collect_all("sklearn")
 hdbscan_datas, hdbscan_binaries, hdbscan_hidden = collect_all("hdbscan")
 cv2_datas, cv2_binaries, cv2_hidden = collect_all("cv2")
+# MobileCLIP via Core ML for zero-shot activity tagging.
+coremltools_datas, coremltools_binaries, coremltools_hidden = collect_all("coremltools")
+# transformers used solely for the CLIPTokenizer (BPE). The hub stays
+# offline-friendly because we ship the tokenizer files alongside the bundle.
+transformers_datas, transformers_binaries, transformers_hidden = collect_all("transformers")
+tokenizers_datas, tokenizers_binaries, tokenizers_hidden = collect_all("tokenizers")
 
 # Bundle the pre-downloaded buffalo_l model from the user's ~/.insightface.
 # build.sh ensures this exists before pyinstaller runs.
@@ -52,6 +58,31 @@ if os.path.isdir(ffmpeg_dir):
         if os.path.isfile(src):
             ffmpeg_binaries.append((src, "ffmpeg"))
 
+# Bundle MobileCLIP-S2 Core ML packages. build.sh downloads these from
+# Hugging Face (apple/coreml-mobileclip) into vendor/mobileclip/ if missing.
+# The .mlpackages are directories on disk; we have to walk them so each
+# file lands at the expected relative path under mobileclip/ at runtime.
+mobileclip_dir = os.path.abspath("vendor/mobileclip")
+mobileclip_datas = []
+if os.path.isdir(mobileclip_dir):
+    for root, _dirs, files in os.walk(mobileclip_dir):
+        rel = os.path.relpath(root, mobileclip_dir)
+        for fn in files:
+            src = os.path.join(root, fn)
+            dest_dir = "mobileclip" if rel == "." else os.path.join("mobileclip", rel)
+            mobileclip_datas.append((src, dest_dir))
+
+# Bundle the CLIP BPE tokenizer files so clip.py can load them via
+# CLIPTokenizer.from_pretrained(<bundled path>) without ever hitting the
+# Hugging Face hub at runtime.
+clip_tok_dir = os.path.abspath("vendor/clip_tokenizer")
+clip_tok_datas = []
+if os.path.isdir(clip_tok_dir):
+    for fn in os.listdir(clip_tok_dir):
+        src = os.path.join(clip_tok_dir, fn)
+        if os.path.isfile(src):
+            clip_tok_datas.append((src, "clip_tokenizer"))
+
 a = Analysis(
     ["entry.py"],
     pathex=[os.path.abspath("..")],  # so `import facetag` resolves to the sibling package
@@ -61,6 +92,9 @@ a = Analysis(
         *cv2_binaries,
         *sklearn_binaries,
         *hdbscan_binaries,
+        *coremltools_binaries,
+        *transformers_binaries,
+        *tokenizers_binaries,
         *exiftool_binaries,
         *ffmpeg_binaries,
     ],
@@ -70,10 +104,18 @@ a = Analysis(
         *sklearn_datas,
         *hdbscan_datas,
         *cv2_datas,
+        *coremltools_datas,
+        *transformers_datas,
+        *tokenizers_datas,
         *model_datas,
+        *mobileclip_datas,
+        *clip_tok_datas,
         *copy_metadata("facetag"),
         *copy_metadata("typer"),
         *copy_metadata("rich"),
+        *copy_metadata("coremltools"),
+        *copy_metadata("transformers"),
+        *copy_metadata("tokenizers"),
     ],
     hiddenimports=[
         *insightface_hidden,
@@ -81,6 +123,9 @@ a = Analysis(
         *sklearn_hidden,
         *hdbscan_hidden,
         *cv2_hidden,
+        *coremltools_hidden,
+        *transformers_hidden,
+        *tokenizers_hidden,
         *collect_submodules("facetag"),
     ],
     hookspath=[],

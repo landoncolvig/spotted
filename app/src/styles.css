@@ -899,3 +899,77 @@ body {
   font-variant-numeric: tabular-nums;
   color: var(--text-faint);
 }
+
+/* ----------------------------------------------------------------------
+   POLISH PASS (v0.0.29)
+   Low-risk visual tightening: focus-visible for keyboard navigation,
+   disabled-button affordance, depth on the primary CTA, and a softer
+   loading state. None of this changes information density or layout.
+   ---------------------------------------------------------------------- */
+
+/* Keyboard focus ring. Only fires when the user is actually keyboarding
+   (not on mouse click), so we don't show outlines for pointer users. */
+*:focus-visible {
+  outline: 2px solid var(--primary-hover);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+.btn:focus-visible {
+  outline-offset: 3px;
+}
+
+/* Disabled buttons should LOOK clickable-but-not. Without this they
+   stay at full opacity which suggests they're still actionable. */
+.btn:disabled,
+.btn[aria-disabled="true"] {
+  background: var(--surface-2);
+  color: var(--text-faint);
+  cursor: not-allowed;
+  transform: none !important;
+  border-color: var(--border);
+}
+.btn:disabled:hover {
+  background: var(--surface-2);
+}
+
+/* Primary CTA gets a subtle warm shadow so it visually pops off the
+   dark surface without resorting to a brighter color. */
+.btn:not(.btn--ghost):not(:disabled) {
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.10) inset,
+              0 1px 2px rgba(0, 0, 0, 0.35),
+              0 6px 14px -8px rgba(240, 130, 32, 0.55);
+}
+.btn:not(.btn--ghost):not(:disabled):active {
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.10) inset,
+              0 1px 2px rgba(0, 0, 0, 0.4);
+}
+
+/* Verification panel: tighter rhythm + numerals align across rows. */
+.done-verify__value {
+  font-variant-numeric: tabular-nums;
+}
+.done-verify__row {
+  transition: background 160ms ease;
+}
+.done-verify__row.is-empty {
+  background: rgba(224, 179, 59, 0.04);
+}
+
+/* Subtle pulse on the working/loading dot so users see "yes it's
+   still doing something" without a heavyweight spinner. */
+@keyframes spotted-pulse {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.5; }
+}
+.footer__dot {
+  animation: spotted-pulse 2.4s ease-in-out infinite;
+}
+
+/* When dragging files over the window, make the dropzone glow warm
+   instead of the current subtle bg shift. Stronger affordance without
+   a redesign. */
+.dropzone.is-hot {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 4px rgba(240, 130, 32, 0.10),
+              inset 0 0 0 1px rgba(240, 130, 32, 0.25);
+}

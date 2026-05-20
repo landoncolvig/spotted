@@ -10,6 +10,8 @@ from rich.console import Console
 from rich.progress import Progress, BarColumn, TextColumn, TimeElapsedColumn, TimeRemainingColumn
 from rich.table import Table
 
+from . import activity as _activity
+from . import clip as _clip
 from . import cluster as _cluster
 from . import cut as _cut
 from . import db as _db
@@ -50,6 +52,7 @@ def scan(
     rescan: bool = typer.Option(False, "--rescan", help="Re-scan videos already in the index."),
     min_score: float = typer.Option(0.5, "--min-score", help="Minimum face detection confidence."),
     tags: str = typer.Option("", "--tags", help="Comma-separated batch tags applied to every clip in this scan (e.g. 'baptism,kids')."),
+    activities: bool = typer.Option(True, "--activities/--no-activities", help="Also run MobileCLIP image encoder on each sampled frame so the activity-suggest step can find scenes (kids, beach, wedding…). Disable to keep scans face-only."),
 ):
     """Walk a path, sample frames, detect faces, store embeddings."""
     videos = _extract.walk_videos(path)
@@ -62,8 +65,23 @@ def scan(
     conn = _db.connect(db_path)
     detector = _detect.Detector(min_score=min_score)
 
+    # Activity encoder is optional + degrades gracefully. If the .mlpackages
+    # aren't bundled (or coremltools is missing), we keep the scan running
+    # in face-only mode rather than failing the whole batch.
+    clip_encoder = None
+    if activities:
+        try:
+            clip_encoder = _clip.ClipEncoder()
+            # Trigger lazy load now so a missing-model error surfaces before
+            # we've already sunk minutes into face detection.
+            clip_encoder._load()
+        except _clip.ClipUnavailable as e:
+            console.print(f"[yellow]Activity detection disabled: {e}[/yellow]")
+            _emit("activities-disabled", reason=str(e))
+            clip_encoder = None
+
     console.print(f"Found [bold]{len(videos)}[/bold] video(s)")
-    _emit("scan-start", total=len(videos))
+    _emit("scan-start", total=len(videos), activities=bool(clip_encoder))
     total_faces = 0
     total_skipped = 0
 
@@ -86,8 +104,10 @@ def scan(
             _db.set_batch_tags(conn, video_id, batch_tags)
         if rescan:
             _db.clear_video_faces(conn, video_id)
+            _db.clear_video_embeddings(conn, video_id)
 
         rows: list = []
+        emb_rows: list[tuple[float, bytes]] = []
         approx_frames = max(1, int(duration * sample_fps))
         with Progress(
             TextColumn("[bold cyan]{task.description}"),
@@ -105,17 +125,87 @@ def scan(
                 for f in faces:
                     rows.append((t, f.bbox, f.embedding))
                 face_count += len(faces)
+                if clip_encoder is not None:
+                    try:
+                        emb = clip_encoder.encode_image(frame)
+                        emb_rows.append((t, _clip.embedding_to_bytes(emb)))
+                    except Exception as e:
+                        # Don't fail the whole scan on one bad frame; log once.
+                        if not getattr(scan, "_clip_warned", False):
+                            console.print(f"[yellow]Activity encoding failed on a frame: {e}[/yellow]")
+                            scan._clip_warned = True
                 prog.update(task, advance=1, faces=face_count)
                 if len(rows) >= 500:
                     _db.add_faces_bulk(conn, video_id, rows)
                     rows.clear()
+                if len(emb_rows) >= 200:
+                    _db.add_frame_embeddings_bulk(conn, video_id, emb_rows)
+                    emb_rows.clear()
             if rows:
                 _db.add_faces_bulk(conn, video_id, rows)
+            if emb_rows:
+                _db.add_frame_embeddings_bulk(conn, video_id, emb_rows)
             total_faces += face_count
         _emit("video-done", name=v.name, index=index, total=len(videos), faces=face_count)
 
     _emit("scan-complete", total_faces=total_faces, total_skipped=total_skipped, total_videos=len(videos))
     console.print(f"\n[bold green]Done.[/bold green] {total_faces} faces indexed, {total_skipped} videos skipped (already scanned).")
+
+
+@app.command("activity-suggest")
+def activity_suggest(
+    db_path: Path = typer.Option(DEFAULT_DB, "--db"),
+    threshold: float = typer.Option(0.22, "--threshold", help="Min cosine similarity (per-video MAX over frames) to apply a tag."),
+    max_tags: int = typer.Option(6, "--max-tags", help="Max auto-tags per video so the keyword column stays scannable."),
+):
+    """Score curated activity prompts against every video's frame embeddings.
+
+    Run AFTER `scan` (which produced the embeddings) and AFTER `cluster`+labeler.
+    Writes auto-tags into the `auto_tags` table; they merge into the editor's
+    Keywords column via tag.videos_with_keywords().
+    """
+    conn = _db.connect(db_path)
+    videos = _db.videos_with_embeddings(conn)
+    if not videos:
+        console.print("[yellow]No frame embeddings in the index. Scan with --activities first.[/yellow]")
+        _emit("activity-empty", message="no embeddings indexed")
+        raise typer.Exit(0)
+
+    try:
+        encoder = _clip.ClipEncoder()
+    except _clip.ClipUnavailable as e:
+        console.print(f"[red]Activity detection unavailable: {e}[/red]")
+        _emit("error", stage="activity-suggest", message=str(e))
+        raise typer.Exit(2)
+
+    _emit("activity-start", total=len(videos))
+    console.print(f"Scoring [bold]{len(videos)}[/bold] video(s) against {len(_activity.CURATED_PROMPTS)} prompts…")
+    results = _activity.apply_auto_tags(
+        conn, encoder, threshold=threshold, max_tags_per_video=max_tags
+    )
+
+    if not results:
+        console.print(
+            f"[yellow]No prompt scored above {threshold:.2f} on any video. "
+            "Try lowering --threshold.[/yellow]"
+        )
+        _emit("activity-complete", total=len(videos), tagged=0, sample=None)
+        return
+
+    table = Table("video", "tags (score)")
+    sample_path = next(iter(results.keys()))
+    sample_tags = results[sample_path]
+    for path, picks in list(results.items())[:30]:
+        chips = ", ".join(f"{t} ({s:.2f})" for t, s in picks)
+        table.add_row(Path(path).name, chips)
+    console.print(table)
+    console.print(f"[bold green]Done.[/bold green] {len(results)} of {len(videos)} videos got auto-tags.")
+    _emit(
+        "activity-complete",
+        total=len(videos),
+        tagged=len(results),
+        sample={"file": Path(sample_path).name, "tags": [t for t, _ in sample_tags]},
+    )
 
 
 @app.command()

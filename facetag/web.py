@@ -64,12 +64,30 @@ def create_app(
 
     @app.route("/")
     def index() -> str:
-        # ?show=all overrides the scope filter so the user can still see
-        # every unnamed cluster if they want to label cross-batch.
+        # Two orthogonal filters drive what cards render:
+        #   ?show=all     → bypass scope (see clusters from other batches too)
+        #   ?view=needs   → DEFAULT: only unnamed clusters with size >= MIN_FACES
+        #   ?view=labeled → only clusters with a name (for renaming)
+        #   ?view=all     → everyone, even tiny noise clusters
         show_all = request.args.get("show") == "all"
+        view = request.args.get("view") or "needs"
         scope = None if show_all else (app.config["SCOPE_PATHS"] or None)
+        MIN_FACES = 3  # below this, almost always a false-positive cluster
+
         with _conn() as conn:
             summary = db.cluster_summary_with_videos(conn, scope_paths=scope)
+
+        # Apply the view filter and count what we're hiding so the header
+        # can offer a "show N hidden" affordance — users without context
+        # would otherwise wonder where their named people went.
+        total = len(summary)
+        labeled_total = sum(1 for _, _, n, _ in summary if n)
+        noise_total = sum(1 for _, c, n, _ in summary if not n and c < MIN_FACES)
+        if view == "needs":
+            summary = [r for r in summary if not r[2] and r[1] >= MIN_FACES]
+        elif view == "labeled":
+            summary = [r for r in summary if r[2]]
+        # view == "all" → keep everything
 
         # The thumb route uses the same ?show=all flag to pick between the
         # scoped and unscoped cache files. Propagate the query string so a
@@ -96,17 +114,37 @@ def create_app(
             </div>
             """)
 
+        # View-toggle chips: tell the user what's currently visible and
+        # offer one-click swaps to see labeled or every cluster. Eliminates
+        # the "where did my named people go" surprise.
+        def _chip(target_view: str, label: str, active: bool) -> str:
+            qs = []
+            if show_all:
+                qs.append("show=all")
+            if target_view != "needs":
+                qs.append(f"view={target_view}")
+            href = "/?" + "&".join(qs) if qs else "/"
+            cls = "view-chip is-active" if active else "view-chip"
+            return f'<a class="{cls}" href="{href}">{label}</a>'
+
+        view_chips = (
+            _chip("needs", f"Needs labeling ({total - labeled_total - noise_total})", view == "needs")
+            + _chip("labeled", f"Labeled ({labeled_total})", view == "labeled")
+            + _chip("all", f"All ({total})", view == "all")
+        )
+
         scope_chip = ""
         if app.config["SCOPE_PATHS"]:
             label = _scope_label()
+            tail = "&view=" + view if view != "needs" else ""
             if show_all:
                 scope_chip = (
-                    f'<a class="scope-chip scope-chip--all" href="/">'
+                    f'<a class="scope-chip scope-chip--all" href="/?{("view=" + view) if view != "needs" else ""}">'
                     f'<span class="dot"></span>Showing all clusters · back to {label}</a>'
                 )
             else:
                 scope_chip = (
-                    f'<a class="scope-chip" href="/?show=all">'
+                    f'<a class="scope-chip" href="/?show=all{tail}">'
                     f'<span class="dot"></span>Filtered to {label} · show all</a>'
                 )
 
@@ -115,6 +153,7 @@ def create_app(
             .replace("__CARDS__", "\n".join(cards))
             .replace("__COUNT__", str(len(summary)))
             .replace("__SCOPE_CHIP__", scope_chip)
+            .replace("__VIEW_CHIPS__", view_chips)
         )
 
     @app.route("/thumb/<int:cluster_id>.jpg")
@@ -404,11 +443,34 @@ _PAGE = r"""<!doctype html>
   }
   .scope-chip--all { color: var(--text-dim); border-color: var(--border-strong); background: var(--surface-2); }
   .scope-chip--all .dot { background: var(--text-faint); }
+
+  /* View toggle chips — switch between Needs labeling / Labeled / All
+     so a user who's labeled people can still find them again. */
+  .view-chips { display: inline-flex; gap: 4px; margin-left: 12px; }
+  .view-chip {
+    display: inline-flex;
+    align-items: center;
+    padding: 4px 10px;
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    font-size: 12px;
+    color: var(--text-dim);
+    background: var(--surface);
+    text-decoration: none;
+    transition: background 120ms, color 120ms, border-color 120ms;
+  }
+  .view-chip:hover { color: var(--text); border-color: var(--border-strong); }
+  .view-chip.is-active {
+    color: var(--text);
+    border-color: var(--primary);
+    background: rgba(240, 130, 32, 0.12);
+  }
 </style>
 </head><body>
 <header>
   <h1>Name the people</h1>
   <span class="meta">__COUNT__ clusters &middot; saves as you type &middot; <kbd>Tab</kbd> to advance</span>
+  <span class="view-chips">__VIEW_CHIPS__</span>
   __SCOPE_CHIP__
   <input class="filter" id="filter" placeholder="filter…" autocomplete="off">
   <div class="actions">

@@ -81,6 +81,41 @@ print("Patched exiftool @INC paths to be Homebrew-independent.")
 PY
 chmod +x "$SIDECAR_DIR/vendor/exiftool/exiftool"
 
+# 2a) Stage Apple's MobileCLIP-S2 Core ML packages for activity tagging.
+# Downloaded once from Hugging Face into sidecar/vendor/mobileclip/. The
+# .mlpackages are ~190MB total; we only re-fetch if missing so CI cache
+# hits make subsequent builds fast.
+MOBILECLIP_DIR="$SIDECAR_DIR/vendor/mobileclip"
+if [[ ! -d "$MOBILECLIP_DIR/mobileclip_s2_image.mlpackage" || ! -d "$MOBILECLIP_DIR/mobileclip_s2_text.mlpackage" ]]; then
+  echo "Downloading Apple's MobileCLIP-S2 Core ML packages…"
+  mkdir -p "$MOBILECLIP_DIR"
+  "$PYTHON" - <<PY
+from huggingface_hub import snapshot_download
+snapshot_download(
+    repo_id="apple/coreml-mobileclip",
+    allow_patterns=["mobileclip_s2*"],
+    local_dir="$MOBILECLIP_DIR",
+)
+PY
+fi
+
+# 2a-bis) Stage the CLIP BPE tokenizer files so the bundled sidecar
+# doesn't try to hit the Hugging Face hub at runtime. clip.py loads
+# them from this local directory via CLIPTokenizer.from_pretrained(path).
+CLIP_TOK_DIR="$SIDECAR_DIR/vendor/clip_tokenizer"
+if [[ ! -f "$CLIP_TOK_DIR/tokenizer.json" && ! -f "$CLIP_TOK_DIR/vocab.json" ]]; then
+  echo "Downloading CLIP tokenizer files…"
+  mkdir -p "$CLIP_TOK_DIR"
+  "$PYTHON" - <<PY
+from huggingface_hub import snapshot_download
+snapshot_download(
+    repo_id="openai/clip-vit-base-patch32",
+    allow_patterns=["tokenizer*", "vocab*", "merges*", "special_tokens_map*"],
+    local_dir="$CLIP_TOK_DIR",
+)
+PY
+fi
+
 # 2b) Stage static ffmpeg + ffprobe (evermeet.cx universal builds).
 # These are required by facetag/extract.py — without them, Ellie's
 # non-developer Mac can't probe or decode video frames.

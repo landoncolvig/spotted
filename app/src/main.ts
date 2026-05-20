@@ -32,6 +32,10 @@ type SpottedEvent =
   | { event: "markers-verified"; file: string; event_count: number; in_file_present: boolean; sidecar_present: boolean }
   | { event: "markers-verify-error"; message: string }
   | { event: "markers-sidecar-error"; name: string; message: string }
+  | { event: "activity-start"; total: number }
+  | { event: "activity-complete"; total: number; tagged: number; sample: { file: string; tags: string[] } | null }
+  | { event: "activity-empty"; message: string }
+  | { event: "activities-disabled"; reason: string }
   | { event: "library-stats"; videos: number; faces: number; clusters: number; named: number; people: { name: string; cluster_id?: number; clips: number; faces: number }[] }
   | { event: "library-person"; name: string; clips: { path: string; name: string; times: number[] }[] }
   | { event: "library-detail-complete" }
@@ -221,6 +225,7 @@ function parseSpotted(line: string): SpottedEvent | null {
 let lastStats: SpottedEvent | null = null;
 let lastVerification: Extract<SpottedEvent, { event: "tag-verified" }> | null = null;
 let lastMarkersVerification: Extract<SpottedEvent, { event: "markers-verified" }> | null = null;
+let lastActivityResult: Extract<SpottedEvent, { event: "activity-complete" }> | null = null;
 
 async function fetchLibraryStats(): Promise<SpottedEvent | null> {
   // Calls `facetag status`; the structured library-stats event is captured
@@ -316,6 +321,18 @@ function handleSpottedEvent(evt: SpottedEvent) {
       break;
     case "markers-verified":
       lastMarkersVerification = evt;
+      break;
+    case "activity-start":
+      workingLabel.textContent = "Spotting activities";
+      workingDetail.textContent = `Scoring ${evt.total} clips against curated prompts…`;
+      break;
+    case "activity-complete":
+      lastActivityResult = evt;
+      break;
+    case "activity-empty":
+    case "activities-disabled":
+      // Non-fatal — face tagging still proceeds. Logged for devtools.
+      console.info("activity step skipped:", evt);
       break;
     case "library-person":
       handleLibraryEvent(evt);
@@ -452,6 +469,18 @@ function mountLabelScreen() {
 async function runTagWrite() {
   setState("working");
   setProgressIndeterminate();
+  workingLabel.textContent = "Spotting activities";
+  workingDetail.textContent = "Scoring curated prompts against frame embeddings…";
+  // Activity suggestion runs before tag-write so any matched prompts
+  // (kids, beach, wedding…) merge into the keyword field with the
+  // person names. Non-fatal — if the .mlpackage isn't bundled or the
+  // user disabled --activities on scan, this returns quickly with no
+  // auto-tags applied.
+  try {
+    await invoke<number>("suggest_activities");
+  } catch (e) {
+    console.warn("activity suggest failed (non-fatal):", e);
+  }
   workingLabel.textContent = "Writing keywords";
   workingDetail.textContent = "Running exiftool, per clip…";
   try {
@@ -563,6 +592,11 @@ function renderVerification() {
       label: "Markers (timeline)",
       values: markerCells,
       help: "Per-face timeline markers. In-file XMP for Premiere; sidecar .xmp next to the clip for DaVinci (enable 'Use Sidecar Files' in project settings).",
+    },
+    {
+      label: "Activities (MobileCLIP)",
+      values: lastActivityResult?.sample?.tags ?? [],
+      help: "Zero-shot scene/object tags auto-applied via Apple's MobileCLIP. Adds discoverability beyond face names (kids, beach, wedding…). Disable per-scan with the --activities/--no-activities flag.",
     },
   ];
 
@@ -941,6 +975,27 @@ function wireMenuEvents() {
   listen("menu://show-welcome", () => {
     try { localStorage.removeItem(WELCOME_KEY); } catch {}
     showWelcome();
+  });
+  listen("menu://reset-library", async () => {
+    if (isBusy()) {
+      flashToast("Finish or cancel the current batch first.");
+      return;
+    }
+    const ok = await confirm(
+      "Reset everything Spotted has indexed?\n\n" +
+      "This deletes the face index, frame embeddings, generated thumbnails, " +
+      "and per-person crops in ~/.facetag/. Tag data already written into " +
+      "your .mov files stays put — only Spotted's internal library is wiped.",
+      { title: "Reset Library", okLabel: "Reset", cancelLabel: "Cancel" }
+    );
+    if (!ok) return;
+    try {
+      await invoke("reset_library");
+      flashToast("Library reset. Drop a folder to start fresh.");
+      setState("idle");
+    } catch (e) {
+      flashToast(`Reset failed: ${e}`, true);
+    }
   });
   listen("menu://check-updates", async () => {
     try {

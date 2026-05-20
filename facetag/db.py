@@ -36,6 +36,29 @@ CREATE INDEX IF NOT EXISTS idx_people_name ON people(name);
 CREATE TABLE IF NOT EXISTS hidden_clusters (
     cluster_id INTEGER PRIMARY KEY
 );
+
+-- MobileCLIP image-encoder output per sampled frame. One row per scan-time
+-- frame so the activity-suggest step can score curated text prompts against
+-- the whole library without re-running the encoder.
+CREATE TABLE IF NOT EXISTS frame_embeddings (
+    id INTEGER PRIMARY KEY,
+    video_id INTEGER NOT NULL REFERENCES videos(id) ON DELETE CASCADE,
+    timestamp_sec REAL NOT NULL,
+    embedding BLOB NOT NULL  -- float16, 512 dims, 1024 bytes per row
+);
+CREATE INDEX IF NOT EXISTS idx_frame_emb_video ON frame_embeddings(video_id);
+
+-- Auto-applied activity tags (one row per (video, tag)) produced by the
+-- MobileCLIP-driven activity-suggest step. Kept separate from batch_tags
+-- so we can distinguish auto from manual and remove all autos in one shot
+-- on re-classification.
+CREATE TABLE IF NOT EXISTS auto_tags (
+    video_id INTEGER NOT NULL REFERENCES videos(id) ON DELETE CASCADE,
+    tag TEXT NOT NULL,
+    score REAL NOT NULL,
+    PRIMARY KEY (video_id, tag)
+);
+CREATE INDEX IF NOT EXISTS idx_auto_tags_video ON auto_tags(video_id);
 """
 
 
@@ -100,6 +123,83 @@ def is_scanned(conn: sqlite3.Connection, path: str) -> bool:
 def clear_video_faces(conn: sqlite3.Connection, video_id: int) -> None:
     conn.execute("DELETE FROM faces WHERE video_id = ?", (video_id,))
     conn.commit()
+
+
+def add_frame_embeddings_bulk(
+    conn: sqlite3.Connection,
+    video_id: int,
+    rows: list[tuple[float, bytes]],
+) -> None:
+    """Insert (timestamp, embedding-blob) rows for a video's sampled frames."""
+    conn.executemany(
+        "INSERT INTO frame_embeddings(video_id, timestamp_sec, embedding) VALUES (?, ?, ?)",
+        [(video_id, t, blob) for t, blob in rows],
+    )
+    conn.commit()
+
+
+def clear_video_embeddings(conn: sqlite3.Connection, video_id: int) -> None:
+    conn.execute("DELETE FROM frame_embeddings WHERE video_id = ?", (video_id,))
+    conn.commit()
+
+
+def videos_with_embeddings(conn: sqlite3.Connection) -> list[tuple[int, str]]:
+    """Return [(video_id, path)] for videos that have at least one frame embedding."""
+    rows = conn.execute(
+        "SELECT DISTINCT v.id, v.path FROM videos v "
+        "JOIN frame_embeddings fe ON fe.video_id = v.id "
+        "ORDER BY v.path"
+    ).fetchall()
+    return [(int(r[0]), r[1]) for r in rows]
+
+
+def load_frame_embeddings(
+    conn: sqlite3.Connection, video_id: int
+) -> list[tuple[float, bytes]]:
+    """Return [(timestamp, embedding-blob)] for a video."""
+    rows = conn.execute(
+        "SELECT timestamp_sec, embedding FROM frame_embeddings "
+        "WHERE video_id = ? ORDER BY timestamp_sec",
+        (video_id,),
+    ).fetchall()
+    return [(float(t), bytes(b)) for t, b in rows]
+
+
+def replace_auto_tags(
+    conn: sqlite3.Connection,
+    video_id: int,
+    tags: list[tuple[str, float]],
+) -> None:
+    """Wipe all auto-tags for a video and write the new set."""
+    conn.execute("DELETE FROM auto_tags WHERE video_id = ?", (video_id,))
+    if tags:
+        conn.executemany(
+            "INSERT INTO auto_tags(video_id, tag, score) VALUES (?, ?, ?)",
+            [(video_id, t, s) for t, s in tags],
+        )
+    conn.commit()
+
+
+def get_auto_tags(conn: sqlite3.Connection, video_id: int) -> list[tuple[str, float]]:
+    """Return [(tag, score)] for a video, highest score first."""
+    rows = conn.execute(
+        "SELECT tag, score FROM auto_tags WHERE video_id = ? ORDER BY score DESC",
+        (video_id,),
+    ).fetchall()
+    return [(r[0], float(r[1])) for r in rows]
+
+
+def all_auto_tags(conn: sqlite3.Connection) -> dict[str, list[str]]:
+    """Return {video_path: [tag, ...]} for every video that has auto-tags."""
+    rows = conn.execute(
+        "SELECT v.path, a.tag FROM auto_tags a "
+        "JOIN videos v ON v.id = a.video_id "
+        "ORDER BY a.score DESC"
+    ).fetchall()
+    out: dict[str, list[str]] = {}
+    for path, tag in rows:
+        out.setdefault(path, []).append(tag)
+    return out
 
 
 def add_faces_bulk(
