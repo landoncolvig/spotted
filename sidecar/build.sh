@@ -61,6 +61,9 @@ fi
 # the app shows a successful "Done" while NOTHING gets written. Rewrite the
 # Cellar paths to use the $exeDir variable the script already computes in
 # its BEGIN block, so @INC resolves relative to wherever the binary lives.
+# `cp` preserves Homebrew's read-only mode (0444); make it writable for the
+# in-place rewrite, then put it back to executable.
+chmod u+rw "$SIDECAR_DIR/vendor/exiftool/exiftool"
 python3 - "$SIDECAR_DIR/vendor/exiftool/exiftool" <<'PY'
 import re, sys
 path = sys.argv[1]
@@ -76,6 +79,7 @@ if patched == src:
 open(path, "w").write(patched)
 print("Patched exiftool @INC paths to be Homebrew-independent.")
 PY
+chmod +x "$SIDECAR_DIR/vendor/exiftool/exiftool"
 
 # 2b) Stage static ffmpeg + ffprobe (evermeet.cx universal builds).
 # These are required by facetag/extract.py — without them, Ellie's
