@@ -71,6 +71,11 @@ def create_app(
         with _conn() as conn:
             summary = db.cluster_summary_with_videos(conn, scope_paths=scope)
 
+        # The thumb route uses the same ?show=all flag to pick between the
+        # scoped and unscoped cache files. Propagate the query string so a
+        # show-all view doesn't accidentally serve scoped thumbs.
+        thumb_qs = "?show=all" if show_all else ""
+
         cards = []
         for cid, count, name, video_paths in summary:
             existing = (name or "").replace('"', "&quot;")
@@ -84,7 +89,7 @@ def create_app(
                 <span class="cnt">{count} faces</span>
                 <button type="button" class="hide-btn" data-cluster="{cid}" title="Hide this cluster (not a person)">×</button>
               </div>
-              <img loading="lazy" src="/thumb/{cid}.jpg" alt="cluster {cid}">
+              <img loading="lazy" src="/thumb/{cid}.jpg{thumb_qs}" alt="cluster {cid}">
               <input type="text" name="name-{cid}" placeholder="name…" value="{existing}" autocomplete="off">
               {badge}
               {_render_seen_in(video_paths)}
@@ -114,10 +119,26 @@ def create_app(
 
     @app.route("/thumb/<int:cluster_id>.jpg")
     def thumb(cluster_id: int):
-        out = thumb_dir / f"cluster_{cluster_id:04d}.jpg"
+        # When the labeler is scoped, the thumb sampling has to follow the
+        # scope — otherwise a cluster that absorbed faces from the freshly-
+        # dropped clip via centroid match would still display its old crops
+        # from the original batch, which is exactly the "wrong faces"
+        # confusion users hit. Cache key bakes in a hash of the scope so the
+        # scoped and unscoped thumbs don't clobber each other on disk.
+        import hashlib
+        show_all = request.args.get("show") == "all"
+        scope = None if show_all else (app.config["SCOPE_PATHS"] or None)
+        if scope:
+            digest = hashlib.sha1("|".join(scope).encode()).hexdigest()[:8]
+            out = thumb_dir / f"cluster_{cluster_id:04d}_scope_{digest}.jpg"
+        else:
+            out = thumb_dir / f"cluster_{cluster_id:04d}.jpg"
+
         if not out.exists():
             with _conn() as conn:
-                samples = db.representative_faces(conn, cluster_id, n=9)
+                samples = db.representative_faces(
+                    conn, cluster_id, n=9, scope_paths=scope
+                )
             crops = []
             for video_path, t, bbox in samples:
                 c = _crop_face(Path(video_path), t, bbox)

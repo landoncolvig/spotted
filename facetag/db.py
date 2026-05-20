@@ -265,16 +265,50 @@ def name_cluster(conn: sqlite3.Connection, cluster_id: int, name: str) -> None:
 
 
 def representative_faces(
-    conn: sqlite3.Connection, cluster_id: int, n: int = 9
+    conn: sqlite3.Connection,
+    cluster_id: int,
+    n: int = 9,
+    scope_paths: list[str] | None = None,
 ) -> list[tuple[str, float, tuple[int, int, int, int]]]:
-    """Pick face samples spread across timestamps for visual labeling."""
-    rows = conn.execute(
-        "SELECT v.path, f.timestamp_sec, f.bbox_x, f.bbox_y, f.bbox_w, f.bbox_h "
-        "FROM faces f JOIN videos v ON v.id = f.video_id "
-        "WHERE f.cluster_id = ? "
-        "ORDER BY RANDOM() LIMIT ?",
-        (cluster_id, n),
-    ).fetchall()
+    """Pick face samples spread across timestamps for visual labeling.
+
+    If `scope_paths` is provided, samples only from videos whose path
+    matches a scope path (file equality) or sits under a scope dir
+    (prefix match). This is what the labeler uses when scoped to a
+    just-dropped clip: cluster IDs are library-wide (a face in cluster 8
+    might come from this clip AND from older footage), but the thumbnail
+    should show faces FROM the clip the user just dropped, not stale
+    crops from the original batch that first formed the cluster.
+
+    Falls back to library-wide sampling if `scope_paths` is set but no
+    in-scope faces exist for that cluster.
+    """
+    def _query(where_extra: str, params: tuple):
+        return conn.execute(
+            "SELECT v.path, f.timestamp_sec, f.bbox_x, f.bbox_y, f.bbox_w, f.bbox_h "
+            "FROM faces f JOIN videos v ON v.id = f.video_id "
+            f"WHERE f.cluster_id = ? {where_extra} "
+            "ORDER BY RANDOM() LIMIT ?",
+            params,
+        ).fetchall()
+
+    if scope_paths:
+        import os
+        scopes = [os.path.realpath(os.path.expanduser(p)) for p in scope_paths]
+        # Build OR'd predicate: v.path = scope OR v.path LIKE 'scope/%'
+        clauses = []
+        params: list = [cluster_id]
+        for s in scopes:
+            s = s.rstrip("/")
+            clauses.append("(v.path = ? OR v.path LIKE ?)")
+            params.extend([s, s + "/%"])
+        where_extra = "AND (" + " OR ".join(clauses) + ")"
+        params.append(n)
+        scoped = _query(where_extra, tuple(params))
+        if scoped:
+            return [(r[0], r[1], (r[2], r[3], r[4], r[5])) for r in scoped]
+
+    rows = _query("", (cluster_id, n))
     return [(r[0], r[1], (r[2], r[3], r[4], r[5])) for r in rows]
 
 
