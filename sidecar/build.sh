@@ -99,21 +99,17 @@ snapshot_download(
 PY
 fi
 
-# 2a-bis) Stage the CLIP BPE tokenizer files so the bundled sidecar
-# doesn't try to hit the Hugging Face hub at runtime. clip.py loads
-# them from this local directory via CLIPTokenizer.from_pretrained(path).
+# 2a-bis) Stage the OpenAI CLIP BPE vocab so the slim tokenizer in
+# facetag/clip_tokenizer.py runs fully offline. ~1.3MB gzip — much
+# smaller than the transformers+tokenizers stack we used to bundle.
 CLIP_TOK_DIR="$SIDECAR_DIR/vendor/clip_tokenizer"
-if [[ ! -f "$CLIP_TOK_DIR/tokenizer.json" && ! -f "$CLIP_TOK_DIR/vocab.json" ]]; then
-  echo "Downloading CLIP tokenizer files…"
+CLIP_TOK_FILE="$CLIP_TOK_DIR/bpe_simple_vocab_16e6.txt.gz"
+if [[ ! -f "$CLIP_TOK_FILE" ]]; then
+  echo "Downloading CLIP BPE vocab…"
   mkdir -p "$CLIP_TOK_DIR"
-  "$PYTHON" - <<PY
-from huggingface_hub import snapshot_download
-snapshot_download(
-    repo_id="openai/clip-vit-base-patch32",
-    allow_patterns=["tokenizer*", "vocab*", "merges*", "special_tokens_map*"],
-    local_dir="$CLIP_TOK_DIR",
-)
-PY
+  curl -fsSL \
+    "https://github.com/openai/CLIP/raw/main/clip/bpe_simple_vocab_16e6.txt.gz" \
+    -o "$CLIP_TOK_FILE"
 fi
 
 # 2b) Stage static ffmpeg + ffprobe (evermeet.cx universal builds).

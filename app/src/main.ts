@@ -983,18 +983,55 @@ function wireMenuEvents() {
     }
     const ok = await confirm(
       "Reset everything Spotted has indexed?\n\n" +
-      "This deletes the face index, frame embeddings, generated thumbnails, " +
-      "and per-person crops in ~/.facetag/. Tag data already written into " +
-      "your .mov files stays put — only Spotted's internal library is wiped.",
+      "This moves the current library (face index, frame embeddings, " +
+      "thumbnails, person crops in ~/.facetag/) to a timestamped backup. " +
+      "You can restore via File > Restore Last Backup if you change your " +
+      "mind. Tag data already written into your .mov files isn't touched.",
       { title: "Reset Library", okLabel: "Reset", cancelLabel: "Cancel" }
     );
     if (!ok) return;
     try {
-      await invoke("reset_library");
-      flashToast("Library reset. Drop a folder to start fresh.");
+      const result = await invoke<{ backup_dir: string | null }>("reset_library");
+      if (result.backup_dir) {
+        flashToast("Library reset. Backup saved — undo via File > Restore Last Backup.");
+      } else {
+        flashToast("Library was already empty.");
+      }
       setState("idle");
     } catch (e) {
       flashToast(`Reset failed: ${e}`, true);
+    }
+  });
+  listen("menu://restore-backup", async () => {
+    if (isBusy()) {
+      flashToast("Finish or cancel the current batch first.");
+      return;
+    }
+    let backups: string[] = [];
+    try {
+      backups = await invoke<string[]>("list_library_backups");
+    } catch (e) {
+      flashToast(`Couldn't list backups: ${e}`, true);
+      return;
+    }
+    if (backups.length === 0) {
+      flashToast("No backups available.");
+      return;
+    }
+    const latest = backups[0].split("/").pop() ?? backups[0];
+    const ok = await confirm(
+      `Restore from ${latest}?\n\n` +
+      "Your current library (if any) will be moved aside as a safety " +
+      "backup before the restore, so this is itself reversible.",
+      { title: "Restore Last Backup", okLabel: "Restore", cancelLabel: "Cancel" }
+    );
+    if (!ok) return;
+    try {
+      await invoke("restore_last_backup");
+      flashToast("Library restored from backup.");
+      setState("idle");
+    } catch (e) {
+      flashToast(`Restore failed: ${e}`, true);
     }
   });
   listen("menu://check-updates", async () => {

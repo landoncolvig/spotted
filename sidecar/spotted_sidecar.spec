@@ -26,10 +26,11 @@ hdbscan_datas, hdbscan_binaries, hdbscan_hidden = collect_all("hdbscan")
 cv2_datas, cv2_binaries, cv2_hidden = collect_all("cv2")
 # MobileCLIP via Core ML for zero-shot activity tagging.
 coremltools_datas, coremltools_binaries, coremltools_hidden = collect_all("coremltools")
-# transformers used solely for the CLIPTokenizer (BPE). The hub stays
-# offline-friendly because we ship the tokenizer files alongside the bundle.
-transformers_datas, transformers_binaries, transformers_hidden = collect_all("transformers")
-tokenizers_datas, tokenizers_binaries, tokenizers_hidden = collect_all("tokenizers")
+# ftfy + regex back the slim CLIP BPE tokenizer in facetag/clip_tokenizer.py
+# (replaces a ~50MB transformers dependency we used to pull just for one
+# CLIPTokenizer.from_pretrained call).
+ftfy_datas, ftfy_binaries, ftfy_hidden = collect_all("ftfy")
+regex_datas, regex_binaries, regex_hidden = collect_all("regex")
 
 # Bundle the pre-downloaded buffalo_l model from the user's ~/.insightface.
 # build.sh ensures this exists before pyinstaller runs.
@@ -93,8 +94,8 @@ a = Analysis(
         *sklearn_binaries,
         *hdbscan_binaries,
         *coremltools_binaries,
-        *transformers_binaries,
-        *tokenizers_binaries,
+        *ftfy_binaries,
+        *regex_binaries,
         *exiftool_binaries,
         *ffmpeg_binaries,
     ],
@@ -105,8 +106,8 @@ a = Analysis(
         *hdbscan_datas,
         *cv2_datas,
         *coremltools_datas,
-        *transformers_datas,
-        *tokenizers_datas,
+        *ftfy_datas,
+        *regex_datas,
         *model_datas,
         *mobileclip_datas,
         *clip_tok_datas,
@@ -114,8 +115,6 @@ a = Analysis(
         *copy_metadata("typer"),
         *copy_metadata("rich"),
         *copy_metadata("coremltools"),
-        *copy_metadata("transformers"),
-        *copy_metadata("tokenizers"),
     ],
     hiddenimports=[
         *insightface_hidden,
@@ -124,8 +123,8 @@ a = Analysis(
         *hdbscan_hidden,
         *cv2_hidden,
         *coremltools_hidden,
-        *transformers_hidden,
-        *tokenizers_hidden,
+        *ftfy_hidden,
+        *regex_hidden,
         *collect_submodules("facetag"),
     ],
     hookspath=[],

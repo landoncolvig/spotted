@@ -163,19 +163,107 @@ async fn suggest_activities(app: AppHandle, window: Window) -> Result<i32, Strin
     run_sidecar(app, window, vec!["activity-suggest".into()]).await
 }
 
-/// Wipe the per-user library — face index, embeddings, generated thumbs,
-/// person crops. Equivalent to deleting ~/.facetag/ and starting over. The
-/// frontend confirms with a native dialog before invoking this; from
-/// here on it's destructive and silent.
+/// Wipe the per-user library, but keep an undo path. Renames ~/.facetag/
+/// to ~/.facetag.backup-<UTC-timestamp>/ instead of deleting outright, then
+/// trims older backups so the user has the last 3 to roll back to. One bad
+/// click used to mean lost work; now it's two clicks to recover.
 #[tauri::command]
-fn reset_library() -> Result<(), String> {
+fn reset_library() -> Result<ResetResult, String> {
     use std::fs;
     let home = dirs_home_dir().ok_or_else(|| "couldn't resolve $HOME".to_string())?;
     let root = home.join(".facetag");
+    if !root.exists() {
+        return Ok(ResetResult { backup_dir: None });
+    }
+    let stamp = chrono_timestamp();
+    let backup = home.join(format!(".facetag.backup-{stamp}"));
+    fs::rename(&root, &backup)
+        .map_err(|e| format!("mv {} → {}: {e}", root.display(), backup.display()))?;
+    let _ = trim_old_backups(&home, 3); // best-effort; not fatal
+    Ok(ResetResult { backup_dir: Some(backup.display().to_string()) })
+}
+
+#[derive(Serialize, Clone)]
+struct ResetResult {
+    backup_dir: Option<String>,
+}
+
+/// Roll the most recent backup back over the current ~/.facetag/ (which is
+/// assumed to be absent or stale after a Reset). If the current dir exists,
+/// rename it aside as a safety swap first so this op is itself undoable.
+#[tauri::command]
+fn restore_last_backup() -> Result<RestoreResult, String> {
+    use std::fs;
+    let home = dirs_home_dir().ok_or_else(|| "couldn't resolve $HOME".to_string())?;
+    let backups = list_backups(&home);
+    let latest = backups.first().ok_or_else(|| "no backups found".to_string())?;
+    let root = home.join(".facetag");
     if root.exists() {
-        fs::remove_dir_all(&root).map_err(|e| format!("rm -rf {}: {e}", root.display()))?;
+        let stamp = chrono_timestamp();
+        let pre = home.join(format!(".facetag.pre-restore-{stamp}"));
+        fs::rename(&root, &pre)
+            .map_err(|e| format!("safety-rename of current ~/.facetag: {e}"))?;
+    }
+    fs::rename(latest, &root)
+        .map_err(|e| format!("restore mv {} → {}: {e}", latest.display(), root.display()))?;
+    Ok(RestoreResult { restored_from: latest.display().to_string() })
+}
+
+#[derive(Serialize, Clone)]
+struct RestoreResult {
+    restored_from: String,
+}
+
+#[tauri::command]
+fn list_library_backups() -> Vec<String> {
+    let home = match dirs_home_dir() {
+        Some(h) => h,
+        None => return Vec::new(),
+    };
+    list_backups(&home)
+        .into_iter()
+        .map(|p| p.display().to_string())
+        .collect()
+}
+
+fn list_backups(home: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut out: Vec<std::path::PathBuf> = match std::fs::read_dir(home) {
+        Ok(rd) => rd
+            .filter_map(|e| e.ok().map(|d| d.path()))
+            .filter(|p| {
+                p.file_name()
+                    .and_then(|s| s.to_str())
+                    .map(|s| s.starts_with(".facetag.backup-"))
+                    .unwrap_or(false)
+            })
+            .collect(),
+        Err(_) => Vec::new(),
+    };
+    // Newest first (timestamp suffix sorts lexicographically because
+    // chrono_timestamp emits zero-padded YYYYMMDDHHMMSS).
+    out.sort();
+    out.reverse();
+    out
+}
+
+fn trim_old_backups(home: &std::path::Path, keep: usize) -> std::io::Result<()> {
+    let backups = list_backups(home);
+    for old in backups.into_iter().skip(keep) {
+        std::fs::remove_dir_all(&old)?;
     }
     Ok(())
+}
+
+fn chrono_timestamp() -> String {
+    // Unix seconds. Lexicographically sortable, opaque to the user but
+    // they never need to decode it manually because Restore Last Backup
+    // finds the newest one automatically. Saves us from pulling chrono.
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    format!("{secs}")
 }
 
 fn dirs_home_dir() -> Option<std::path::PathBuf> {
@@ -574,6 +662,10 @@ pub fn run() {
                         &MenuItemBuilder::with_id("reset_library", "Reset Library…")
                             .build(app)?,
                     )
+                    .item(
+                        &MenuItemBuilder::with_id("restore_backup", "Restore Last Backup…")
+                            .build(app)?,
+                    )
                     .build()?;
 
                 let edit_submenu = SubmenuBuilder::new(app, "Edit")
@@ -652,6 +744,11 @@ pub fn run() {
                             let _ = window.emit("menu://reset-library", ());
                         }
                     }
+                    "restore_backup" => {
+                        if let Some(window) = handle.get_webview_window("main") {
+                            let _ = window.emit("menu://restore-backup", ());
+                        }
+                    }
                     _ => {}
                 });
             }
@@ -676,6 +773,8 @@ pub fn run() {
             restart_app,
             suggest_activities,
             reset_library,
+            restore_last_backup,
+            list_library_backups,
             app_version
         ])
         .run(tauri::generate_context!())

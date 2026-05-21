@@ -15,8 +15,9 @@ dependencies = [
     "pillow>=10",
     "flask>=3.0",
     "coremltools>=8.0",
-    "transformers>=4.40",
     "huggingface_hub>=0.20",
+    "ftfy>=6.0",
+    "regex>=2024.0",
 ]
 
 [project.scripts]

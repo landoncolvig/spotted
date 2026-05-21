@@ -54,19 +54,9 @@ def _model_root() -> Optional[Path]:
     return None
 
 
-def _tokenizer_root() -> Optional[Path]:
-    """Find the bundled CLIP BPE tokenizer files. Same lookup pattern as
-    _model_root so the bundled and dev paths stay parallel."""
-    base = getattr(sys, "_MEIPASS", None)
-    if base:
-        cand = Path(base) / "clip_tokenizer"
-        if cand.is_dir():
-            return cand
-    here = Path(__file__).resolve().parent.parent
-    cand = here / "sidecar" / "vendor" / "clip_tokenizer"
-    if cand.is_dir():
-        return cand
-    return None
+# _tokenizer_root removed: the slim SimpleTokenizer in clip_tokenizer.py
+# resolves its own bpe_simple_vocab_16e6.txt.gz via SPOTTED_CLIP_VOCAB,
+# the PyInstaller bundle, or the dev tree.
 
 
 class ClipEncoder:
@@ -110,22 +100,15 @@ class ClipEncoder:
         self._txt_model = ct.models.MLModel(str(txt_path), compute_units=units)
 
         try:
-            from transformers import CLIPTokenizer
+            from .clip_tokenizer import SimpleTokenizer
         except Exception as e:
             raise ClipUnavailable(
-                f"CLIP tokenizer unavailable (transformers package): {e}"
+                f"CLIP tokenizer unavailable: {e}"
             ) from e
-        # MobileCLIP uses the standard CLIP BPE tokenizer. Prefer the
-        # bundled local files (offline-safe, no HF hub round-trip); fall
-        # back to from_pretrained's network lookup only in dev when the
-        # vendor dir is missing.
-        tok_root = _tokenizer_root()
-        if tok_root is not None:
-            self._tokenizer = CLIPTokenizer.from_pretrained(str(tok_root))
-        else:
-            self._tokenizer = CLIPTokenizer.from_pretrained(
-                "openai/clip-vit-base-patch32"
-            )
+        # Pure-Python BPE tokenizer ported from OpenAI's CLIP repo.
+        # Replaces a ~50MB transformers dependency we previously pulled
+        # just to call CLIPTokenizer.from_pretrained.
+        self._tokenizer = SimpleTokenizer()
 
     def encode_image(self, frame_bgr: np.ndarray) -> np.ndarray:
         """Encode a single BGR frame ndarray. Returns L2-normalized 512-dim float32."""
@@ -143,15 +126,12 @@ class ClipEncoder:
     def encode_texts(self, prompts: list[str]) -> np.ndarray:
         """Encode a list of text prompts. Returns L2-normalized (N, 512) float32."""
         self._load()
+        # SimpleTokenizer.tokenize returns (N, 77) int32; the Core ML model
+        # expects one row at a time so we slice per-prompt.
+        all_ids = self._tokenizer.tokenize(prompts)  # (N, 77) int32
         embs: list[np.ndarray] = []
-        for p in prompts:
-            ids = self._tokenizer(
-                p,
-                padding="max_length",
-                max_length=77,
-                truncation=True,
-                return_tensors="np",
-            )["input_ids"].astype(np.int32)
+        for row in range(all_ids.shape[0]):
+            ids = all_ids[row : row + 1]  # (1, 77) — model's expected shape
             out = self._txt_model.predict({"text": ids})
             emb = out["final_emb_1"][0].astype(np.float32)
             norm = np.linalg.norm(emb)
