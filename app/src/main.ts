@@ -1002,6 +1002,32 @@ function wireMenuEvents() {
       flashToast(`Reset failed: ${e}`, true);
     }
   });
+  listen("menu://telemetry-settings", async () => {
+    let cfg: TelemetryConfig;
+    try {
+      cfg = await invoke<TelemetryConfig>("telemetry_state");
+    } catch (e) {
+      flashToast(`Couldn't read telemetry state: ${e}`, true);
+      return;
+    }
+    const currently = cfg.telemetry_enabled === true ? "currently ON" :
+                      cfg.telemetry_enabled === false ? "currently OFF" :
+                      "not set";
+    const wantOn = await confirm(
+      `Anonymous usage telemetry is ${currently}.\n\n` +
+      "What gets sent: event names (scan/tag/activity complete), app " +
+      "version, macOS version.\n\n" +
+      "What never leaves your Mac: clip names, folder paths, face data.\n\n" +
+      "Turn it ON to help improve Spotted, or OFF to disable.",
+      { title: "Telemetry", okLabel: "Turn ON", cancelLabel: "Turn OFF" }
+    );
+    try {
+      await invoke("set_telemetry_enabled", { enabled: wantOn });
+      flashToast(`Telemetry ${wantOn ? "enabled" : "disabled"}.`);
+    } catch (e) {
+      flashToast(`Couldn't save telemetry setting: ${e}`, true);
+    }
+  });
   listen("menu://restore-backup", async () => {
     if (isBusy()) {
       flashToast("Finish or cancel the current batch first.");
@@ -1146,5 +1172,42 @@ window.addEventListener("DOMContentLoaded", () => {
   wireLibrary();
   wireWelcome();
   maybeShowWelcome();
+  maybeAskTelemetry();
   refreshFooterStatus();
 });
+
+type TelemetryConfig = {
+  install_id: string | null;
+  telemetry_enabled: boolean | null;
+};
+
+/** On first launch (no telemetry choice yet), ask the user. Off by default
+ *  to align with Spotted's privacy positioning — we only collect anonymous
+ *  usage events if they explicitly opt in. */
+async function maybeAskTelemetry(): Promise<void> {
+  let cfg: TelemetryConfig;
+  try {
+    cfg = await invoke<TelemetryConfig>("telemetry_state");
+  } catch {
+    return;
+  }
+  if (cfg.telemetry_enabled !== null) return; // already decided
+  const ok = await confirm(
+    "Help improve Spotted by sharing anonymous usage data?\n\n" +
+    "What gets sent: event names (scan complete, tag write complete), app " +
+    "version, and macOS version.\n\n" +
+    "What never leaves your Mac: clip names, folder paths, face data, " +
+    "people's names, anything from inside your files.\n\n" +
+    "You can change this anytime under Spotted → Telemetry…",
+    {
+      title: "Help improve Spotted",
+      okLabel: "Yes, share anonymously",
+      cancelLabel: "No thanks",
+    }
+  );
+  try {
+    await invoke("set_telemetry_enabled", { enabled: ok });
+  } catch (e) {
+    console.warn("failed to persist telemetry choice:", e);
+  }
+}

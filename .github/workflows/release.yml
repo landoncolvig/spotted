@@ -83,6 +83,10 @@ jobs:
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
+          # TelemetryDeck app ID baked in via option_env! in telemetry.rs.
+          # If the secret isn't set, this env var is empty and telemetry
+          # becomes a no-op everywhere — safe default for forks/clones.
+          SPOTTED_TELEMETRY_APP_ID: ${{ secrets.TELEMETRY_DECK_APP_ID }}
         run: npm run tauri build -- --target aarch64-apple-darwin
 
       - name: Build latest.json

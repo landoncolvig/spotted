@@ -3686,11 +3686,12 @@ dependencies = [
 
 [[package]]
 name = "spotted"
-version = "0.0.33"
+version = "0.0.34"
 dependencies = [
  "reqwest 0.12.28",
  "serde",
  "serde_json",
+ "sha2",
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",
@@ -3699,6 +3700,7 @@ dependencies = [
  "tauri-plugin-shell",
  "tauri-plugin-updater",
  "tokio",
+ "uuid",
 ]
 
 [[package]]

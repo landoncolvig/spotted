@@ -1,10 +1,13 @@
 use serde::Serialize;
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, Window};
 use tauri_plugin_shell::process::CommandEvent;
 use tauri_plugin_shell::ShellExt;
 use tauri_plugin_updater::UpdaterExt;
+
+mod telemetry;
 
 /// Shared state: PIDs of currently-running sidecar processes. Cancel
 /// command signals all of them so a single click stops whatever phase
@@ -141,11 +144,20 @@ async fn scan_folder(
     tags: Vec<String>,
 ) -> Result<i32, String> {
     let mut args = vec!["scan".to_string(), path];
-    if !tags.is_empty() {
+    let had_tags = !tags.is_empty();
+    if had_tags {
         args.push("--tags".to_string());
         args.push(tags.join(","));
     }
-    run_sidecar(app, window, args).await
+    let result = run_sidecar(app, window, args).await;
+    let mut payload = HashMap::new();
+    payload.insert("had_batch_tags".into(), had_tags.to_string());
+    payload.insert(
+        "status".into(),
+        if result.is_ok() { "ok" } else { "error" }.into(),
+    );
+    telemetry::track("scan-complete", payload);
+    result
 }
 
 #[tauri::command]
@@ -155,12 +167,26 @@ async fn cluster_faces(app: AppHandle, window: Window) -> Result<i32, String> {
 
 #[tauri::command]
 async fn tag_videos(app: AppHandle, window: Window) -> Result<i32, String> {
-    run_sidecar(app, window, vec!["tag-write".into()]).await
+    let result = run_sidecar(app, window, vec!["tag-write".into()]).await;
+    let mut payload = HashMap::new();
+    payload.insert(
+        "status".into(),
+        if result.is_ok() { "ok" } else { "error" }.into(),
+    );
+    telemetry::track("tag-write-complete", payload);
+    result
 }
 
 #[tauri::command]
 async fn suggest_activities(app: AppHandle, window: Window) -> Result<i32, String> {
-    run_sidecar(app, window, vec!["activity-suggest".into()]).await
+    let result = run_sidecar(app, window, vec!["activity-suggest".into()]).await;
+    let mut payload = HashMap::new();
+    payload.insert(
+        "status".into(),
+        if result.is_ok() { "ok" } else { "error" }.into(),
+    );
+    telemetry::track("activity-suggest-complete", payload);
+    result
 }
 
 /// Wipe the per-user library, but keep an undo path. Renames ~/.facetag/
@@ -569,6 +595,11 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
+            // Boot telemetry early so subsequent track() calls see the
+            // install ID. No events fire until the user opts in.
+            let _ = telemetry::boot();
+            telemetry::track("app-launch", HashMap::new());
+
             // Auto-check for updates on launch. Tauri v2 (unlike v1) ignores
             // the `dialog: true` updater config and does not show any UI on
             // its own — the previous version of this code called
@@ -631,6 +662,10 @@ pub fn run() {
                     .separator()
                     .item(
                         &MenuItemBuilder::with_id("check_updates", "Check for Updates…")
+                            .build(app)?,
+                    )
+                    .item(
+                        &MenuItemBuilder::with_id("telemetry_settings", "Telemetry…")
                             .build(app)?,
                     )
                     .item(
@@ -749,6 +784,11 @@ pub fn run() {
                             let _ = window.emit("menu://restore-backup", ());
                         }
                     }
+                    "telemetry_settings" => {
+                        if let Some(window) = handle.get_webview_window("main") {
+                            let _ = window.emit("menu://telemetry-settings", ());
+                        }
+                    }
                     _ => {}
                 });
             }
@@ -775,6 +815,10 @@ pub fn run() {
             reset_library,
             restore_last_backup,
             list_library_backups,
+            telemetry::cmds::telemetry_state,
+            telemetry::cmds::set_telemetry_enabled,
+            telemetry::cmds::track_event,
+            telemetry::cmds::telemetry_active,
             app_version
         ])
         .run(tauri::generate_context!())
