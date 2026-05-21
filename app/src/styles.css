@@ -973,3 +973,88 @@ body {
   box-shadow: 0 0 0 4px rgba(240, 130, 32, 0.10),
               inset 0 0 0 1px rgba(240, 130, 32, 0.25);
 }
+
+/* ----------------------------------------------------------------------
+   LIBRARY CLIP SEARCH (v0.0.36)
+   Cross-clip search results pane that appears in the library detail
+   area when the user types a keyword without selecting a person. Closes
+   the major UX hole that used to force editors out to Finder/DaVinci
+   to find footage by tag.
+   ---------------------------------------------------------------------- */
+.library-clip-search {
+  padding: 24px 28px;
+  max-width: 100%;
+  overflow-y: auto;
+}
+.library-clip-search__header {
+  font-family: var(--font-display);
+  font-size: 16px;
+  font-weight: 600;
+  margin-bottom: 8px;
+  color: var(--text);
+}
+.library-clip-search__hint {
+  font-size: 12px;
+  color: var(--text-dim);
+  margin-bottom: 16px;
+}
+.library-clip-search__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.library-clip-search__row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 10px 14px;
+  align-items: center;
+  padding: 10px 12px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  transition: border-color 120ms;
+}
+.library-clip-search__row:hover {
+  border-color: var(--border-strong);
+}
+.library-clip-search__name {
+  font-size: 13px;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.library-clip-search__kws {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  justify-content: flex-end;
+  max-width: 50%;
+}
+.library-clip-search__kw {
+  font-size: 10px;
+  padding: 2px 7px;
+  border-radius: 8px;
+  background: var(--surface-2);
+  color: var(--text-dim);
+  border: 1px solid var(--border);
+  white-space: nowrap;
+}
+.library-clip-search__kw.is-match {
+  background: rgba(240, 130, 32, 0.14);
+  color: var(--primary-hover);
+  border-color: rgba(240, 130, 32, 0.4);
+}
+.library-clip-search__reveal {
+  padding: 5px 12px;
+  font-size: 12px;
+}
+.library-clip-search__overflow {
+  margin-top: 14px;
+  font-size: 12px;
+  color: var(--text-faint);
+  text-align: center;
+}

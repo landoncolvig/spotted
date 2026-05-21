@@ -707,6 +707,18 @@ def status(
                 for path, times in rows
             ]
             _emit("library-person", name=p["name"], clips=clips)
+
+        # Library-wide clip → keywords index for in-app search. Merges all
+        # three keyword sources (named people, batch tags, auto-tags) into
+        # one map so the frontend can search any keyword and find clips
+        # without bouncing out to Finder / DaVinci. Sent as one event
+        # because <10k clip rows is trivial JSON.
+        kw_map = _tag.videos_with_keywords(conn)
+        clips_with_keywords = [
+            {"path": path, "name": Path(path).name, "keywords": kws}
+            for path, kws in sorted(kw_map.items())
+        ]
+        _emit("library-clip-index", clips=clips_with_keywords)
         _emit("library-detail-complete")
 
 

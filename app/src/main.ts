@@ -38,6 +38,7 @@ type SpottedEvent =
   | { event: "activities-disabled"; reason: string }
   | { event: "library-stats"; videos: number; faces: number; clusters: number; named: number; people: { name: string; cluster_id?: number; clips: number; faces: number }[] }
   | { event: "library-person"; name: string; clips: { path: string; name: string; times: number[] }[] }
+  | { event: "library-clip-index"; clips: { path: string; name: string; keywords: string[] }[] }
   | { event: "library-detail-complete" }
   | { event: "person-renamed"; old: string; new: string; clusters: number }
   | { event: "person-deleted"; name: string; clusters: number }
@@ -670,14 +671,18 @@ type LibraryPerson = {
   clipsDetail: LibraryClip[];
 };
 
+type LibraryClipIndexEntry = { path: string; name: string; keywords: string[] };
+
 const library: {
   people: LibraryPerson[];
   selected: string | null;
   loading: boolean;
+  clipIndex: LibraryClipIndexEntry[];
 } = {
   people: [],
   selected: null,
   loading: false,
+  clipIndex: [],
 };
 
 function libraryEl<T extends HTMLElement>(id: string): T {
@@ -742,6 +747,10 @@ function handleLibraryEvent(evt: SpottedEvent) {
     const p = library.people.find((x) => x.name === evt.name);
     if (p) p.clipsDetail = evt.clips;
     if (library.selected === evt.name) renderLibraryDetail();
+  } else if (evt.event === "library-clip-index") {
+    library.clipIndex = evt.clips;
+    // Re-render in case there's an active search query awaiting matches.
+    renderLibraryDetail();
   }
 }
 
@@ -755,15 +764,37 @@ function personThumbUrl(p: LibraryPerson): string | null {
   return convertFileSrc(`${home}/.facetag/person_thumbs/${p.clusterId}.jpg`);
 }
 
+function librarySearchQuery(): string {
+  return (libraryEl<HTMLInputElement>("library-search").value || "")
+    .toLowerCase()
+    .trim();
+}
+
+function matchingClipsForQuery(query: string): LibraryClipIndexEntry[] {
+  if (!query) return [];
+  return library.clipIndex.filter((c) =>
+    c.keywords.some((kw) => kw.toLowerCase().includes(query))
+  );
+}
+
 function renderLibrarySidebar() {
   const list = libraryEl<HTMLUListElement>("library-people");
   list.className = "library-people";
   list.replaceChildren();
-  const filter = (libraryEl<HTMLInputElement>("library-search").value || "")
-    .toLowerCase()
-    .trim();
+  const filter = librarySearchQuery();
+  // People filter: name match OR appears in any matching clip's keywords.
+  // The second clause means typing "wedding" surfaces every person who
+  // appears in wedding-tagged clips, not just people literally named
+  // "Wedding".
+  const matchingClipPaths = new Set(
+    matchingClipsForQuery(filter).map((c) => c.path)
+  );
   const filtered = filter
-    ? library.people.filter((p) => p.name.toLowerCase().includes(filter))
+    ? library.people.filter((p) => {
+        if (p.name.toLowerCase().includes(filter)) return true;
+        // Cross-reference: does this person appear in any matching clip?
+        return p.clipsDetail.some((c) => matchingClipPaths.has(c.path));
+      })
     : library.people;
   if (filtered.length === 0) {
     const li = document.createElement("li");
@@ -818,7 +849,16 @@ function selectPerson(name: string) {
 function renderLibraryDetail() {
   const emptyEl = libraryEl("library-empty");
   const personEl = libraryEl("library-person");
+  const query = librarySearchQuery();
   if (!library.selected) {
+    // No person picked, but if a search query is active, show clip
+    // matches instead of the generic empty state.
+    if (query) {
+      renderLibraryClipSearchResults(query);
+      personEl.hidden = true;
+      emptyEl.hidden = true;
+      return;
+    }
     emptyEl.hidden = false;
     personEl.hidden = true;
     return;
@@ -831,6 +871,10 @@ function renderLibraryDetail() {
   }
   emptyEl.hidden = true;
   personEl.hidden = false;
+  // Hide the search-results panel when a person is selected (their
+  // detail view takes over the main pane).
+  const searchPanel = document.getElementById("library-clip-search");
+  if (searchPanel) searchPanel.hidden = true;
 
   const nameInput = libraryEl<HTMLInputElement>("person-name");
   nameInput.value = p.name;
@@ -867,6 +911,81 @@ function renderLibraryDetail() {
     });
     li.append(nm, tms, reveal);
     clipsEl.appendChild(li);
+  }
+}
+
+/** Render the cross-clip search results pane. Shows when the user has a
+ *  query active but no person selected — bridges the gap that used to
+ *  force them out to Finder/DaVinci to find footage by keyword. */
+function renderLibraryClipSearchResults(query: string): void {
+  let panel = document.getElementById("library-clip-search");
+  if (!panel) {
+    panel = document.createElement("div");
+    panel.id = "library-clip-search";
+    panel.className = "library-clip-search";
+    const detail = document.querySelector(".library-detail");
+    detail?.appendChild(panel);
+  }
+  panel.hidden = false;
+  panel.replaceChildren();
+
+  const matches = matchingClipsForQuery(query);
+  const header = document.createElement("div");
+  header.className = "library-clip-search__header";
+  header.textContent = matches.length === 0
+    ? `No clips tagged with "${query}".`
+    : `${matches.length} clip${matches.length === 1 ? "" : "s"} tagged with "${query}"`;
+  panel.appendChild(header);
+
+  if (matches.length === 0) {
+    const hint = document.createElement("div");
+    hint.className = "library-clip-search__hint";
+    hint.textContent = "Try a person's name, an activity (wedding, beach), or a batch tag.";
+    panel.appendChild(hint);
+    return;
+  }
+
+  const list = document.createElement("ul");
+  list.className = "library-clip-search__list";
+  for (const c of matches.slice(0, 200)) {
+    const li = document.createElement("li");
+    li.className = "library-clip-search__row";
+
+    const name = document.createElement("span");
+    name.className = "library-clip-search__name";
+    name.textContent = c.name;
+    name.title = c.path;
+
+    const kws = document.createElement("span");
+    kws.className = "library-clip-search__kws";
+    // Highlight the matched keyword(s) so the user sees WHY this clip
+    // showed up — important when a clip has 8 tags and only "wedding"
+    // matches the query.
+    for (const kw of c.keywords) {
+      const chip = document.createElement("span");
+      chip.className = "library-clip-search__kw" +
+        (kw.toLowerCase().includes(query) ? " is-match" : "");
+      chip.textContent = kw;
+      kws.appendChild(chip);
+    }
+
+    const reveal = document.createElement("button");
+    reveal.className = "btn btn--ghost library-clip-search__reveal";
+    reveal.textContent = "Reveal";
+    reveal.addEventListener("click", () => {
+      invoke("reveal_in_finder", { path: c.path }).catch(() => {});
+    });
+
+    li.append(name, kws, reveal);
+    list.appendChild(li);
+  }
+  panel.appendChild(list);
+
+  if (matches.length > 200) {
+    const overflow = document.createElement("div");
+    overflow.className = "library-clip-search__overflow";
+    overflow.textContent = `+ ${matches.length - 200} more — refine your search to see them.`;
+    panel.appendChild(overflow);
   }
 }
 
@@ -910,7 +1029,10 @@ async function deletePerson() {
 
 function wireLibrary() {
   libraryEl("library-back").addEventListener("click", () => setState("idle"));
-  libraryEl<HTMLInputElement>("library-search").addEventListener("input", renderLibrarySidebar);
+  libraryEl<HTMLInputElement>("library-search").addEventListener("input", () => {
+    renderLibrarySidebar();
+    renderLibraryDetail();  // also refresh the main pane for clip-search results
+  });
   const nameInput = libraryEl<HTMLInputElement>("person-name");
   nameInput.addEventListener("blur", () => commitRename(nameInput.value));
   nameInput.addEventListener("keydown", (e) => {
