@@ -155,8 +155,8 @@ def scan(
 @app.command("activity-suggest")
 def activity_suggest(
     db_path: Path = typer.Option(DEFAULT_DB, "--db"),
-    threshold: float = typer.Option(0.22, "--threshold", help="Min cosine similarity (per-video MAX over frames) to apply a tag."),
-    max_tags: int = typer.Option(6, "--max-tags", help="Max auto-tags per video so the keyword column stays scannable."),
+    threshold: float = typer.Option(0.13, "--threshold", help="Min cosine similarity (per-video MAX over frames) to apply a tag."),
+    max_tags: int = typer.Option(3, "--max-tags", help="Max auto-tags per video so the keyword column stays scannable."),
 ):
     """Score curated activity prompts against every video's frame embeddings.
 

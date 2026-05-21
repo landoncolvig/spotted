@@ -20,53 +20,68 @@ from . import clip as _clip
 from . import db as _db
 
 
-# Each entry: (prompt for CLIP, output tag the editor sees).
-# Prompts are natural-language because CLIP was trained on captions, not
-# single words. Output tags are short so DaVinci's Keywords column stays
-# scannable.
+# Each entry: (descriptive subject, output tag).
+# The subject is a noun phrase ("kids playing", "a baby") that reads
+# naturally when substituted into TEMPLATES below — we don't write full
+# captions any more because ensembling them across templates is the
+# standard CLIP zero-shot trick that significantly improves
+# discrimination vs single-prompt encoding.
 CURATED_PROMPTS: list[tuple[str, str]] = [
     # People / settings
-    ("a photo of kids playing", "kids"),
-    ("a photo of a baby", "baby"),
-    ("a group of adults talking", "adults"),
-    ("a photo of a couple", "couple"),
-    ("a large group of people gathered", "group"),
+    ("kids playing", "kids"),
+    ("a baby", "baby"),
+    ("a group of adults", "adults"),
+    ("a couple together", "couple"),
+    ("a large gathering of people", "group"),
     # Indoors / outdoors
-    ("a photo taken indoors at home", "indoors"),
-    ("a photo taken outdoors", "outdoors"),
-    ("a photo taken at night", "night"),
-    ("a photo of a sunset", "sunset"),
+    ("an indoor scene at home", "indoors"),
+    ("an outdoor scene", "outdoors"),
+    ("a nighttime scene", "night"),
+    ("a sunset", "sunset"),
     # Places
-    ("a photo at the beach", "beach"),
-    ("a photo at a swimming pool", "pool"),
-    ("a photo of mountains", "mountains"),
-    ("a photo in a city or downtown", "city"),
-    ("a photo in a backyard", "backyard"),
-    ("a photo at a restaurant", "restaurant"),
+    ("a beach", "beach"),
+    ("a swimming pool", "pool"),
+    ("mountains", "mountains"),
+    ("a city downtown", "city"),
+    ("a backyard", "backyard"),
+    ("a restaurant interior", "restaurant"),
     # Activities
-    ("a photo of people eating a meal", "eating"),
-    ("a photo of people dancing", "dancing"),
-    ("a photo of people playing music", "music"),
-    ("a photo of someone playing sports", "sports"),
-    ("a photo of someone swimming", "swimming"),
-    ("a photo of someone hiking", "hiking"),
-    ("a photo of someone cooking food", "cooking"),
-    ("a photo of someone driving", "driving"),
+    ("people eating a meal", "eating"),
+    ("people dancing", "dancing"),
+    ("people playing music", "music"),
+    ("someone playing a sport", "sports"),
+    ("someone swimming", "swimming"),
+    ("someone hiking", "hiking"),
+    ("someone cooking food", "cooking"),
+    ("someone driving a car", "driving"),
     # Occasions
-    ("a photo of a wedding ceremony", "wedding"),
-    ("a photo of a birthday party with cake", "birthday"),
-    ("a photo of a holiday celebration", "celebration"),
-    ("a photo of christmas decorations", "christmas"),
-    ("a photo of a graduation ceremony", "graduation"),
+    ("a wedding ceremony", "wedding"),
+    ("a birthday party with cake", "birthday"),
+    ("a holiday celebration", "celebration"),
+    ("christmas decorations", "christmas"),
+    ("a graduation ceremony", "graduation"),
     # Objects / vibes
-    ("a photo of a pet dog", "dog"),
-    ("a photo of a pet cat", "cat"),
-    ("a photo of food on a plate", "food"),
-    ("a photo of a birthday cake with candles", "cake"),
-    ("drone aerial footage from above", "drone"),
-    ("a close-up portrait of a person", "portrait"),
-    ("a scenic landscape photo", "landscape"),
-    ("a photo of a car or vehicle", "car"),
+    ("a pet dog", "dog"),
+    ("a pet cat", "cat"),
+    ("food on a plate", "food"),
+    ("a birthday cake with candles", "cake"),
+    ("aerial drone footage from above", "drone"),
+    ("a close-up portrait of a person's face", "portrait"),
+    ("a scenic landscape", "landscape"),
+    ("a car or vehicle", "car"),
+]
+
+# Prompt-ensemble templates. We encode each subject in all of these and
+# average the L2-normalized embeddings (then re-normalize). This is the
+# trick that pushed OpenAI CLIP's zero-shot ImageNet accuracy ~4 points
+# without changing the model — averaging neutralizes per-template bias
+# and concentrates the signal that's actually about the subject.
+PROMPT_TEMPLATES: list[str] = [
+    "a photo of {}",
+    "a video of {}",
+    "a frame from a video showing {}",
+    "footage of {}",
+    "a home video of {}",
 ]
 
 
@@ -90,23 +105,61 @@ def score_video(
     return sims.max(axis=0)
 
 
+def encode_tag_embeddings(
+    encoder: _clip.ClipEncoder,
+    prompts: Iterable[tuple[str, str]] = CURATED_PROMPTS,
+    templates: Iterable[str] = PROMPT_TEMPLATES,
+) -> np.ndarray:
+    """Encode each tag's subject across all templates and average.
+
+    For N tags × T templates, encode N*T strings in a single text batch,
+    L2-normalize each, reshape to (N, T, D), mean across templates, then
+    L2-normalize the per-tag mean. Returns (N, D) ready to dot against
+    frame embeddings.
+    """
+    prompts_list = list(prompts)
+    templates_list = list(templates)
+    subjects = [p for p, _ in prompts_list]
+
+    captions: list[str] = []
+    for subject in subjects:
+        for tmpl in templates_list:
+            captions.append(tmpl.format(subject))
+    mat = encoder.encode_texts(captions)  # (N*T, D), already L2-normalized
+
+    D = mat.shape[1]
+    grouped = mat.reshape(len(subjects), len(templates_list), D)
+    averaged = grouped.mean(axis=1)
+    return _normalize_rows(averaged)
+
+
 def apply_auto_tags(
     conn: sqlite3.Connection,
     encoder: _clip.ClipEncoder,
     *,
-    threshold: float = 0.22,
-    max_tags_per_video: int = 6,
+    threshold: float = 0.13,
+    max_tags_per_video: int = 3,
+    margin: float = 0.01,
     prompts: Iterable[tuple[str, str]] = CURATED_PROMPTS,
 ) -> dict[str, list[tuple[str, float]]]:
     """Score every video with frame embeddings against the curated prompts,
     write the auto_tags table, return what landed for the caller to display.
 
+    Two filters protect against the noisy-tail problem where CLIP gives
+    similar mid-range scores to dozens of prompts:
+
+    - `threshold`: absolute minimum cosine. Below this, the tag isn't applied
+      even if it's a video's top score.
+    - `margin`: a tag must beat the per-video median score by at least this
+      amount. Kills the "everything scores ~0.10, take top-K anyway" pattern
+      where a clip's actual content matches one prompt strongly and twenty
+      others weakly — we want only the strong matches.
+
     Returns {video_path: [(tag, score), ...]} sorted highest score first.
     """
     prompts_list = list(prompts)
-    prompt_texts = [p for p, _ in prompts_list]
     tag_names = [t for _, t in prompts_list]
-    prompt_mat = encoder.encode_texts(prompt_texts)  # already L2-normalized
+    prompt_mat = encode_tag_embeddings(encoder, prompts_list)
 
     out: dict[str, list[tuple[str, float]]] = {}
     for vid, path in _db.videos_with_embeddings(conn):
@@ -116,11 +169,14 @@ def apply_auto_tags(
         frame_mat = np.stack([_clip.embedding_from_bytes(b) for _, b in rows])
         frame_mat = _normalize_rows(frame_mat)
         scores = score_video(frame_mat, prompt_mat)
+        median = float(np.median(scores))
 
-        # Pick all prompts above threshold, capped at max_tags_per_video so
-        # one chatty video doesn't dump 20 tags into its keyword column.
         picks = sorted(
-            ((tag_names[i], float(scores[i])) for i in range(len(scores)) if scores[i] >= threshold),
+            (
+                (tag_names[i], float(scores[i]))
+                for i in range(len(scores))
+                if scores[i] >= threshold and scores[i] >= median + margin
+            ),
             key=lambda x: -x[1],
         )[:max_tags_per_video]
 
