@@ -225,3 +225,48 @@ pub fn boot() -> Config {
     let _ = ensure_install_id();
     load_config()
 }
+
+/// Sentry DSN baked in by CI. None = error reporting is a no-op (the
+/// sentry::init guard simply never gets installed). Same opt-in gate
+/// as telemetry events — Sentry only sends if the user has opted in.
+fn sentry_dsn() -> Option<&'static str> {
+    option_env!("SPOTTED_SENTRY_DSN")
+}
+
+/// Initialize Sentry crash reporting. Returns the guard the caller must
+/// hold for the lifetime of the app — dropping it flushes pending
+/// events and disables the panic hook. Returns None if there's no DSN
+/// baked in or the user hasn't opted into telemetry.
+///
+/// We piggy-back on the same opt-in flag as event telemetry so users
+/// only see one consent dialog (privacy positioning stays clean) and
+/// can toggle both with one switch.
+pub fn init_sentry() -> Option<sentry::ClientInitGuard> {
+    let dsn = sentry_dsn()?;
+    let cfg = load_config();
+    if cfg.telemetry_enabled != Some(true) {
+        return None;
+    }
+    let guard = sentry::init((
+        dsn,
+        sentry::ClientOptions {
+            release: Some(env!("CARGO_PKG_VERSION").into()),
+            // Don't ship user data — Sentry has a "send_default_pii"
+            // flag that defaults to false but we set it explicitly to
+            // make intent unmistakable for anyone auditing.
+            send_default_pii: false,
+            // Anonymize sender by setting the user via the install hash,
+            // not the raw IP / hostname Sentry would auto-collect.
+            ..Default::default()
+        },
+    ));
+    if let Some(id) = cfg.install_id {
+        sentry::configure_scope(|scope| {
+            scope.set_user(Some(sentry::User {
+                id: Some(client_user_hash(&id)),
+                ..Default::default()
+            }));
+        });
+    }
+    Some(guard)
+}

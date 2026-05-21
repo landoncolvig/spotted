@@ -1,6 +1,6 @@
 [package]
 name = "spotted"
-version = "0.0.34"
+version = "0.0.35"
 description = "Spot people in your video footage."
 authors = ["Landon Colvig <colviglandon@gmail.com>"]
 edition = "2021"
@@ -25,3 +25,6 @@ tokio = { version = "1", features = ["time", "sync"] }
 reqwest = { version = "0.12", features = ["rustls-tls", "json"], default-features = false }
 uuid = { version = "1", features = ["v4"] }
 sha2 = "0.10"
+# Crash reporting. We use the default panic + backtrace integrations only;
+# explicitly disable transports we don't need to keep the dep tree light.
+sentry = { version = "0.34", default-features = false, features = ["backtrace", "contexts", "panic", "reqwest", "rustls"] }

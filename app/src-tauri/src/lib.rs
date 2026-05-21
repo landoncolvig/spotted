@@ -587,6 +587,14 @@ fn app_version() -> String {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Sentry crash reporting — gated by both the compile-time DSN AND
+    // the user's telemetry opt-in. The guard MUST live for the duration
+    // of the app or the panic hook gets dropped and we miss crashes;
+    // we forget it so it stays alive until process exit.
+    if let Some(guard) = telemetry::init_sentry() {
+        std::mem::forget(guard);
+    }
+
     tauri::Builder::default()
         .manage(ActiveChildren::default())
         .plugin(tauri_plugin_opener::init())

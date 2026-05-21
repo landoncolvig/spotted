@@ -68,6 +68,40 @@ your `cargo run` launches never pollute prod metrics.
 That's it. The next release ships with telemetry compiled in; users who
 opt in start sending events.
 
+## Crash reporting (Sentry)
+
+Telemetry events tell us *what* users do. Sentry tells us *what broke*. They
+complement each other and share a single opt-in flag — one consent dialog,
+one toggle in Spotted → Telemetry…, both turn on or off together.
+
+### What Sentry captures
+
+- **Panics** in the Rust code (the Sentry `panic` integration is installed
+  on init). Stack traces, the panic message, app version, OS.
+- **Anonymous user ID** — same SHA-256(install_id + salt) we use for
+  TelemetryDeck. Lets us count distinct crashing installs without ever
+  linking back to a human.
+- **Release tag** — `0.0.X` from `CARGO_PKG_VERSION`. So we can see
+  "v0.0.31 crashes 4x more often than v0.0.30" without manual labeling.
+
+### What Sentry does NOT capture
+
+- `send_default_pii` is explicitly `false`. Sentry won't auto-attach the
+  user's email, IP, hostname, or any other identifying field that the
+  default config would grab.
+- We never call `sentry::capture_message` with user content — only
+  panic-derived messages, which are our own strings.
+- JS-side errors are NOT yet wired to Sentry. They go to the devtools
+  console for now. Add `@sentry/browser` later if we need that visibility.
+
+### How to set up
+
+1. Sign up at https://sentry.io (free tier: 5K errors/month).
+2. Create a project named "Spotted" (platform: Rust).
+3. Copy the DSN.
+4. Add to GitHub repo Secrets as `SENTRY_DSN`.
+5. Next release auto-picks it up. Until then, Sentry init is a no-op.
+
 ## Why TelemetryDeck and not something else
 
 Considered alternatives:
