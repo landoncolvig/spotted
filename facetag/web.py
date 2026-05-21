@@ -114,6 +114,25 @@ def create_app(
             </div>
             """)
 
+        # Empty state — without this users see a blank panel when their
+        # filter or view excludes everything, and assume the app crashed.
+        if not cards:
+            if view == "needs":
+                empty_title = "Everything's been named."
+                empty_body = "Switch to <b>Labeled</b> to rename someone, or <b>All</b> to see tiny clusters we filtered out as noise."
+            elif view == "labeled":
+                empty_title = "No labeled clusters yet."
+                empty_body = "Switch back to <b>Needs labeling</b> and type a name on any card."
+            else:
+                empty_title = "No clusters in the index."
+                empty_body = "Drop a folder of footage on Spotted's main window to start."
+            cards.append(f"""
+            <div class="empty">
+              <div class="empty__title">{empty_title}</div>
+              <div class="empty__body">{empty_body}</div>
+            </div>
+            """)
+
         # View-toggle chips: tell the user what's currently visible and
         # offer one-click swaps to see labeled or every cluster. Eliminates
         # the "where did my named people go" surprise.
@@ -297,19 +316,51 @@ _PAGE = r"""<!doctype html>
     margin: 0; background: var(--bg); color: var(--text);
     -webkit-font-smoothing: antialiased;
   }
+  /* Two-row header: row 1 keeps title + Done at full width regardless of
+     window size; row 2 wraps the toolbar (chips + filter) if needed. The
+     old single-row layout crushed the h1 to a 4-line column at narrow
+     widths because every child fought for horizontal space. */
   header {
     position: sticky; top: 0; z-index: 10;
-    background: var(--bg); padding: 14px 20px;
+    background: var(--bg); padding: 12px 20px;
     border-bottom: 1px solid var(--border);
-    display: flex; align-items: center; gap: 16px;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 8px 16px;
+    align-items: center;
+  }
+  header .header-title {
+    display: flex; align-items: baseline; gap: 12px;
+    min-width: 0;
   }
   header h1 {
     font-family: -apple-system, "SF Pro Display", system-ui, sans-serif;
     font-size: 15px; margin: 0; font-weight: 600;
     letter-spacing: -0.01em; color: var(--text);
+    white-space: nowrap;
+    flex-shrink: 0;
   }
-  header .meta { color: var(--text-faint); font-size: 12px; }
-  header .actions { margin-left: auto; }
+  header .meta {
+    color: var(--text-faint); font-size: 11px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    min-width: 0;
+  }
+  header .actions {
+    grid-column: 2; grid-row: 1;
+    display: flex; align-items: center; gap: 8px;
+  }
+  header .header-tools {
+    grid-column: 1 / -1;
+    display: flex; flex-wrap: wrap;
+    align-items: center; gap: 8px 10px;
+  }
+  header .header-tools .spacer { flex: 1; min-width: 0; }
+  /* At very narrow widths, demote the meta hint so the title still has
+     room. The clusters count survives because it's the highest-value
+     info in this row. */
+  @media (max-width: 620px) {
+    header .meta .kbd-hint { display: none; }
+  }
   button {
     font-family: inherit;
     background: var(--primary); color: #1A0F06;
@@ -390,15 +441,19 @@ _PAGE = r"""<!doctype html>
     font-family: inherit;
     background: transparent; color: var(--text-faint);
     border: 1px solid transparent;
-    width: 20px; height: 20px;
+    width: 24px; height: 24px;
     border-radius: 6px;
     padding: 0; line-height: 1;
-    font-size: 14px; cursor: pointer;
+    font-size: 16px; cursor: pointer;
     transition: background .15s ease, color .15s ease;
   }
   .hide-btn:hover {
-    background: rgba(224, 106, 106, 0.15);
+    background: rgba(224, 106, 106, 0.18);
     color: var(--danger);
+  }
+  .hide-btn:focus-visible {
+    outline: 2px solid var(--primary);
+    outline-offset: 1px;
   }
   .card.is-hiding { opacity: 0.3; pointer-events: none; transition: opacity .2s ease; }
   .filter {
@@ -407,7 +462,10 @@ _PAGE = r"""<!doctype html>
     border: 1px solid var(--border);
     color: var(--text);
     padding: 7px 10px; border-radius: 8px;
-    font-size: 12px; width: 220px;
+    font-size: 12px;
+    flex: 1 1 180px;
+    max-width: 240px;
+    min-width: 140px;
     transition: border-color .15s ease;
   }
   .filter::placeholder { color: var(--text-faint); }
@@ -446,7 +504,7 @@ _PAGE = r"""<!doctype html>
 
   /* View toggle chips — switch between Needs labeling / Labeled / All
      so a user who's labeled people can still find them again. */
-  .view-chips { display: inline-flex; gap: 4px; margin-left: 12px; }
+  .view-chips { display: inline-flex; flex-wrap: wrap; gap: 4px; }
   .view-chip {
     display: inline-flex;
     align-items: center;
@@ -465,16 +523,45 @@ _PAGE = r"""<!doctype html>
     border-color: var(--primary);
     background: rgba(240, 130, 32, 0.12);
   }
+
+  /* Empty state for when filters exclude every cluster. Spans the full
+     grid width so it visually centers on the page instead of getting
+     crammed into a 240px card slot. */
+  .empty {
+    grid-column: 1 / -1;
+    padding: 60px 24px;
+    text-align: center;
+    color: var(--text-dim);
+  }
+  .empty__title {
+    font-family: -apple-system, "SF Pro Display", system-ui, sans-serif;
+    font-size: 17px; font-weight: 600;
+    color: var(--text);
+    margin-bottom: 8px;
+  }
+  .empty__body {
+    font-size: 13px;
+    color: var(--text-dim);
+    max-width: 380px;
+    margin: 0 auto;
+    line-height: 1.5;
+  }
+  .empty__body b { color: var(--text); font-weight: 600; }
 </style>
 </head><body>
 <header>
-  <h1>Name the people</h1>
-  <span class="meta">__COUNT__ clusters &middot; saves as you type &middot; <kbd>Tab</kbd> to advance</span>
-  <span class="view-chips">__VIEW_CHIPS__</span>
-  __SCOPE_CHIP__
-  <input class="filter" id="filter" placeholder="filter…" autocomplete="off">
+  <div class="header-title">
+    <h1>Name the people</h1>
+    <span class="meta">__COUNT__ clusters &middot; auto-saves<span class="kbd-hint"> &middot; <kbd>Tab</kbd> to advance</span></span>
+  </div>
   <div class="actions">
     <button id="save">Done</button>
+  </div>
+  <div class="header-tools">
+    <span class="view-chips">__VIEW_CHIPS__</span>
+    __SCOPE_CHIP__
+    <span class="spacer"></span>
+    <input class="filter" id="filter" placeholder="filter…" autocomplete="off">
   </div>
 </header>
 <div class="grid" id="grid">__CARDS__</div>
