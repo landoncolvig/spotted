@@ -20,6 +20,11 @@ dependencies = [
     "regex>=2024.0",
 ]
 
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+]
+
 [project.scripts]
 facetag = "facetag.cli:app"
 

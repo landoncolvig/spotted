@@ -1,0 +1,36 @@
+name: Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  pytest:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install ffmpeg + exiftool
+        # ffmpeg generates the throwaway .mov fixture in conftest.py;
+        # exiftool is what tag.py / markers.py actually drive. Without
+        # both, all metadata tests skip and CI silently passes nothing.
+        run: brew install ffmpeg exiftool
+
+      - name: Install package + dev deps
+        run: |
+          python3 -m venv .venv
+          .venv/bin/pip install --upgrade pip
+          .venv/bin/pip install -e ".[dev]"
+
+      - name: Run tests
+        # Activity tests skip automatically when MobileCLIP isn't staged
+        # (we'd otherwise download 200MB of models just to run them on
+        # main pushes — they run in release.yml's full build instead).
+        run: .venv/bin/pytest tests/ -v
