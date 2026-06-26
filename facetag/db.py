@@ -120,6 +120,26 @@ def is_scanned(conn: sqlite3.Connection, path: str) -> bool:
     return row is not None
 
 
+def video_id_for_path(conn: sqlite3.Connection, path: str) -> int | None:
+    """Look up an existing video's id by path, or None if not indexed."""
+    row = conn.execute("SELECT id FROM videos WHERE path = ?", (path,)).fetchone()
+    return int(row[0]) if row else None
+
+
+def video_has_embeddings(conn: sqlite3.Connection, video_id: int) -> bool:
+    """True if the video already has at least one frame embedding.
+
+    Used by `scan` to decide whether an already-face-scanned video still
+    needs an activity-embedding backfill. Libraries first scanned before
+    activity detection shipped have faces but zero embeddings; without a
+    backfill, activity-suggest finds nothing for them forever.
+    """
+    row = conn.execute(
+        "SELECT 1 FROM frame_embeddings WHERE video_id = ? LIMIT 1", (video_id,)
+    ).fetchone()
+    return row is not None
+
+
 def clear_video_faces(conn: sqlite3.Connection, video_id: int) -> None:
     conn.execute("DELETE FROM faces WHERE video_id = ?", (video_id,))
     conn.commit()

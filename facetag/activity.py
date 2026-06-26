@@ -60,6 +60,17 @@ CURATED_PROMPTS: list[tuple[str, str]] = [
     ("a holiday celebration", "celebration"),
     ("christmas decorations", "christmas"),
     ("a graduation ceremony", "graduation"),
+    # Faith / church + conference footage — this is the primary library
+    # Spotted was built for (worship services, baptisms, conference talks),
+    # so the curated set carries scenes a generic CLIP prompt list misses.
+    ("a church worship service", "worship"),
+    ("a baptism", "baptism"),
+    ("a pastor preaching at a pulpit", "preaching"),
+    ("a choir singing", "choir"),
+    ("a large church congregation", "congregation"),
+    ("people praying with bowed heads", "prayer"),
+    ("a speaker presenting on a stage at a conference", "conference"),
+    ("a person speaking into a microphone to an audience", "speaker"),
     # Objects / vibes
     ("a pet dog", "dog"),
     ("a pet cat", "cat"),

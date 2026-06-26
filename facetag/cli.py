@@ -44,6 +44,36 @@ def _emit(event: str, **fields) -> None:
         pass
 
 
+def _embed_only(conn, clip_encoder, video_path, video_id: int, sample_fps: float, console) -> int:
+    """Compute + store CLIP frame embeddings for an already-face-scanned video.
+
+    Backfill path for libraries built before activity detection shipped: those
+    videos have faces but no frame embeddings, so activity-suggest never finds
+    anything for them. We re-sample frames and run only the image encoder here
+    (no face re-detection, no duplicate faces) so a re-drop of an existing
+    folder lights up scene/activity tagging. Returns the number of embeddings
+    written. Safe to call only when the video currently has zero embeddings.
+    """
+    written = 0
+    pending: list[tuple[float, bytes]] = []
+    for t, frame in _extract.iter_frames(video_path, sample_fps=sample_fps):
+        try:
+            emb = clip_encoder.encode_image(frame)
+            pending.append((t, _clip.embedding_to_bytes(emb)))
+        except Exception as e:
+            if not getattr(_embed_only, "_warned", False):
+                console.print(f"[yellow]Activity encoding failed on a frame: {e}[/yellow]")
+                _embed_only._warned = True
+        if len(pending) >= 200:
+            _db.add_frame_embeddings_bulk(conn, video_id, pending)
+            written += len(pending)
+            pending.clear()
+    if pending:
+        _db.add_frame_embeddings_bulk(conn, video_id, pending)
+        written += len(pending)
+    return written
+
+
 @app.command()
 def scan(
     path: Path = typer.Argument(..., exists=True, help="Video file or directory to scan."),
@@ -84,12 +114,31 @@ def scan(
     _emit("scan-start", total=len(videos), activities=bool(clip_encoder))
     total_faces = 0
     total_skipped = 0
+    total_backfilled = 0
 
     for index, v in enumerate(videos, start=1):
         path_str = str(v.resolve())
         if not rescan and _db.is_scanned(conn, path_str):
-            total_skipped += 1
-            _emit("video-skip", name=v.name, index=index, total=len(videos))
+            # Already face-scanned. But a video first indexed before activity
+            # detection shipped has faces and ZERO frame embeddings, so the
+            # activity-suggest step silently finds nothing for it no matter how
+            # many times the user re-runs. Backfill the embeddings here (encoder
+            # only — faces already exist, so no re-detection and no duplicates)
+            # so re-dropping an existing library finally lights up scene tags.
+            vid = _db.video_id_for_path(conn, path_str)
+            if clip_encoder is not None and vid is not None and not _db.video_has_embeddings(conn, vid):
+                _emit("video-backfill", name=v.name, index=index, total=len(videos))
+                try:
+                    n_emb = _embed_only(conn, clip_encoder, v, vid, sample_fps, console)
+                    total_backfilled += 1
+                    console.print(f"[cyan]Backfilled {n_emb} activity embedding(s) for {v.name}[/cyan]")
+                    _emit("video-done", name=v.name, index=index, total=len(videos), faces=0, backfilled=n_emb)
+                except Exception as e:
+                    console.print(f"[yellow]Embedding backfill failed for {v.name}: {e}[/yellow]")
+                    _emit("video-skip", name=v.name, index=index, total=len(videos), reason="backfill-failed")
+            else:
+                total_skipped += 1
+                _emit("video-skip", name=v.name, index=index, total=len(videos))
             continue
         try:
             duration, _, _ = _extract.probe(v)
@@ -148,8 +197,9 @@ def scan(
             total_faces += face_count
         _emit("video-done", name=v.name, index=index, total=len(videos), faces=face_count)
 
-    _emit("scan-complete", total_faces=total_faces, total_skipped=total_skipped, total_videos=len(videos))
-    console.print(f"\n[bold green]Done.[/bold green] {total_faces} faces indexed, {total_skipped} videos skipped (already scanned).")
+    _emit("scan-complete", total_faces=total_faces, total_skipped=total_skipped, total_videos=len(videos), total_backfilled=total_backfilled)
+    backfill_note = f", {total_backfilled} backfilled for activity tagging" if total_backfilled else ""
+    console.print(f"\n[bold green]Done.[/bold green] {total_faces} faces indexed, {total_skipped} videos skipped (already scanned){backfill_note}.")
 
 
 @app.command("activity-suggest")
