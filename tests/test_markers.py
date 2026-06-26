@@ -7,11 +7,59 @@ project-level XMP import picks up reliably).
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
+import numpy as np
 import pytest
 
+from facetag import db as _db
 from facetag import markers as _markers
+
+
+def _seed_named_clip(conn, path: str, faces: list[tuple[float, int, str | None]]) -> int:
+    """Insert a video plus faces. faces = [(timestamp_sec, cluster_id, name?)].
+    A name of None inserts the face but no people row (an unnamed cluster)."""
+    vid = _db.add_video(conn, path, 5.0)
+    emb = np.ones(512, dtype=np.float32).tobytes()
+    for t, cid, name in faces:
+        conn.execute(
+            "INSERT INTO faces(video_id, timestamp_sec, bbox_x, bbox_y, bbox_w, bbox_h, embedding, cluster_id) "
+            "VALUES (?, ?, 0, 0, 1, 1, ?, ?)",
+            (vid, t, emb, cid),
+        )
+        if name is not None:
+            conn.execute(
+                "INSERT OR IGNORE INTO people(cluster_id, name) VALUES (?, ?)", (cid, name)
+            )
+    conn.commit()
+    return vid
+
+
+def test_resolve_manifest_groups_and_dedupes_named_faces(tmp_path: Path) -> None:
+    conn = _db.connect(tmp_path / "i.db")
+    _seed_named_clip(conn, "/a.mov", [(0.5, 1, "Sarah"), (3.0, 2, "Tom"), (0.5, 1, "Sarah")])
+    _seed_named_clip(conn, "/b.mov", [(1.0, 3, None)])  # only an unnamed cluster
+    m = _markers.build_resolve_manifest(conn)
+    assert m["schema"] == _markers.RESOLVE_MANIFEST_SCHEMA
+    assert "/a.mov" in m["clips"]
+    names = [e["name"] for e in m["clips"]["/a.mov"]]
+    assert names.count("Sarah") == 1, "duplicate (time, name) should collapse to one marker"
+    assert "Tom" in names
+    assert "/b.mov" not in m["clips"], "clips with no named faces are excluded"
+
+
+def test_write_resolve_manifest_writes_json(tmp_path: Path) -> None:
+    conn = _db.connect(tmp_path / "i.db")
+    _seed_named_clip(conn, "/a.mov", [(0.5, 1, "Sarah")])
+    out = tmp_path / "manifest.json"
+    n = _markers.write_resolve_manifest(conn, out)
+    assert n == 1
+    assert out.is_file()
+    data = json.loads(out.read_text())
+    assert data["schema"] == _markers.RESOLVE_MANIFEST_SCHEMA
+    assert data["clips"]["/a.mov"][0]["name"] == "Sarah"
+    assert data["clips"]["/a.mov"][0]["t"] == 0.5
 
 
 def test_write_markers_in_file_roundtrip(test_mov: Path, have_exiftool: bool) -> None:
