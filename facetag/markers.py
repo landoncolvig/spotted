@@ -14,6 +14,7 @@ shipping needs human verification in the actual editor.
 """
 from __future__ import annotations
 
+import json
 import shutil
 import sqlite3
 import subprocess
@@ -208,3 +209,62 @@ def read_markers_sidecar(video_path: Path) -> str:
         check=False,
     )
     return r.stdout.strip()
+
+
+# --- DaVinci Resolve marker import -------------------------------------------
+#
+# DaVinci Resolve does not reliably read Adobe's XMP-xmpDM:Markers as timeline
+# markers (Premiere does; Resolve mostly ignores the schema). The reliable path
+# is Resolve's own scripting API: MediaPoolItem.AddMarker(frame, ...). We can't
+# call that from here (it only runs inside Resolve), so instead we emit a JSON
+# manifest of per-clip face appearances and ship a small Resolve script
+# (integrations/davinci_resolve/spotted_markers.py) the user runs once inside
+# Resolve. The script reads this manifest, matches Media Pool clips by file
+# path, and stamps a marker per face appearance — markers that actually show on
+# the scrubber, unlike the XMP attempt.
+
+RESOLVE_MANIFEST_SCHEMA = "spotted-resolve-markers/1"
+
+
+def build_resolve_manifest(conn: sqlite3.Connection) -> dict:
+    """Build the per-clip marker manifest the Resolve import script consumes.
+
+    Shape:
+        {
+          "schema": "spotted-resolve-markers/1",
+          "clips": {
+            "/abs/path/clip.mov": [{"t": 3.5, "name": "Ellie"}, ...],
+            ...
+          }
+        }
+
+    One entry per named-face appearance, de-duped on (rounded-ms, name) so a
+    person standing still for several sampled frames doesn't stack markers on
+    the same instant. Only clips with at least one named face are included.
+    """
+    clips: dict[str, list[dict]] = {}
+    for vid, path_str in videos_with_named_faces(conn):
+        events = face_events_for_video(conn, vid)
+        seen: set[tuple[int, str]] = set()
+        out: list[dict] = []
+        for t, name in sorted(events):
+            key = (int(round(t * 1000)), name)
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append({"t": round(float(t), 3), "name": _sanitize(name)})
+        if out:
+            clips[path_str] = out
+    return {"schema": RESOLVE_MANIFEST_SCHEMA, "clips": clips}
+
+
+def write_resolve_manifest(conn: sqlite3.Connection, out_path: Path) -> int:
+    """Write the Resolve marker manifest to out_path. Returns clip count.
+
+    Always writes (even with zero clips) so a stale manifest from a previous
+    run never lingers to confuse the import script.
+    """
+    manifest = build_resolve_manifest(conn)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(json.dumps(manifest, indent=2))
+    return len(manifest["clips"])

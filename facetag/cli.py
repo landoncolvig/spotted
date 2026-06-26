@@ -644,6 +644,18 @@ def markers_write(
         for n, err in sidecar_failed:
             console.print(f"  [yellow]{n}[/yellow]  {err}")
 
+    # DaVinci Resolve ignores XMP markers, so also emit a JSON manifest that
+    # integrations/davinci_resolve/spotted_markers.py reads to stamp real
+    # Media Pool markers. Written next to the index at a stable path so the
+    # Resolve-side script always knows where to look.
+    manifest_path = db_path.parent / "spotted_resolve_markers.json"
+    try:
+        n_clips = _markers.write_resolve_manifest(conn, manifest_path)
+        _emit("markers-manifest", path=str(manifest_path), clips=n_clips)
+        console.print(f"[cyan]Wrote DaVinci marker manifest ({n_clips} clips) → {manifest_path}[/cyan]")
+    except Exception as e:
+        _emit("markers-manifest-error", message=str(e))
+
     if not failed:
         # Read back markers from a sample clip and surface to the UI so
         # users see proof markers landed without opening the .mov in an
