@@ -76,6 +76,12 @@ def _migrate(conn: sqlite3.Connection) -> None:
     cols = {row[1] for row in conn.execute("PRAGMA table_info(videos)").fetchall()}
     if "batch_tags" not in cols:
         conn.execute("ALTER TABLE videos ADD COLUMN batch_tags TEXT")
+    if "spotted_keywords" not in cols:
+        # Newline-joined record of the exact keyword set Spotted last wrote into
+        # this clip's file. Lets tag-write replace only its OWN prior keywords
+        # (so renames/removals take effect) while preserving keywords another
+        # tool (Premiere, Photos, Bridge) put in the file.
+        conn.execute("ALTER TABLE videos ADD COLUMN spotted_keywords TEXT")
     # hidden_clusters table is created by SCHEMA's IF NOT EXISTS — no migration needed.
     conn.commit()
 
@@ -96,6 +102,29 @@ def get_batch_tags(conn: sqlite3.Connection, video_id: int) -> list[str]:
     if not row or not row[0]:
         return []
     return [t for t in row[0].split(",") if t]
+
+
+def get_spotted_keywords(conn: sqlite3.Connection, video_id: int) -> list[str]:
+    """The exact keyword set Spotted last wrote into this clip's file (or [])."""
+    row = conn.execute(
+        "SELECT spotted_keywords FROM videos WHERE id = ?", (video_id,)
+    ).fetchone()
+    if not row or not row[0]:
+        return []
+    return [k for k in row[0].split("\n") if k]
+
+
+def set_spotted_keywords(
+    conn: sqlite3.Connection, video_id: int, keywords: list[str]
+) -> None:
+    """Record what Spotted just wrote, so the next write can replace only its
+    own keywords. Newline-joined because keywords/person names may contain commas."""
+    clean = [k for k in keywords if k and k.strip()]
+    value = "\n".join(clean) if clean else None
+    conn.execute(
+        "UPDATE videos SET spotted_keywords = ? WHERE id = ?", (value, video_id)
+    )
+    conn.commit()
 
 
 def all_batch_tags(conn: sqlite3.Connection) -> list[str]:
@@ -218,6 +247,26 @@ def replace_auto_tags(
             [(video_id, t, s) for t, s in tags],
         )
     conn.commit()
+
+
+def delete_auto_tags_by_name(conn: sqlite3.Connection, tags: set[str]) -> int:
+    """Delete matched tags by name across ALL videos. Returns rows removed.
+
+    Used to persist a review-screen rejection: when the user unchecks a tag
+    before writing, we drop it from auto_tags so it also stops surfacing in the
+    in-app search index and can't be re-written by a later tag-write. Matched
+    tags are stored lowercased, so compare lowercased.
+    """
+    clean = {t.strip().lower() for t in tags if t and t.strip()}
+    if not clean:
+        return 0
+    placeholders = ",".join("?" for _ in clean)
+    cur = conn.execute(
+        f"DELETE FROM auto_tags WHERE LOWER(tag) IN ({placeholders})",
+        tuple(clean),
+    )
+    conn.commit()
+    return cur.rowcount
 
 
 def get_auto_tags(conn: sqlite3.Connection, video_id: int) -> list[tuple[str, float]]:

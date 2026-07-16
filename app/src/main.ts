@@ -36,6 +36,7 @@ type SpottedEvent =
   | { event: "activity-start"; total: number }
   | { event: "activity-complete"; total: number; tagged: number; sample: { file: string; tags: string[] } | null; matched?: MatchedTag[] }
   | { event: "activity-empty"; message: string }
+  | { event: "activity-fallback"; reason: string; tags: string[]; clips: number }
   | { event: "activities-disabled"; reason: string }
   | { event: "library-stats"; videos: number; faces: number; clusters: number; named: number; people: { name: string; cluster_id?: number; clips: number; faces: number }[] }
   | { event: "library-person"; name: string; clips: { path: string; name: string; times: number[] }[] }
@@ -336,6 +337,12 @@ function handleSpottedEvent(evt: SpottedEvent) {
       // Non-fatal — face tagging still proceeds. Logged for devtools.
       console.info("activity step skipped:", evt);
       break;
+    case "activity-fallback":
+      // Couldn't match per clip (no embeddings / model), so every typed tag was
+      // applied to every clip instead of being silently dropped. The review
+      // screen surfaces them all; the working detail line notes why.
+      workingDetail.textContent = `Couldn't match per clip (${evt.reason}); applied your ${evt.tags.length} tag(s) to every clip — prune next.`;
+      break;
     case "library-person":
       handleLibraryEvent(evt);
       break;
@@ -480,23 +487,36 @@ async function startTagFlow() {
   setProgressIndeterminate();
   workingLabel.textContent = "Spotting your tags";
   workingDetail.textContent = "Looking for each of your tags in every clip…";
-  lastActivityResult = null;
+  // Read matches from the invoke RESULT (the sidecar's captured stdout), not
+  // from the activity-complete event global. The event can be delivered after
+  // the invoke promise resolves, and reading the global too early would see
+  // no matches, silently skip the review, and write tags unconfirmed — the
+  // exact failure the review screen exists to prevent.
+  let matched: MatchedTag[] = [];
   try {
-    await invoke<number>("suggest_activities");
+    const out = await invoke<string>("suggest_activities");
+    matched = parseMatchedTags(out);
   } catch (e) {
     console.warn("activity suggest failed (non-fatal):", e);
   }
-  // The activity-complete event handler repopulates lastActivityResult during
-  // the await above; TS can't see that cross-callback write, so read through a
-  // cast rather than the null-narrowed local view.
-  const done = lastActivityResult as Extract<SpottedEvent, { event: "activity-complete" }> | null;
-  const matched = done?.matched ?? [];
   if (matched.length === 0) {
     await runWrite([]);
     return;
   }
   renderReview(matched);
   setState("review");
+}
+
+/** Pull the `matched` array out of the activity-complete line in the sidecar's
+ *  captured stdout. Returns [] if the step emitted no matches. */
+function parseMatchedTags(stdout: string): MatchedTag[] {
+  for (const line of stdout.split("\n")) {
+    const evt = parseSpotted(line.trim());
+    if (evt && evt.event === "activity-complete" && Array.isArray(evt.matched)) {
+      return evt.matched;
+    }
+  }
+  return [];
 }
 
 /** Confirm screen: the tags Spotted found, each checked by default. Unchecking

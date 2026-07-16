@@ -189,15 +189,80 @@ async fn tag_videos(
 }
 
 #[tauri::command]
-async fn suggest_activities(app: AppHandle, window: Window) -> Result<i32, String> {
-    let result = run_sidecar(app, window, vec!["activity-suggest".into()]).await;
+async fn suggest_activities(app: AppHandle, window: Window) -> Result<String, String> {
+    // Capture the sidecar's stdout and RETURN it so the frontend reads the
+    // activity-complete payload from the invoke result, not from a racy
+    // side-channel event. Still emits sidecar://line for live progress, and
+    // still registers the PID so a long match can be cancelled.
+    let sidecar = app
+        .shell()
+        .sidecar("spotted-sidecar")
+        .map_err(|e| format!("sidecar lookup: {e}"))?;
+    let (mut rx, child) = sidecar
+        .args(["activity-suggest".to_string()])
+        .spawn()
+        .map_err(|e| format!("sidecar spawn: {e}"))?;
+
+    let pid = child.pid();
+    if let Some(state) = app.try_state::<ActiveChildren>() {
+        if let Ok(mut v) = state.0.lock() {
+            v.push(pid);
+        }
+    }
+    struct PidGuard {
+        pid: u32,
+        bucket: Arc<Mutex<Vec<u32>>>,
+    }
+    impl Drop for PidGuard {
+        fn drop(&mut self) {
+            if let Ok(mut v) = self.bucket.lock() {
+                v.retain(|p| *p != self.pid);
+            }
+        }
+    }
+    let _guard = app
+        .try_state::<ActiveChildren>()
+        .map(|s| PidGuard { pid, bucket: s.0.clone() });
+
+    let mut collected: Vec<String> = Vec::new();
+    let mut err_tail: Vec<String> = Vec::new();
+    let mut code = -1i32;
+    while let Some(event) = rx.recv().await {
+        match event {
+            CommandEvent::Stdout(bytes) => {
+                let line = String::from_utf8_lossy(&bytes).trim_end().to_string();
+                if !line.is_empty() {
+                    collected.push(line.clone());
+                    let _ = window.emit("sidecar://line", SidecarLine { kind: "stdout", line });
+                }
+            }
+            CommandEvent::Stderr(bytes) => {
+                let line = String::from_utf8_lossy(&bytes).trim_end().to_string();
+                if !line.is_empty() {
+                    err_tail.push(line.clone());
+                    if err_tail.len() > 8 {
+                        err_tail.remove(0);
+                    }
+                    let _ = window.emit("sidecar://line", SidecarLine { kind: "stderr", line });
+                }
+            }
+            CommandEvent::Terminated(payload) => {
+                code = payload.code.unwrap_or(-1);
+                break;
+            }
+            _ => {}
+        }
+    }
+
     let mut payload = HashMap::new();
-    payload.insert(
-        "status".into(),
-        if result.is_ok() { "ok" } else { "error" }.into(),
-    );
+    payload.insert("status".into(), if code == 0 { "ok" } else { "error" }.into());
     telemetry::track("activity-suggest-complete", payload);
-    result
+
+    if code == 0 {
+        Ok(collected.join("\n"))
+    } else {
+        Err(err_tail.join("\n"))
+    }
 }
 
 /// Wipe the per-user library, but keep an undo path. Renames ~/.facetag/

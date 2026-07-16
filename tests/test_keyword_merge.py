@@ -74,3 +74,28 @@ def test_exclude_tags_is_case_insensitive(tmp_path) -> None:
     _db.replace_auto_tags(conn, a, [("Wedding", 0.11)])
     mapping = _tag.videos_with_keywords(conn, exclude_tags={"wedding"})
     assert mapping == {}
+
+
+def test_delete_auto_tags_by_name_persists_rejection(tmp_path) -> None:
+    """Unchecking a tag on the review screen must drop it from auto_tags so it
+    stops surfacing in search and can't be re-written by a later tag-write."""
+    conn = _conn(tmp_path)
+    a = _db.add_video(conn, "/a.mov", 1.0)
+    b = _db.add_video(conn, "/b.mov", 1.0)
+    _db.replace_auto_tags(conn, a, [("beach", 0.4), ("wedding", 0.11)])
+    _db.replace_auto_tags(conn, b, [("wedding", 0.12)])
+    removed = _db.delete_auto_tags_by_name(conn, {"Wedding"})  # case-insensitive
+    assert removed == 2
+    # A subsequent write with NO exclude set no longer surfaces wedding anywhere.
+    assert _tag.videos_with_keywords(conn) == {"/a.mov": ["beach"]}
+
+
+def test_spotted_keywords_roundtrip_and_migration(tmp_path) -> None:
+    conn = _conn(tmp_path)
+    vid = _db.add_video(conn, "/a.mov", 1.0)
+    assert _db.get_spotted_keywords(conn, vid) == []
+    _db.set_spotted_keywords(conn, vid, ["Sarah", "Smith, John", "beach"])
+    # Newline-delimited, so a comma inside a person name survives intact.
+    assert _db.get_spotted_keywords(conn, vid) == ["Sarah", "Smith, John", "beach"]
+    _db.set_spotted_keywords(conn, vid, [])
+    assert _db.get_spotted_keywords(conn, vid) == []

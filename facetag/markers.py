@@ -151,6 +151,19 @@ def sidecar_path_for(video_path: Path) -> Path:
     return video_path.with_name(f"{video_path.name}.xmp")
 
 
+def _sidecar_is_spotted(sidecar: Path, exe: str) -> bool:
+    """True only if Spotted wrote this .xmp (CreatorTool=Spotted), so it's ours
+    to replace. False for any foreign sidecar (DaVinci/Bridge color, ratings,
+    the user's own markers) — those must never be destroyed."""
+    r = subprocess.run(
+        [exe, "-s", "-s", "-s", "-XMP-xmp:CreatorTool", str(sidecar)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return r.returncode == 0 and r.stdout.strip() == "Spotted"
+
+
 def write_markers_sidecar(video_path: Path, face_events: list[tuple[float, str]]) -> Path | None:
     """Write a `clipname.mov.xmp` sidecar alongside the clip with markers.
 
@@ -160,21 +173,26 @@ def write_markers_sidecar(video_path: Path, face_events: list[tuple[float, str]]
     This is additive: write_markers still writes in-file XMP for Premiere
     and any DaVinci version that does read it.
 
-    Returns the sidecar path on success, or None if there's nothing to
-    write. Idempotent: removes any existing sidecar first so re-running
-    doesn't double-write markers.
+    Returns the sidecar path on success, or None if there's nothing to write
+    OR a foreign sidecar was preserved. Idempotent for Spotted's own sidecars
+    (replaces them); it will NEVER overwrite a sidecar another tool created.
     """
     if not face_events:
         return None
     exe = _exiftool()
     sidecar = sidecar_path_for(video_path)
 
-    # exiftool's -o refuses to overwrite an existing file. Wipe first so
-    # re-tagging a folder produces a fresh sidecar instead of stalling.
+    # A sidecar may already exist. If Spotted wrote it, replace it so re-tagging
+    # refreshes the markers. If another tool wrote it, that file may hold the
+    # user's color/ratings/markers — never destroy it. Skip the sidecar write;
+    # in-file XMP markers (write_markers) still cover Premiere and any DaVinci
+    # that reads them. exiftool's -o refuses to overwrite, so ours is unlinked.
     if sidecar.exists():
+        if not _sidecar_is_spotted(sidecar, exe):
+            return None
         sidecar.unlink()
 
-    args: list[str] = [exe, "-q", "-o", str(sidecar)]
+    args: list[str] = [exe, "-q", "-o", str(sidecar), "-XMP-xmp:CreatorTool=Spotted"]
     seen: set[tuple[int, str]] = set()
     for t, name in sorted(face_events):
         key = (int(round(t * 1000)), name)

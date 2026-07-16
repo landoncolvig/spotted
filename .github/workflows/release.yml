@@ -61,6 +61,21 @@ jobs:
           cd sidecar
           ./build.sh
 
+      - name: Smoke-test the frozen sidecar
+        run: |
+          set -euo pipefail
+          BIN="app/src-tauri/binaries/spotted-sidecar-aarch64-apple-darwin"
+          if [ ! -x "$BIN" ]; then
+            echo "::error::frozen sidecar missing or not executable at $BIN"
+            exit 1
+          fi
+          # Exercise the actual bundled binary before it can auto-update to every
+          # user: CLI imports, DB path, exiftool resolution, and MobileCLIP
+          # load+encode. A build that compiles but dies at runtime fails here.
+          "$BIN" --help >/dev/null
+          "$BIN" status --db "$RUNNER_TEMP/smoke.db" >/dev/null
+          "$BIN" selftest
+
       - name: Install JS deps
         working-directory: app
         run: npm ci
@@ -76,6 +91,24 @@ jobs:
             exit 1
           fi
           VERSION="${REF_NAME#v}"
+
+          # The built app reports the version baked from these files; latest.json
+          # reports the tag. If they drift, users either never see the update
+          # (new code under an old version) or re-download forever (manifest
+          # version > installed version every launch). Hard-fail on mismatch.
+          fail=0
+          for f in app/src-tauri/tauri.conf.json app/package.json; do
+            FV=$(grep -m1 '"version"' "$f" | sed -E 's/.*"version"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/')
+            if [ "$FV" != "$VERSION" ]; then
+              echo "::error::$f version '$FV' != tag '$VERSION'"; fail=1
+            fi
+          done
+          CV=$(grep -m1 '^version' app/src-tauri/Cargo.toml | sed -E 's/^version[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/')
+          if [ "$CV" != "$VERSION" ]; then
+            echo "::error::app/src-tauri/Cargo.toml version '$CV' != tag '$VERSION'"; fail=1
+          fi
+          [ "$fail" -eq 0 ] || { echo "::error::Bump the version files to match the tag before releasing."; exit 1; }
+
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Build Tauri app (arm64)

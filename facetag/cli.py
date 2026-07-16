@@ -220,12 +220,9 @@ def activity_suggest(
     Writes matches into the `auto_tags` table; they merge into the editor's
     Keywords column via tag.videos_with_keywords().
     """
+    from collections import defaultdict
+
     conn = _db.connect(db_path)
-    videos = _db.videos_with_embeddings(conn)
-    if not videos:
-        console.print("[yellow]No frame embeddings in the index. Scan with --activities first.[/yellow]")
-        _emit("activity-empty", message="no embeddings indexed")
-        raise typer.Exit(0)
 
     user_tags = _db.all_batch_tags(conn)
     if not user_tags:
@@ -233,16 +230,72 @@ def activity_suggest(
         _emit("activity-empty", message="no user tags entered")
         raise typer.Exit(0)
 
-    try:
-        encoder = _clip.ClipEncoder()
-    except _clip.ClipUnavailable as e:
-        console.print(f"[red]Activity detection unavailable: {e}[/red]")
-        _emit("error", stage="activity-suggest", message=str(e))
-        raise typer.Exit(2)
+    def _aggregate(results: dict[str, list[tuple[str, float]]]) -> list[dict]:
+        """Per-tag rollup the review screen reads: clip count, peak score, a sample."""
+        agg: dict[str, list[tuple[str, float]]] = defaultdict(list)
+        for path, picks in results.items():
+            for t, s in picks:
+                agg[t].append((Path(path).name, s))
+        return sorted(
+            (
+                {"tag": t, "clips": len(hits), "peak": round(max(s for _, s in hits), 3), "sample": hits[0][0]}
+                for t, hits in agg.items()
+            ),
+            key=lambda m: (-m["clips"], -m["peak"]),
+        )
 
-    # Each user tag is its own subject and its own output label. The prompt
-    # templates in activity.py wrap it ("a photo of {}", "a video of {}", …)
-    # and ensemble across them, which is the standard CLIP zero-shot trick.
+    def _emit_complete(results: dict[str, list[tuple[str, float]]], total: int) -> None:
+        sample = None
+        if results:
+            sp = next(iter(results.keys()))
+            sample = {"file": Path(sp).name, "tags": [t for t, _ in results[sp]]}
+        _emit("activity-complete", total=total, tagged=len(results), sample=sample, matched=_aggregate(results))
+
+    videos = _db.videos_with_embeddings(conn)
+
+    # Load the matcher eagerly so a present-but-unloadable model surfaces here
+    # (the old lazy load inside apply_auto_tags was unguarded and crashed the
+    # command). If the model can't load OR there are no frame embeddings to
+    # score against, we CANNOT match per clip — but we must not silently drop
+    # the tags the user typed. Fall back to applying every typed tag to every
+    # clip (the pre-v0.0.38 behavior); the review screen still lets them prune.
+    # Losing the user's tags outright is the worst outcome, so this is deliberate.
+    encoder = None
+    load_error = None
+    if videos:
+        try:
+            encoder = _clip.ClipEncoder()
+            encoder._load()
+        except _clip.ClipUnavailable as e:
+            load_error = str(e)
+            encoder = None
+
+    if encoder is None or not videos:
+        reason = (
+            "no frame embeddings (this library was scanned without scene analysis)"
+            if not videos
+            else f"the scene model could not load ({load_error})"
+        )
+        console.print(
+            f"[yellow]Can't match per clip: {reason}. Applying your "
+            f"{len(user_tags)} tag(s) to every clip instead — drop any wrong "
+            f"ones on the review screen.[/yellow]"
+        )
+        all_videos = conn.execute("SELECT id, path FROM videos").fetchall()
+        if not all_videos:
+            _emit("activity-empty", message="no videos in index")
+            raise typer.Exit(0)
+        stamped: dict[str, list[tuple[str, float]]] = {}
+        for vid, path in all_videos:
+            picks = [(t, 1.0) for t in user_tags]
+            _db.replace_auto_tags(conn, vid, picks)
+            stamped[path] = picks
+        _emit("activity-fallback", reason=reason, tags=user_tags, clips=len(all_videos))
+        _emit_complete(stamped, total=len(all_videos))
+        return
+
+    # Precise per-clip matching. Each user tag is its own subject and output
+    # label; activity.py's templates wrap and ensemble it (the CLIP zero-shot trick).
     prompts = [(t, t) for t in user_tags]
 
     _emit("activity-start", total=len(videos))
@@ -264,49 +317,58 @@ def activity_suggest(
     )
 
     if not results:
-        console.print(
-            f"[yellow]No tag scored above {threshold:.2f} on any clip.[/yellow]"
-        )
+        console.print(f"[yellow]No tag scored above {threshold:.2f} on any clip.[/yellow]")
         _emit("activity-complete", total=len(videos), tagged=0, sample=None, matched=[])
         return
 
-    # Aggregate per tag for the review screen: how many clips each tag landed
-    # on, plus a peak score and one sample filename. The review lists tags
-    # (not per-clip rows) so the user can drop a whole bad match in one click.
-    from collections import defaultdict
-
-    agg: dict[str, list[tuple[str, float]]] = defaultdict(list)
-    for path, picks in results.items():
-        for t, s in picks:
-            agg[t].append((Path(path).name, s))
-    matched = sorted(
-        (
-            {
-                "tag": t,
-                "clips": len(hits),
-                "peak": round(max(s for _, s in hits), 3),
-                "sample": hits[0][0],
-            }
-            for t, hits in agg.items()
-        ),
-        key=lambda m: (-m["clips"], -m["peak"]),
-    )
-
     table = Table("video", "tags (score)")
-    sample_path = next(iter(results.keys()))
-    sample_tags = results[sample_path]
     for path, picks in list(results.items())[:30]:
         chips = ", ".join(f"{t} ({s:.2f})" for t, s in picks)
         table.add_row(Path(path).name, chips)
     console.print(table)
     console.print(f"[bold green]Done.[/bold green] {len(results)} of {len(videos)} videos got auto-tags.")
-    _emit(
-        "activity-complete",
-        total=len(videos),
-        tagged=len(results),
-        sample={"file": Path(sample_path).name, "tags": [t for t, _ in sample_tags]},
-        matched=matched,
-    )
+    _emit_complete(results, total=len(videos))
+
+
+@app.command()
+def selftest():
+    """Verify the packaged bundle can actually run: exiftool resolves and the
+    MobileCLIP model loads + encodes. Run against the FROZEN binary in CI so a
+    build that compiles but dies at runtime fails the release instead of
+    auto-updating to every user. Exits non-zero on any failure.
+    """
+    import shutil
+
+    ok = True
+
+    exe = shutil.which("exiftool")
+    if exe:
+        console.print(f"[green]exiftool OK[/green] ({exe})")
+    else:
+        console.print("[red]exiftool NOT on PATH[/red]")
+        ok = False
+
+    try:
+        enc = _clip.ClipEncoder()
+        if not enc.available:
+            console.print("[red]MobileCLIP model NOT bundled/resolvable[/red]")
+            ok = False
+        else:
+            enc._load()
+            vec = enc.encode_texts(["a photo of a test scene"])
+            if getattr(vec, "shape", (0,))[-1] > 0:
+                console.print("[green]MobileCLIP OK[/green] (loaded + encoded)")
+            else:
+                console.print("[red]MobileCLIP returned an empty embedding[/red]")
+                ok = False
+    except Exception as e:  # noqa: BLE001 - surface any load/encode failure
+        console.print(f"[red]MobileCLIP FAILED: {e}[/red]")
+        ok = False
+
+    if not ok:
+        console.print("[bold red]selftest FAILED[/bold red]")
+        raise typer.Exit(1)
+    console.print("[bold green]selftest passed[/bold green]")
 
 
 @app.command()
@@ -536,7 +598,7 @@ def delete_person(
 @app.command("tag-write")
 def tag_write(
     db_path: Path = typer.Option(DEFAULT_DB, "--db"),
-    replace: bool = typer.Option(True, "--replace/--append", help="Replace existing keywords (default) vs append."),
+    merge: bool = typer.Option(True, "--merge/--overwrite", help="Merge Spotted's keywords with any already in the file (default), preserving keywords set by other tools (Premiere, Photos, Bridge). --overwrite replaces the file's entire keyword set."),
     dry_run: bool = typer.Option(False, "--dry-run", help="Print what would be written, change nothing."),
     exclude_tags: str = typer.Option("", "--exclude-tags", help="Comma-separated matched tags to leave out (the ones the user unchecked on the review screen)."),
 ):
@@ -545,9 +607,19 @@ def tag_write(
     Premiere reads these as the Keywords column. DaVinci Resolve surfaces
     them in the Media Pool. After running this, an editor can search by
     person name across the whole library.
+
+    By default keywords are MERGED with whatever is already in the file, and
+    Spotted replaces only the keywords it wrote on a previous run (tracked in
+    videos.spotted_keywords) so renames/removals take effect without clobbering
+    another tool's keywords. `--overwrite` restores replace-everything behavior.
     """
     conn = _db.connect(db_path)
     exclude = {t.strip() for t in exclude_tags.split(",") if t.strip()}
+    # Persist review-screen rejections: drop unchecked tags from auto_tags so
+    # they also stop surfacing in in-app search and can't sneak back into a
+    # later write. Not on a dry run — that must change nothing.
+    if exclude and not dry_run:
+        _db.delete_auto_tags_by_name(conn, exclude)
     mapping = _tag.videos_with_keywords(conn, exclude_tags=exclude)
     if not mapping:
         # Treat as a hard error so the Tauri shell shows it via showError()
@@ -576,11 +648,25 @@ def tag_write(
         task = prog.add_task("tagging", total=len(mapping))
         for idx, (path_str, names) in enumerate(mapping.items(), start=1):
             short = Path(path_str).name
+            vid = _db.video_id_for_path(conn, path_str)
+            # Merge mode: keep keywords already in the file that Spotted didn't
+            # write, drop Spotted's own previous set (so a rename/removal sticks),
+            # add the current set. Overwrite mode: write exactly the current set.
+            if merge:
+                existing = _tag.read_keywords(Path(path_str))
+                in_file = set(existing.get("xmp", [])) | set(existing.get("keys", []))
+                prior_spotted = set(_db.get_spotted_keywords(conn, vid)) if vid else set()
+                final = sorted((in_file - prior_spotted) | set(names))
+            else:
+                final = list(names)
             table.add_row(short, ", ".join(names))
             _emit("tag-video", name=short, names=names, index=idx, total=len(mapping))
             if not dry_run:
                 try:
-                    _tag.write_keywords(Path(path_str), names, replace=replace)
+                    _tag.write_keywords(Path(path_str), final, replace=True)
+                    # Remember exactly what Spotted put here for the next run's diff.
+                    if vid:
+                        _db.set_spotted_keywords(conn, vid, names)
                 except _tag.ExiftoolMissing as e:
                     console.print(f"\n[red]{e}[/red]")
                     _emit("error", stage="tag-write", message=str(e))
@@ -592,7 +678,7 @@ def tag_write(
                 # finds the clip by name/tag. Non-fatal — XMP write is the
                 # critical path for Premiere/DaVinci.
                 try:
-                    _finder.write_finder_comment(Path(path_str), names)
+                    _finder.write_finder_comment(Path(path_str), final)
                 except Exception as e:
                     _emit("finder-error", name=short, message=str(e))
             prog.update(task, advance=1)
