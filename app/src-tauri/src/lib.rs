@@ -15,6 +15,13 @@ mod telemetry;
 #[derive(Default)]
 struct ActiveChildren(Arc<Mutex<Vec<u32>>>);
 
+/// PID of the label-web server currently holding the labeler port, if any.
+/// A new batch tears this down before starting its own server so it can bind
+/// the port and the readiness poll can't get a 200 from the stale (previous
+/// batch's) server.
+#[derive(Default)]
+struct LabelServer(Arc<Mutex<Option<u32>>>);
+
 #[derive(Serialize, Clone)]
 struct SidecarLine {
     kind: &'static str,
@@ -395,6 +402,39 @@ async fn start_label_server(
         .sidecar("spotted-sidecar")
         .map_err(|e| format!("sidecar lookup: {e}"))?;
 
+    // Tear down a label server left running from a previous batch so it frees
+    // the port. Otherwise the new server can't bind, and the readiness poll
+    // below would get a 200 from the STALE server — showing the user the prior
+    // batch's clusters instead of the folder they just dropped.
+    let old_pid = app
+        .try_state::<LabelServer>()
+        .and_then(|s| s.0.lock().ok().and_then(|g| *g));
+    if let Some(pid) = old_pid {
+        let _ = std::process::Command::new("kill")
+            .arg("-TERM")
+            .arg(pid.to_string())
+            .status();
+        // Wait for the port to actually free (connection refused) before we
+        // spawn the replacement, so we never poll the dying server.
+        let probe = reqwest::Client::builder()
+            .timeout(Duration::from_millis(300))
+            .build()
+            .map_err(|e| format!("http client: {e}"))?;
+        let probe_url = format!("http://127.0.0.1:{port}/");
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
+            if probe.get(&probe_url).send().await.is_err() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(150)).await;
+        }
+        if let Some(s) = app.try_state::<LabelServer>() {
+            if let Ok(mut g) = s.0.lock() {
+                *g = None;
+            }
+        }
+    }
+
     // Build sidecar args. Append --scope-path for each batch path the
     // frontend hands us so the labeler shows only clusters touching the
     // freshly-dropped clip(s). The labeler still exposes a "show all"
@@ -416,6 +456,13 @@ async fn start_label_server(
         .args(args)
         .spawn()
         .map_err(|e| format!("sidecar spawn: {e}"))?;
+
+    // Record this server's PID so the next batch can tear it down.
+    if let Some(s) = app.try_state::<LabelServer>() {
+        if let Ok(mut g) = s.0.lock() {
+            *g = Some(child.pid());
+        }
+    }
 
     // Capture stderr in a shared buffer so we can surface it if Flask
     // never comes up.
@@ -673,6 +720,7 @@ pub fn run() {
 
     tauri::Builder::default()
         .manage(ActiveChildren::default())
+        .manage(LabelServer::default())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())

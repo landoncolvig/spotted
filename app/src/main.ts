@@ -451,13 +451,21 @@ function makeEl<K extends keyof HTMLElementTagNameMap>(
 }
 
 function mountLabelScreen() {
-  if (document.querySelector(".screen--label")) return;
+  const existing = document.querySelector(".screen--label");
+  if (existing) {
+    // Reuse the screen, but force the iframe to reload. A new batch serves
+    // fresh clusters on the same port; setting the same URL wouldn't reload,
+    // so without the cache-buster we'd show the previous batch's named faces.
+    const frame = existing.querySelector(".label-frame") as HTMLIFrameElement | null;
+    if (frame) frame.src = `http://127.0.0.1:${LABEL_PORT}/?t=${Date.now()}`;
+    return;
+  }
 
   const screen = makeEl("div", "screen screen--label");
   const wrap = makeEl("div", "label-wrap");
 
   const frame = makeEl("iframe", "label-frame");
-  frame.src = `http://127.0.0.1:${LABEL_PORT}/`;
+  frame.src = `http://127.0.0.1:${LABEL_PORT}/?t=${Date.now()}`;
   frame.title = "Spotted labeler";
 
   const bar = makeEl("div", "label-bar");
