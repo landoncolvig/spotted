@@ -7,7 +7,8 @@ import {
   sendNotification,
 } from "@tauri-apps/plugin-notification";
 
-type State = "idle" | "tags" | "working" | "label" | "library" | "done";
+type State = "idle" | "tags" | "working" | "label" | "review" | "library" | "done";
+type MatchedTag = { tag: string; clips: number; peak: number; sample: string };
 type SidecarLine = { kind: "stdout" | "stderr"; line: string };
 type SpottedEvent =
   | { event: "scan-start"; total: number }
@@ -33,7 +34,7 @@ type SpottedEvent =
   | { event: "markers-verify-error"; message: string }
   | { event: "markers-sidecar-error"; name: string; message: string }
   | { event: "activity-start"; total: number }
-  | { event: "activity-complete"; total: number; tagged: number; sample: { file: string; tags: string[] } | null }
+  | { event: "activity-complete"; total: number; tagged: number; sample: { file: string; tags: string[] } | null; matched?: MatchedTag[] }
   | { event: "activity-empty"; message: string }
   | { event: "activities-disabled"; reason: string }
   | { event: "library-stats"; videos: number; faces: number; clusters: number; named: number; people: { name: string; cluster_id?: number; clips: number; faces: number }[] }
@@ -324,8 +325,8 @@ function handleSpottedEvent(evt: SpottedEvent) {
       lastMarkersVerification = evt;
       break;
     case "activity-start":
-      workingLabel.textContent = "Spotting activities";
-      workingDetail.textContent = `Scoring ${evt.total} clips against curated prompts…`;
+      workingLabel.textContent = "Spotting your tags";
+      workingDetail.textContent = `Looking for your tags across ${evt.total} clips…`;
       break;
     case "activity-complete":
       lastActivityResult = evt;
@@ -417,7 +418,7 @@ function friendlyError(raw: string): string {
     return "Metadata writing failed — exiftool isn't available. This shouldn't happen in a packaged Spotted build; please report it.";
   }
   if (r.includes("nothing to tag")) {
-    return "Nothing was tagged — you need to name at least one face cluster (or add a batch tag) before hitting Tag & finish.";
+    return "Nothing was tagged — name at least one face cluster, or enter tags that actually appear in the clips, before hitting Tag & finish.";
   }
   if (r.includes("can't locate image/exiftool.pm") || r.includes("image::exiftool")) {
     return "The bundled metadata writer (exiftool) couldn't find its support files. This is a Spotted packaging bug; please report it and include the version number.";
@@ -464,28 +465,119 @@ function mountLabelScreen() {
   screen.appendChild(wrap);
   stage.appendChild(screen);
 
-  tagBtn.addEventListener("click", runTagWrite);
+  tagBtn.addEventListener("click", startTagFlow);
 }
 
-async function runTagWrite() {
+// After faces are named: first look for each of the user's own tags in every
+// clip, then hand them a review screen to drop any bad matches BEFORE anything
+// is written. This is the tag-side mirror of naming faces — the user supplied
+// the words, the app found where they apply, and the user confirms.
+//
+// If nothing matched (no tags entered, or none crossed the threshold) we skip
+// the review and write face names straight away.
+async function startTagFlow() {
   setState("working");
   setProgressIndeterminate();
-  workingLabel.textContent = "Spotting activities";
-  workingDetail.textContent = "Scoring curated prompts against frame embeddings…";
-  // Activity suggestion runs before tag-write so any matched prompts
-  // (kids, beach, wedding…) merge into the keyword field with the
-  // person names. Non-fatal — if the .mlpackage isn't bundled or the
-  // user disabled --activities on scan, this returns quickly with no
-  // auto-tags applied.
+  workingLabel.textContent = "Spotting your tags";
+  workingDetail.textContent = "Looking for each of your tags in every clip…";
+  lastActivityResult = null;
   try {
     await invoke<number>("suggest_activities");
   } catch (e) {
     console.warn("activity suggest failed (non-fatal):", e);
   }
+  // The activity-complete event handler repopulates lastActivityResult during
+  // the await above; TS can't see that cross-callback write, so read through a
+  // cast rather than the null-narrowed local view.
+  const done = lastActivityResult as Extract<SpottedEvent, { event: "activity-complete" }> | null;
+  const matched = done?.matched ?? [];
+  if (matched.length === 0) {
+    await runWrite([]);
+    return;
+  }
+  renderReview(matched);
+  setState("review");
+}
+
+/** Confirm screen: the tags Spotted found, each checked by default. Unchecking
+ *  one drops it from every clip; only checked tags get written. */
+function renderReview(matched: MatchedTag[]) {
+  document.querySelector(".screen--review")?.remove();
+
+  const screen = makeEl("div", "screen screen--review");
+  const wrap = makeEl("div", "review-wrap");
+
+  const title = makeEl("h2", "review-title");
+  title.textContent = "Review your tags";
+  const sub = makeEl("p", "review-sub");
+  sub.textContent =
+    "Spotted looked for your tags in each clip. Uncheck any that look wrong — only the checked ones get written into your files.";
+  wrap.append(title, sub);
+
+  const tools = makeEl("div", "review-tools");
+  const count = makeEl("span", "review-count");
+  const toggle = makeEl("button", "review-toggle");
+  tools.append(count, toggle);
+  wrap.appendChild(tools);
+
+  const list = makeEl("div", "review-list");
+  const checks: HTMLInputElement[] = [];
+  for (const m of matched) {
+    const row = makeEl("label", "review-row");
+    const input = document.createElement("input");
+    input.type = "checkbox";
+    input.checked = true;
+    input.className = "review-check";
+    input.dataset.tag = m.tag;
+    const main = makeEl("span", "review-row__main");
+    const name = makeEl("span", "review-row__tag");
+    name.textContent = m.tag;
+    const meta = makeEl("span", "review-row__meta");
+    meta.textContent = `${m.clips} clip${m.clips === 1 ? "" : "s"} · e.g. ${m.sample}`;
+    main.append(name, meta);
+    row.append(input, main);
+    list.appendChild(row);
+    checks.push(input);
+  }
+  wrap.appendChild(list);
+
+  const updateCount = () => {
+    const kept = checks.filter((c) => c.checked).length;
+    count.textContent = `${kept} of ${checks.length} tag${checks.length === 1 ? "" : "s"} will be written`;
+    toggle.textContent = kept > 0 ? "Uncheck all" : "Check all";
+  };
+  checks.forEach((c) => c.addEventListener("change", updateCount));
+  toggle.addEventListener("click", () => {
+    const anyChecked = checks.some((c) => c.checked);
+    checks.forEach((c) => (c.checked = !anyChecked));
+    updateCount();
+  });
+  updateCount();
+
+  const bar = makeEl("div", "review-bar");
+  const hint = makeEl("span", "review-hint");
+  hint.textContent = "The faces you named are always written.";
+  const writeBtn = makeEl("button", "btn");
+  writeBtn.textContent = "Write tags";
+  bar.append(hint, writeBtn);
+  wrap.appendChild(bar);
+
+  writeBtn.addEventListener("click", () => {
+    const exclude = checks.filter((c) => !c.checked).map((c) => c.dataset.tag!);
+    runWrite(exclude);
+  });
+
+  screen.appendChild(wrap);
+  stage.appendChild(screen);
+}
+
+async function runWrite(excludeTags: string[]) {
+  setState("working");
+  setProgressIndeterminate();
   workingLabel.textContent = "Writing keywords";
   workingDetail.textContent = "Running exiftool, per clip…";
   try {
-    await invoke<number>("tag_videos");
+    await invoke<number>("tag_videos", { excludeTags });
 
     // Markers are a bonus — Premiere/DaVinci-only feature. Failures here
     // should not break the flow because keywords already succeeded.
@@ -595,9 +687,9 @@ function renderVerification() {
       help: "Per-face timeline markers. In-file XMP for Premiere; sidecar .xmp next to the clip for DaVinci (enable 'Use Sidecar Files' in project settings).",
     },
     {
-      label: "Activities (MobileCLIP)",
+      label: "Your tags (matched)",
       values: lastActivityResult?.sample?.tags ?? [],
-      help: "Zero-shot scene/object tags auto-applied via Apple's MobileCLIP. Adds discoverability beyond face names (kids, beach, wedding…). Disable per-scan with the --activities/--no-activities flag.",
+      help: "The tags you entered, matched per clip with Apple's MobileCLIP and confirmed by you on the review screen. Each lands only on the clips it was found in, the same way a face name does.",
     },
   ];
 
@@ -1092,7 +1184,7 @@ function wireMenuEvents() {
       return;
     }
     await ensureSidecarListener();
-    await runTagWrite();
+    await startTagFlow();
   });
   listen("menu://show-welcome", () => {
     try { localStorage.removeItem(WELCOME_KEY); } catch {}

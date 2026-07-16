@@ -98,6 +98,26 @@ def get_batch_tags(conn: sqlite3.Connection, video_id: int) -> list[str]:
     return [t for t in row[0].split(",") if t]
 
 
+def all_batch_tags(conn: sqlite3.Connection) -> list[str]:
+    """Union of every distinct batch tag across all videos, sorted.
+
+    These are the tags the user typed on the welcome screen. The activity
+    matcher uses them as its whole vocabulary: it looks for each of these
+    tags per clip (via CLIP) and applies it only where it actually appears,
+    the same way face names attach only to clips a person is in.
+    """
+    rows = conn.execute(
+        "SELECT DISTINCT batch_tags FROM videos WHERE batch_tags IS NOT NULL AND batch_tags != ''"
+    ).fetchall()
+    seen: set[str] = set()
+    for (csv,) in rows:
+        for t in csv.split(","):
+            t = t.strip()
+            if t:
+                seen.add(t)
+    return sorted(seen)
+
+
 def add_video(conn: sqlite3.Connection, path: str, duration_sec: float) -> int:
     cur = conn.execute(
         "INSERT INTO videos(path, duration_sec) VALUES (?, ?) "

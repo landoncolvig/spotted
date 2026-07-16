@@ -45,27 +45,38 @@ def videos_with_names(conn: sqlite3.Connection) -> dict[str, list[str]]:
     return out
 
 
-def videos_with_keywords(conn: sqlite3.Connection) -> dict[str, list[str]]:
+def videos_with_keywords(
+    conn: sqlite3.Connection,
+    exclude_tags: set[str] | None = None,
+) -> dict[str, list[str]]:
     """Return {video_path: [merged keywords]}.
 
-    Merges three sources into the editor's single Keywords column:
-    1. Named-person tags (from face clustering + labeling).
-    2. Batch-level tags (the user types these in the welcome screen).
-    3. Auto-tags from the activity-suggest step (MobileCLIP zero-shot).
+    Merges two per-clip sources into the editor's single Keywords column:
+    1. Named-person tags (from face clustering + labeling) — a name lands only
+       on the clips that person actually appears in.
+    2. Matched tags from the activity-suggest step — each tag the user typed on
+       the welcome screen lands only on the clips where CLIP found it.
 
-    A video is included if any of the three sources has at least one entry.
-    The list is de-duplicated and sorted for stable XMP output.
+    Both are per-clip by design. The user's typed tags are NOT stamped onto
+    every clip; they go through the same appears-here-or-not matching as faces,
+    so "beach" only tags clips that show a beach. (The raw batch_tags column is
+    now just the matcher's input vocabulary, read via db.all_batch_tags().)
+
+    `exclude_tags` drops matched tags the user unchecked on the review screen
+    (case-insensitive). It only filters the matched/auto tags — a person name
+    that happens to collide with an excluded word is left alone.
+
+    A video is included if either source has at least one entry. The list is
+    de-duplicated and sorted for stable XMP output.
     """
+    excluded = {t.strip().lower() for t in (exclude_tags or set()) if t.strip()}
+
     person_rows = conn.execute(
         "SELECT DISTINCT v.path, p.name "
         "FROM faces f "
         "JOIN videos v ON v.id = f.video_id "
         "JOIN people p ON p.cluster_id = f.cluster_id "
         "WHERE p.name IS NOT NULL AND p.name != ''"
-    ).fetchall()
-
-    tag_rows = conn.execute(
-        "SELECT path, batch_tags FROM videos WHERE batch_tags IS NOT NULL AND batch_tags != ''"
     ).fetchall()
 
     auto_rows = conn.execute(
@@ -75,12 +86,9 @@ def videos_with_keywords(conn: sqlite3.Connection) -> dict[str, list[str]]:
     merged: dict[str, set[str]] = {}
     for path, name in person_rows:
         merged.setdefault(path, set()).add(name)
-    for path, tags_csv in tag_rows:
-        for t in tags_csv.split(","):
-            t = t.strip()
-            if t:
-                merged.setdefault(path, set()).add(t)
     for path, tag in auto_rows:
+        if tag.strip().lower() in excluded:
+            continue
         merged.setdefault(path, set()).add(tag)
 
     return {p: sorted(s) for p, s in merged.items()}

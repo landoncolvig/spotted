@@ -166,13 +166,24 @@ async fn cluster_faces(app: AppHandle, window: Window) -> Result<i32, String> {
 }
 
 #[tauri::command]
-async fn tag_videos(app: AppHandle, window: Window) -> Result<i32, String> {
-    let result = run_sidecar(app, window, vec!["tag-write".into()]).await;
+async fn tag_videos(
+    app: AppHandle,
+    window: Window,
+    exclude_tags: Option<Vec<String>>,
+) -> Result<i32, String> {
+    let mut args = vec!["tag-write".to_string()];
+    let excluded = exclude_tags.unwrap_or_default();
+    if !excluded.is_empty() {
+        args.push("--exclude-tags".to_string());
+        args.push(excluded.join(","));
+    }
+    let result = run_sidecar(app, window, args).await;
     let mut payload = HashMap::new();
     payload.insert(
         "status".into(),
         if result.is_ok() { "ok" } else { "error" }.into(),
     );
+    payload.insert("excluded".into(), excluded.len().to_string());
     telemetry::track("tag-write-complete", payload);
     result
 }

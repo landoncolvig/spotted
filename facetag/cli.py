@@ -205,13 +205,19 @@ def scan(
 @app.command("activity-suggest")
 def activity_suggest(
     db_path: Path = typer.Option(DEFAULT_DB, "--db"),
-    threshold: float = typer.Option(0.13, "--threshold", help="Min cosine similarity (per-video MAX over frames) to apply a tag."),
-    max_tags: int = typer.Option(3, "--max-tags", help="Max auto-tags per video so the keyword column stays scannable."),
+    threshold: float = typer.Option(0.10, "--threshold", help="Min cosine similarity (per-video MAX over frames) to apply a tag. Deliberately loose (below the old 0.13) because a missed tag is invisible and unfixable while an extra one is one click to drop on the review screen. Needs one pass on real footage to calibrate; this is the single knob to turn."),
 ):
-    """Score curated activity prompts against every video's frame embeddings.
+    """Look for each of the user's typed tags in every clip and apply it only
+    where it actually appears.
+
+    The vocabulary is exactly the tags the user entered on the welcome screen
+    (stored as batch_tags at scan time), NOT a built-in prompt list. For each
+    tag we CLIP-score it against each clip's frame embeddings and apply it to
+    the clips where it crosses `threshold` — the tag equivalent of how a face
+    name only attaches to the clips that person is in.
 
     Run AFTER `scan` (which produced the embeddings) and AFTER `cluster`+labeler.
-    Writes auto-tags into the `auto_tags` table; they merge into the editor's
+    Writes matches into the `auto_tags` table; they merge into the editor's
     Keywords column via tag.videos_with_keywords().
     """
     conn = _db.connect(db_path)
@@ -221,6 +227,12 @@ def activity_suggest(
         _emit("activity-empty", message="no embeddings indexed")
         raise typer.Exit(0)
 
+    user_tags = _db.all_batch_tags(conn)
+    if not user_tags:
+        console.print("[yellow]No tags to look for — the user didn't enter any on the welcome screen.[/yellow]")
+        _emit("activity-empty", message="no user tags entered")
+        raise typer.Exit(0)
+
     try:
         encoder = _clip.ClipEncoder()
     except _clip.ClipUnavailable as e:
@@ -228,19 +240,57 @@ def activity_suggest(
         _emit("error", stage="activity-suggest", message=str(e))
         raise typer.Exit(2)
 
+    # Each user tag is its own subject and its own output label. The prompt
+    # templates in activity.py wrap it ("a photo of {}", "a video of {}", …)
+    # and ensemble across them, which is the standard CLIP zero-shot trick.
+    prompts = [(t, t) for t in user_tags]
+
     _emit("activity-start", total=len(videos))
-    console.print(f"Scoring [bold]{len(videos)}[/bold] video(s) against {len(_activity.CURATED_PROMPTS)} prompts…")
+    console.print(
+        f"Looking for [bold]{len(user_tags)}[/bold] tag(s) "
+        f"({', '.join(user_tags)}) across [bold]{len(videos)}[/bold] clip(s)…"
+    )
     results = _activity.apply_auto_tags(
-        conn, encoder, threshold=threshold, max_tags_per_video=max_tags
+        conn,
+        encoder,
+        threshold=threshold,
+        # A user's own tags: apply any that clear the absolute threshold,
+        # independent of each other. No median-margin (that's for pruning a
+        # big fixed list) and no top-K cap (if a clip genuinely shows 6 of
+        # her tags, write all 6).
+        max_tags_per_video=len(user_tags),
+        use_median_margin=False,
+        prompts=prompts,
     )
 
     if not results:
         console.print(
-            f"[yellow]No prompt scored above {threshold:.2f} on any video. "
-            "Try lowering --threshold.[/yellow]"
+            f"[yellow]No tag scored above {threshold:.2f} on any clip.[/yellow]"
         )
-        _emit("activity-complete", total=len(videos), tagged=0, sample=None)
+        _emit("activity-complete", total=len(videos), tagged=0, sample=None, matched=[])
         return
+
+    # Aggregate per tag for the review screen: how many clips each tag landed
+    # on, plus a peak score and one sample filename. The review lists tags
+    # (not per-clip rows) so the user can drop a whole bad match in one click.
+    from collections import defaultdict
+
+    agg: dict[str, list[tuple[str, float]]] = defaultdict(list)
+    for path, picks in results.items():
+        for t, s in picks:
+            agg[t].append((Path(path).name, s))
+    matched = sorted(
+        (
+            {
+                "tag": t,
+                "clips": len(hits),
+                "peak": round(max(s for _, s in hits), 3),
+                "sample": hits[0][0],
+            }
+            for t, hits in agg.items()
+        ),
+        key=lambda m: (-m["clips"], -m["peak"]),
+    )
 
     table = Table("video", "tags (score)")
     sample_path = next(iter(results.keys()))
@@ -255,6 +305,7 @@ def activity_suggest(
         total=len(videos),
         tagged=len(results),
         sample={"file": Path(sample_path).name, "tags": [t for t, _ in sample_tags]},
+        matched=matched,
     )
 
 
@@ -487,6 +538,7 @@ def tag_write(
     db_path: Path = typer.Option(DEFAULT_DB, "--db"),
     replace: bool = typer.Option(True, "--replace/--append", help="Replace existing keywords (default) vs append."),
     dry_run: bool = typer.Option(False, "--dry-run", help="Print what would be written, change nothing."),
+    exclude_tags: str = typer.Option("", "--exclude-tags", help="Comma-separated matched tags to leave out (the ones the user unchecked on the review screen)."),
 ):
     """Write per-video person keywords into each .mov via exiftool.
 
@@ -495,12 +547,16 @@ def tag_write(
     person name across the whole library.
     """
     conn = _db.connect(db_path)
-    mapping = _tag.videos_with_keywords(conn)
+    exclude = {t.strip() for t in exclude_tags.split(",") if t.strip()}
+    mapping = _tag.videos_with_keywords(conn, exclude_tags=exclude)
     if not mapping:
         # Treat as a hard error so the Tauri shell shows it via showError()
         # instead of silently jumping to the Done screen. Otherwise the user
         # sees "Done" with nothing actually written to any file.
-        msg = "Nothing to tag: no clusters were named and no batch tags were set."
+        msg = (
+            "Nothing to tag: no face clusters were named, and none of the tags "
+            "you entered were found in any clip."
+        )
         console.print(f"[red]{msg}[/red]")
         _emit("tag-empty", message=msg)
         raise typer.Exit(2)

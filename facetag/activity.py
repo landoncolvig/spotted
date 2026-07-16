@@ -151,24 +151,33 @@ def apply_auto_tags(
     threshold: float = 0.13,
     max_tags_per_video: int = 3,
     margin: float = 0.01,
+    use_median_margin: bool = True,
     prompts: Iterable[tuple[str, str]] = CURATED_PROMPTS,
 ) -> dict[str, list[tuple[str, float]]]:
-    """Score every video with frame embeddings against the curated prompts,
-    write the auto_tags table, return what landed for the caller to display.
+    """Score every video with frame embeddings against `prompts`, write the
+    auto_tags table, return what landed for the caller to display.
 
-    Two filters protect against the noisy-tail problem where CLIP gives
-    similar mid-range scores to dozens of prompts:
+    Filters that protect against false positives:
 
     - `threshold`: absolute minimum cosine. Below this, the tag isn't applied
-      even if it's a video's top score.
-    - `margin`: a tag must beat the per-video median score by at least this
-      amount. Kills the "everything scores ~0.10, take top-K anyway" pattern
-      where a clip's actual content matches one prompt strongly and twenty
-      others weakly — we want only the strong matches.
+      even if it's a video's top score. This is the primary precision knob.
+    - `margin` (only when `use_median_margin`): a tag must beat the per-video
+      median score by at least this amount. Kills the "everything scores ~0.10,
+      take top-K anyway" pattern that shows up when scoring a large fixed prompt
+      list where a clip matches one prompt strongly and dozens weakly.
+
+    `use_median_margin=False` is the mode for a small user-supplied vocabulary
+    (the tags the person actually typed). There the median trick backfires:
+    with 3 tags, "beat the median" cuts the bottom tag even when it's genuinely
+    present, and lets a top tag through on a clip that has none of them. For a
+    user's own tags we want a pure per-tag absolute-threshold decision — does
+    THIS tag appear in THIS clip, independent of the others.
 
     Returns {video_path: [(tag, score), ...]} sorted highest score first.
     """
     prompts_list = list(prompts)
+    if not prompts_list:
+        return {}
     tag_names = [t for _, t in prompts_list]
     prompt_mat = encode_tag_embeddings(encoder, prompts_list)
 
@@ -186,7 +195,8 @@ def apply_auto_tags(
             (
                 (tag_names[i], float(scores[i]))
                 for i in range(len(scores))
-                if scores[i] >= threshold and scores[i] >= median + margin
+                if scores[i] >= threshold
+                and (not use_median_margin or scores[i] >= median + margin)
             ),
             key=lambda x: -x[1],
         )[:max_tags_per_video]
