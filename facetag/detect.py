@@ -41,7 +41,20 @@ class Detector:
         # When frozen by PyInstaller (the Spotted .app sidecar), entry.py
         # sets INSIGHTFACE_HOME to the bundled model location. Pass it
         # through so models load offline.
-        kwargs = {"name": "buffalo_l", "providers": ordered}
+        # facetag only uses detection (bbox + 5-pt kps for ArcFace alignment)
+        # and recognition (the 512-d embedding). Restrict the pack to those
+        # two so the unused landmark_2d_106 / landmark_3d_68 / genderage models
+        # never load. The 3D-landmark model (1k3d68) in particular crashes the
+        # frozen sidecar: its meanshape_68.pkl isn't in the bundle, so
+        # self.mean_lmk is None and pose estimation raises
+        # "AttributeError: 'NoneType' object has no attribute 'shape'" the first
+        # time a face is detected. Skipping it also drops ~143MB of model load
+        # and speeds up every frame.
+        kwargs = {
+            "name": "buffalo_l",
+            "providers": ordered,
+            "allowed_modules": ["detection", "recognition"],
+        }
         bundled_root = os.environ.get("INSIGHTFACE_HOME")
         if bundled_root:
             kwargs["root"] = bundled_root
