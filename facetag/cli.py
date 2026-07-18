@@ -16,6 +16,7 @@ from . import cluster as _cluster
 from . import cut as _cut
 from . import db as _db
 from . import detect as _detect
+from . import energy as _energy
 from . import extract as _extract
 from . import finder as _finder
 from . import label as _label
@@ -74,6 +75,18 @@ def _embed_only(conn, clip_encoder, video_path, video_id: int, sample_fps: float
     return written
 
 
+def _score_energy(conn, video_path, video_id: int, do_motion: bool):
+    """Compute a clip's energy (audio + optional motion) and persist it.
+
+    Independent of the face/CLIP frame loop — energy.score_clip runs its own
+    lightweight ffmpeg audio pass and OpenCV motion pass over the raw file.
+    Returns the EnergyResult so the caller can emit progress.
+    """
+    res = _energy.score_clip(video_path, motion=do_motion)
+    _db.set_energy(conn, video_id, res.score, res.bucket, res.peaks)
+    return res
+
+
 @app.command()
 def scan(
     path: Path = typer.Argument(..., exists=True, help="Video file or directory to scan."),
@@ -83,6 +96,8 @@ def scan(
     min_score: float = typer.Option(0.5, "--min-score", help="Minimum face detection confidence."),
     tags: str = typer.Option("", "--tags", help="Comma-separated batch tags applied to every clip in this scan (e.g. 'baptism,kids')."),
     activities: bool = typer.Option(True, "--activities/--no-activities", help="Also run MobileCLIP image encoder on each sampled frame so the activity-suggest step can find scenes (kids, beach, wedding…). Disable to keep scans face-only."),
+    energy: bool = typer.Option(True, "--energy/--no-energy", help="Score each clip's 'energy' (excitement) from audio loudness + camera-compensated motion, tag it high/medium/low, and mark its peak moments. On by default."),
+    energy_motion: bool = typer.Option(True, "--energy-motion/--no-energy-motion", help="Include the optical-flow motion pass in energy scoring. Disable for audio-only energy (faster, but blind to silent action)."),
 ):
     """Walk a path, sample frames, detect faces, store embeddings."""
     videos = _extract.walk_videos(path)
@@ -119,23 +134,34 @@ def scan(
     for index, v in enumerate(videos, start=1):
         path_str = str(v.resolve())
         if not rescan and _db.is_scanned(conn, path_str):
-            # Already face-scanned. But a video first indexed before activity
-            # detection shipped has faces and ZERO frame embeddings, so the
-            # activity-suggest step silently finds nothing for it no matter how
-            # many times the user re-runs. Backfill the embeddings here (encoder
-            # only — faces already exist, so no re-detection and no duplicates)
-            # so re-dropping an existing library finally lights up scene tags.
+            # Already face-scanned. A re-drop may still need two backfills:
+            # (1) activity embeddings for libraries first scanned before CLIP
+            # shipped (faces but zero frame embeddings → activity-suggest finds
+            # nothing), and (2) energy for libraries scanned before energy
+            # shipped. Do whichever is missing; only count as skipped if neither.
             vid = _db.video_id_for_path(conn, path_str)
+            did_backfill = False
             if clip_encoder is not None and vid is not None and not _db.video_has_embeddings(conn, vid):
                 _emit("video-backfill", name=v.name, index=index, total=len(videos))
                 try:
                     n_emb = _embed_only(conn, clip_encoder, v, vid, sample_fps, console)
                     total_backfilled += 1
+                    did_backfill = True
                     console.print(f"[cyan]Backfilled {n_emb} activity embedding(s) for {v.name}[/cyan]")
-                    _emit("video-done", name=v.name, index=index, total=len(videos), faces=0, backfilled=n_emb)
                 except Exception as e:
                     console.print(f"[yellow]Embedding backfill failed for {v.name}: {e}[/yellow]")
                     _emit("video-skip", name=v.name, index=index, total=len(videos), reason="backfill-failed")
+            if energy and vid is not None and not _db.video_has_energy(conn, vid):
+                try:
+                    res = _score_energy(conn, v, vid, energy_motion)
+                    did_backfill = True
+                    console.print(f"[cyan]Backfilled energy ({res.bucket}) for {v.name}[/cyan]")
+                    _emit("video-energy", name=v.name, bucket=res.bucket, score=round(res.score, 3), peaks=len(res.peaks))
+                except Exception as e:
+                    console.print(f"[yellow]Energy backfill failed for {v.name}: {e}[/yellow]")
+                    _emit("energy-skip", name=v.name, reason=str(e))
+            if did_backfill:
+                _emit("video-done", name=v.name, index=index, total=len(videos), faces=0)
             else:
                 total_skipped += 1
                 _emit("video-skip", name=v.name, index=index, total=len(videos))
@@ -763,9 +789,17 @@ def markers_write(
     Dad at 0:08…". Editors can click a marker to jump to that frame.
     """
     conn = _db.connect(db_path)
-    videos = _markers.videos_with_named_faces(conn)
+    # Markers come from two sources: named-face appearances and energy peaks.
+    # Union them by video so a clip with no named faces still gets its energy
+    # markers, and a clip with both gets one merged, time-sorted set.
+    by_id: dict[int, str] = {}
+    for vid, path_str in _markers.videos_with_named_faces(conn):
+        by_id[vid] = path_str
+    for vid, path_str in _db.videos_with_energy_peaks(conn):
+        by_id.setdefault(vid, path_str)
+    videos = sorted(by_id.items())
     if not videos:
-        console.print("[yellow]No videos with named faces. Run `label-web` first.[/yellow]")
+        console.print("[yellow]No markers to write (no named faces or energy peaks).[/yellow]")
         raise typer.Exit(0)
 
     _emit("markers-start", total=len(videos))
@@ -785,6 +819,8 @@ def markers_write(
         for idx, (vid, path_str) in enumerate(videos, start=1):
             short = Path(path_str).name
             events = _markers.face_events_for_video(conn, vid)
+            events += [(t, "Energy peak") for t in _db.energy_peaks_for_video(conn, vid)]
+            events.sort()
             _emit("markers-video", name=short, count=len(events), index=idx, total=len(videos))
             try:
                 _markers.write_markers(Path(path_str), events)
