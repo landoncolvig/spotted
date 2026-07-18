@@ -221,6 +221,17 @@ def scan(
             if emb_rows:
                 _db.add_frame_embeddings_bulk(conn, video_id, emb_rows)
             total_faces += face_count
+        # Energy is computed outside the progress bar: it runs its own ffmpeg
+        # audio pass + OpenCV motion pass over the raw file, independent of the
+        # sampled frames above. Non-fatal — a scoring failure never sinks the scan.
+        if energy:
+            try:
+                res = _score_energy(conn, v, video_id, energy_motion)
+                console.print(f"[cyan]{v.name}: {res.bucket} energy[/cyan]")
+                _emit("video-energy", name=v.name, bucket=res.bucket, score=round(res.score, 3), peaks=len(res.peaks))
+            except Exception as e:
+                console.print(f"[yellow]Energy scoring failed for {v.name}: {e}[/yellow]")
+                _emit("energy-skip", name=v.name, reason=str(e))
         _emit("video-done", name=v.name, index=index, total=len(videos), faces=face_count)
 
     _emit("scan-complete", total_faces=total_faces, total_skipped=total_skipped, total_videos=len(videos), total_backfilled=total_backfilled)
@@ -418,6 +429,40 @@ def selftest():
                 )
     except Exception as e:  # noqa: BLE001 - surface any detect/load failure
         console.print(f"[red]face detect FAILED: {e}[/red]")
+        ok = False
+
+    # Energy engine: synthesize a tiny clip (moving pattern + tone) and confirm
+    # the audio pass (ffmpeg decode) and motion pass (OpenCV optical flow) both
+    # run and yield a bucket. Catches a broken ffmpeg-audio or cv2-flow path in
+    # the frozen build the same way the face check catches a broken detector.
+    try:
+        import subprocess
+        import tempfile
+
+        ff = shutil.which("ffmpeg")
+        if not ff:
+            console.print("[red]ffmpeg NOT on PATH (energy needs it)[/red]")
+            ok = False
+        else:
+            with tempfile.TemporaryDirectory() as td:
+                clip = str(Path(td) / "energy_selftest.mp4")
+                subprocess.run(
+                    [ff, "-v", "error", "-y",
+                     "-f", "lavfi", "-i", "testsrc2=size=320x240:rate=15:duration=2",
+                     "-f", "lavfi", "-i", "sine=frequency=440:duration=2",
+                     "-pix_fmt", "yuv420p", "-shortest", clip],
+                    check=True, capture_output=True,
+                )
+                res = _energy.score_clip(clip)
+                if res.bucket in _energy.BUCKETS and res.series.size > 0:
+                    console.print(
+                        f"[green]energy OK[/green] ({res.bucket}; audio={res.have_audio}, motion={res.have_motion})"
+                    )
+                else:
+                    console.print("[red]energy scoring returned nothing usable[/red]")
+                    ok = False
+    except Exception as e:  # noqa: BLE001 - surface any energy failure
+        console.print(f"[red]energy FAILED: {e}[/red]")
         ok = False
 
     if not ok:
