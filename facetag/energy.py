@@ -39,8 +39,10 @@ AUDIO_FLOOR_DBFS = -55.0   # at/below this RMS -> 0 audio energy (near silence)
 AUDIO_CEIL_DBFS = -14.0    # at/above this RMS -> 1 audio energy (loud)
 MOTION_FLOOR = 0.30        # subject-motion residual (px/frame) -> 0
 MOTION_CEIL = 6.0          # subject-motion residual (px/frame) -> 1
-AUDIO_WEIGHT = 0.6         # audio vs motion in the combined score
-MOTION_WEIGHT = 0.4
+# Audio and motion combine as a soft-OR (noisy-OR), not an average: a clip is
+# exciting if it's loud OR moving, and both together boosts. Crucially a
+# missing or silent audio track then contributes 0 without dragging the score
+# down (much home/B-roll footage has no usable audio).
 
 # Clip aggregate -> bucket. The aggregate is the mean of the top 30% of the
 # per-second series ("how intense are the peak moments"), which suits recaps:
@@ -267,19 +269,11 @@ def score_clip(video_path: Path, *, motion: bool = True) -> EnergyResult:
     have_motion = m01.size > 0
 
     n = max(a01.size, m01.size, 1)
-    audio_g = np.pad(a01, (0, n - a01.size)) if have_audio else None
-    motion_g = np.pad(m01, (0, n - m01.size)) if have_motion else None
+    audio_g = np.pad(a01, (0, n - a01.size)) if have_audio else np.zeros(n, dtype=np.float32)
+    motion_g = np.pad(m01, (0, n - m01.size)) if have_motion else np.zeros(n, dtype=np.float32)
 
-    if have_audio and have_motion:
-        combined = AUDIO_WEIGHT * audio_g + MOTION_WEIGHT * motion_g
-    elif have_audio:
-        combined = audio_g
-    elif have_motion:
-        combined = motion_g
-    else:
-        combined = np.zeros(1, dtype=np.float32)
-
-    combined = combined.astype(np.float32)
+    # soft-OR: 1 - (1-a)(1-m). Either signal alone carries; both boost.
+    combined = (1.0 - (1.0 - audio_g) * (1.0 - motion_g)).astype(np.float32)
     score = _aggregate(combined)
     return EnergyResult(
         score=score,
