@@ -78,8 +78,9 @@ jobs:
             exit 1
           fi
           # Exercise the actual bundled binary before it can auto-update to every
-          # user: CLI imports, DB path, exiftool resolution, and MobileCLIP
-          # load+encode. A build that compiles but dies at runtime fails here.
+          # user: CLI imports, DB path, exiftool resolution, MobileCLIP
+          # load+encode, and a real InsightFace face-detect pass (selftest). A
+          # build that compiles but dies at runtime fails here.
           "$BIN" --help >/dev/null
           "$BIN" status --db "$RUNNER_TEMP/smoke.db" >/dev/null
           "$BIN" selftest

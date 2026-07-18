@@ -332,10 +332,11 @@ def activity_suggest(
 
 @app.command()
 def selftest():
-    """Verify the packaged bundle can actually run: exiftool resolves and the
-    MobileCLIP model loads + encodes. Run against the FROZEN binary in CI so a
-    build that compiles but dies at runtime fails the release instead of
-    auto-updating to every user. Exits non-zero on any failure.
+    """Verify the packaged bundle can actually run: exiftool resolves, the
+    MobileCLIP model loads + encodes, and InsightFace detects a face and returns
+    an embedding. Run against the FROZEN binary in CI so a build that compiles
+    but dies at runtime fails the release instead of auto-updating to every
+    user. Exits non-zero on any failure.
     """
     import shutil
 
@@ -363,6 +364,34 @@ def selftest():
                 ok = False
     except Exception as e:  # noqa: BLE001 - surface any load/encode failure
         console.print(f"[red]MobileCLIP FAILED: {e}[/red]")
+        ok = False
+
+    # Real face-detect pass on a known face image. This is the check that would
+    # have caught the 1k3d68 pose crash (None meanshape -> NoneType .shape)
+    # before it auto-updated to the fleet: it runs the actual bundled Detector
+    # and asserts a normalized 512-d embedding comes back.
+    try:
+        from insightface.data import get_image as ins_get_image
+
+        img = ins_get_image("t1")  # bundled 2-face sample
+        if img is None:
+            console.print("[red]InsightFace sample image NOT bundled[/red]")
+            ok = False
+        else:
+            faces = _detect.Detector().detect(img)
+            dim = int(getattr(faces[0].embedding, "shape", (0,))[-1]) if faces else 0
+            if not faces:
+                console.print("[red]face detect returned no faces on the sample[/red]")
+                ok = False
+            elif dim != 512:
+                console.print(f"[red]face embedding is {dim}-d, expected 512[/red]")
+                ok = False
+            else:
+                console.print(
+                    f"[green]face detect OK[/green] ({len(faces)} faces, {dim}-d embedding)"
+                )
+    except Exception as e:  # noqa: BLE001 - surface any detect/load failure
+        console.print(f"[red]face detect FAILED: {e}[/red]")
         ok = False
 
     if not ok:
