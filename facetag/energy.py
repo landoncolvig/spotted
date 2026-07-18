@@ -37,8 +37,8 @@ import numpy as np
 # audio floor/ceiling are the knobs most likely to need per-library tuning.
 AUDIO_FLOOR_DBFS = -55.0   # at/below this RMS -> 0 audio energy (near silence)
 AUDIO_CEIL_DBFS = -14.0    # at/above this RMS -> 1 audio energy (loud)
-MOTION_FLOOR = 0.30        # subject-motion residual (px/frame) -> 0
-MOTION_CEIL = 6.0          # subject-motion residual (px/frame) -> 1
+MOTION_FLOOR = 0.5         # subject-motion residual (px/frame) -> 0
+MOTION_CEIL = 36.0         # subject-motion residual (px/frame) -> 1 (sqrt-scaled)
 # Audio and motion combine as a soft-OR (noisy-OR), not an average: a clip is
 # exciting if it's loud OR moving, and both together boosts. Crucially a
 # missing or silent audio track then contributes 0 without dragging the score
@@ -203,8 +203,11 @@ def motion_residual(video_path: Path, fps: float = 4.0, width: int = 320):
 
 
 def _motion01(residual_px: np.ndarray) -> np.ndarray:
-    span = MOTION_CEIL - MOTION_FLOOR
-    return np.clip((residual_px - MOTION_FLOOR) / span, 0.0, 1.0).astype(np.float32)
+    # sqrt-compress: the residual is heavy-tailed (a whip-pan or fast subject
+    # dwarfs ordinary movement), so a linear scale saturates almost everything.
+    r = np.sqrt(np.maximum(residual_px, 0.0))
+    lo, hi = np.sqrt(MOTION_FLOOR), np.sqrt(MOTION_CEIL)
+    return np.clip((r - lo) / (hi - lo), 0.0, 1.0).astype(np.float32)
 
 
 # --- combine ---------------------------------------------------------------

@@ -1,6 +1,7 @@
 """SQLite-backed index for videos, faces, and people."""
 from __future__ import annotations
 
+import json
 import sqlite3
 from pathlib import Path
 
@@ -82,6 +83,15 @@ def _migrate(conn: sqlite3.Connection) -> None:
         # (so renames/removals take effect) while preserving keywords another
         # tool (Premiere, Photos, Bridge) put in the file.
         conn.execute("ALTER TABLE videos ADD COLUMN spotted_keywords TEXT")
+    if "energy_bucket" not in cols:
+        # Per-clip "energy" (excitement) computed at scan time from audio
+        # loudness + camera-compensated motion. energy_bucket is high|medium|low
+        # (written as the "<bucket> energy" keyword); energy_score is the raw
+        # 0..1 aggregate; energy_peaks is a JSON list of peak timestamps (sec)
+        # turned into timeline markers.
+        conn.execute("ALTER TABLE videos ADD COLUMN energy_score REAL")
+        conn.execute("ALTER TABLE videos ADD COLUMN energy_bucket TEXT")
+        conn.execute("ALTER TABLE videos ADD COLUMN energy_peaks TEXT")
     # hidden_clusters table is created by SCHEMA's IF NOT EXISTS — no migration needed.
     conn.commit()
 
@@ -125,6 +135,57 @@ def set_spotted_keywords(
         "UPDATE videos SET spotted_keywords = ? WHERE id = ?", (value, video_id)
     )
     conn.commit()
+
+
+def set_energy(
+    conn: sqlite3.Connection,
+    video_id: int,
+    score: float,
+    bucket: str,
+    peaks: list[float],
+) -> None:
+    """Store a clip's energy score, bucket, and peak timestamps (JSON)."""
+    conn.execute(
+        "UPDATE videos SET energy_score = ?, energy_bucket = ?, energy_peaks = ? WHERE id = ?",
+        (float(score), bucket, json.dumps([round(float(p), 3) for p in peaks]), video_id),
+    )
+    conn.commit()
+
+
+def video_has_energy(conn: sqlite3.Connection, video_id: int) -> bool:
+    row = conn.execute(
+        "SELECT energy_bucket FROM videos WHERE id = ?", (video_id,)
+    ).fetchone()
+    return bool(row and row[0])
+
+
+def videos_with_energy(conn: sqlite3.Connection) -> dict[str, str]:
+    """Return {video_path: energy_bucket} for every clip that has one scored."""
+    rows = conn.execute(
+        "SELECT path, energy_bucket FROM videos WHERE energy_bucket IS NOT NULL AND energy_bucket != ''"
+    ).fetchall()
+    return {p: b for p, b in rows}
+
+
+def energy_peaks_for_video(conn: sqlite3.Connection, video_id: int) -> list[float]:
+    row = conn.execute(
+        "SELECT energy_peaks FROM videos WHERE id = ?", (video_id,)
+    ).fetchone()
+    if not row or not row[0]:
+        return []
+    try:
+        return [float(t) for t in json.loads(row[0])]
+    except (ValueError, TypeError):
+        return []
+
+
+def videos_with_energy_peaks(conn: sqlite3.Connection) -> list[tuple[int, str]]:
+    """Return [(video_id, path)] for clips that have at least one energy peak."""
+    rows = conn.execute(
+        "SELECT id, path FROM videos WHERE energy_peaks IS NOT NULL "
+        "AND energy_peaks != '' AND energy_peaks != '[]'"
+    ).fetchall()
+    return [(int(i), p) for i, p in rows]
 
 
 def all_batch_tags(conn: sqlite3.Connection) -> list[str]:

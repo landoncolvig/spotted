@@ -83,6 +83,15 @@ def videos_with_keywords(
         "SELECT v.path, a.tag FROM auto_tags a JOIN videos v ON v.id = a.video_id"
     ).fetchall()
 
+    # Energy is applied by default to every scored clip (not gated on faces or
+    # matched activities), so a clip with nothing but an energy reading still
+    # gets its "<bucket> energy" keyword. Honors the same exclude set in case
+    # the review screen later lets a user drop it.
+    energy_rows = conn.execute(
+        "SELECT path, energy_bucket FROM videos "
+        "WHERE energy_bucket IS NOT NULL AND energy_bucket != ''"
+    ).fetchall()
+
     merged: dict[str, set[str]] = {}
     for path, name in person_rows:
         merged.setdefault(path, set()).add(name)
@@ -90,6 +99,11 @@ def videos_with_keywords(
         if tag.strip().lower() in excluded:
             continue
         merged.setdefault(path, set()).add(tag)
+    for path, bucket in energy_rows:
+        kw = f"{bucket} energy"
+        if kw.lower() in excluded:
+            continue
+        merged.setdefault(path, set()).add(kw)
 
     return {p: sorted(s) for p, s in merged.items()}
 
