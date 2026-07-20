@@ -288,48 +288,84 @@ def activity_suggest(
             sample = {"file": Path(sp).name, "tags": [t for t, _ in results[sp]]}
         _emit("activity-complete", total=total, tagged=len(results), sample=sample, matched=_aggregate(results))
 
-    videos = _db.videos_with_embeddings(conn)
-
     # Load the matcher eagerly so a present-but-unloadable model surfaces here
     # (the old lazy load inside apply_auto_tags was unguarded and crashed the
-    # command). If the model can't load OR there are no frame embeddings to
-    # score against, we CANNOT match per clip — but we must not silently drop
-    # the tags the user typed. Fall back to applying every typed tag to every
-    # clip (the pre-v0.0.38 behavior); the review screen still lets them prune.
-    # Losing the user's tags outright is the worst outcome, so this is deliberate.
+    # command).
     encoder = None
     load_error = None
-    if videos:
-        try:
-            encoder = _clip.ClipEncoder()
-            encoder._load()
-        except _clip.ClipUnavailable as e:
-            load_error = str(e)
-            encoder = None
+    try:
+        encoder = _clip.ClipEncoder()
+        encoder._load()
+    except _clip.ClipUnavailable as e:
+        load_error = str(e)
+        encoder = None
 
-    if encoder is None or not videos:
-        reason = (
-            "no frame embeddings (this library was scanned without scene analysis)"
-            if not videos
-            else f"the scene model could not load ({load_error})"
-        )
+    # Self-heal missing embeddings. Matching needs frame embeddings; older
+    # libraries (or any clip scanned face-only) have none. The old behavior was
+    # to blanket-stamp every typed tag onto every clip, which bakes wrong
+    # keywords into files (a "casino, bingo" tag on a nursery shot — the exact
+    # thing users report). Instead, if the scene encoder loaded, compute
+    # embeddings on demand for any indexed clip that lacks them and is still on
+    # disk, then match per clip like normal.
+    if encoder is not None:
+        needs = [
+            (vid, p)
+            for vid, p in conn.execute("SELECT id, path FROM videos").fetchall()
+            if not _db.video_has_embeddings(conn, vid) and Path(p).exists()
+        ]
+        if needs:
+            console.print(f"[cyan]Computing scene embeddings for {len(needs)} clip(s) that lack them…[/cyan]")
+            _emit("activity-backfill-start", total=len(needs))
+            with Progress(
+                TextColumn("[bold cyan]{task.description}"),
+                BarColumn(),
+                TextColumn("{task.completed}/{task.total}"),
+                TimeElapsedColumn(),
+                console=console,
+            ) as prog:
+                task = prog.add_task("scene embeddings", total=len(needs))
+                for i, (vid, p) in enumerate(needs, start=1):
+                    try:
+                        n = _embed_only(conn, encoder, Path(p), vid, 1.0, console)
+                        _emit("activity-backfill", name=Path(p).name, index=i, total=len(needs), embeddings=n)
+                    except Exception as e:  # noqa: BLE001 - one bad clip shouldn't sink the batch
+                        console.print(f"[yellow]Scene embedding failed for {Path(p).name}: {e}[/yellow]")
+                    prog.update(task, advance=1)
+
+    videos = _db.videos_with_embeddings(conn)
+
+    if not videos:
+        # We couldn't get embeddings for anything. Two very different causes:
+        if encoder is None:
+            # The scene model genuinely can't load. This is the ONE case where
+            # blanket-stamping is defensible — we can't match at all, and losing
+            # the user's typed tags outright is worse. Kept deliberately.
+            console.print(
+                f"[yellow]Scene model unavailable ({load_error}). Applying your "
+                f"{len(user_tags)} tag(s) to every clip so they aren't lost — "
+                f"drop wrong ones on the review screen.[/yellow]"
+            )
+            all_videos = conn.execute("SELECT id, path FROM videos").fetchall()
+            if not all_videos:
+                _emit("activity-empty", message="no videos in index")
+                raise typer.Exit(0)
+            stamped: dict[str, list[tuple[str, float]]] = {}
+            for vid, path in all_videos:
+                picks = [(t, 1.0) for t in user_tags]
+                _db.replace_auto_tags(conn, vid, picks)
+                stamped[path] = picks
+            _emit("activity-fallback", reason=f"scene model could not load ({load_error})", tags=user_tags, clips=len(all_videos))
+            _emit_complete(stamped, total=len(all_videos))
+            return
+        # The model loaded but no clip could be analyzed — the indexed files
+        # aren't on disk (moved/renamed/in iCloud). Blanket-stamping here would
+        # just bake garbage; say so plainly instead.
         console.print(
-            f"[yellow]Can't match per clip: {reason}. Applying your "
-            f"{len(user_tags)} tag(s) to every clip instead — drop any wrong "
-            f"ones on the review screen.[/yellow]"
+            "[yellow]No clips available to analyze — none of the indexed files "
+            "are on disk (moved, renamed, or not downloaded from iCloud). Nothing tagged.[/yellow]"
         )
-        all_videos = conn.execute("SELECT id, path FROM videos").fetchall()
-        if not all_videos:
-            _emit("activity-empty", message="no videos in index")
-            raise typer.Exit(0)
-        stamped: dict[str, list[tuple[str, float]]] = {}
-        for vid, path in all_videos:
-            picks = [(t, 1.0) for t in user_tags]
-            _db.replace_auto_tags(conn, vid, picks)
-            stamped[path] = picks
-        _emit("activity-fallback", reason=reason, tags=user_tags, clips=len(all_videos))
-        _emit_complete(stamped, total=len(all_videos))
-        return
+        _emit("activity-empty", message="no clips on disk to analyze")
+        raise typer.Exit(0)
 
     # Precise per-clip matching. Each user tag is its own subject and output
     # label; activity.py's templates wrap and ensemble it (the CLIP zero-shot trick).
