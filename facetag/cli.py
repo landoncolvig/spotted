@@ -242,7 +242,7 @@ def scan(
 @app.command("activity-suggest")
 def activity_suggest(
     db_path: Path = typer.Option(DEFAULT_DB, "--db"),
-    threshold: float = typer.Option(0.10, "--threshold", help="Min cosine similarity (per-video MAX over frames) to apply a tag. Deliberately loose (below the old 0.13) because a missed tag is invisible and unfixable while an extra one is one click to drop on the review screen. Needs one pass on real footage to calibrate; this is the single knob to turn."),
+    threshold: float = typer.Option(0.15, "--threshold", help="Absolute floor (min cosine, per-video MAX over frames) below which a tag is never applied. Selection is otherwise relative — a tag must also stand out for that tag and on that clip — so this is a noise floor, not the primary knob. Calibrated on real footage; raising it trims more aggressively."),
 ):
     """Look for each of the user's typed tags in every clip and apply it only
     where it actually appears.
@@ -379,13 +379,14 @@ def activity_suggest(
     results = _activity.apply_auto_tags(
         conn,
         encoder,
-        threshold=threshold,
-        # A user's own tags: apply any that clear the absolute threshold,
-        # independent of each other. No median-margin (that's for pruning a
-        # big fixed list) and no top-K cap (if a clip genuinely shows 6 of
-        # her tags, write all 6).
+        # Relative selection for the user's own tags: a tag lands on a clip only
+        # if it stands out for that tag AND on that clip, above an absolute
+        # floor. A flat threshold over-tags badly here — CLIP scores are low and
+        # uncalibrated, so e.g. "casino" scores ~0.135 on footage with no casino
+        # and any threshold that catches real matches also stamps it everywhere.
+        relative=True,
+        floor=threshold,
         max_tags_per_video=len(user_tags),
-        use_median_margin=False,
         prompts=prompts,
     )
 

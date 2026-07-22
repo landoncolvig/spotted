@@ -144,6 +144,20 @@ def encode_tag_embeddings(
     return _normalize_rows(averaged)
 
 
+# Relative-selection defaults, calibrated on real footage with MobileCLIP-S2.
+# CLIP cosine scores here are low and compressed (~0.06–0.26) and, worse,
+# uncalibrated across tags: "casino" averages ~0.135 on footage with no casino,
+# as high as "restaurant" on footage that IS a restaurant. So a flat absolute
+# threshold either tags everything (0.10 → ~5.6 clips/tag — the over-tagging
+# users hit) or nothing. Two independent biases cause it: some TAGS score high
+# everywhere, and some CLIPS score high on everything. We neutralize both by
+# requiring a (clip, tag) match to stand out on BOTH axes.
+REL_FLOOR = 0.15       # absolute minimum cosine; kills pure noise
+REL_STRONG = 0.24      # unambiguous match — keep regardless of the relative tests
+REL_K_TAG = 1.0        # per-tag: score must beat that tag's mean by k standard devs
+REL_CLIP_MARGIN = 0.03  # per-clip: score must beat this clip's median tag-score by this
+
+
 def apply_auto_tags(
     conn: sqlite3.Connection,
     encoder: _clip.ClipEncoder,
@@ -153,25 +167,30 @@ def apply_auto_tags(
     margin: float = 0.01,
     use_median_margin: bool = True,
     prompts: Iterable[tuple[str, str]] = CURATED_PROMPTS,
+    relative: bool = False,
+    floor: float = REL_FLOOR,
+    strong: float = REL_STRONG,
+    k_tag: float = REL_K_TAG,
+    clip_margin: float = REL_CLIP_MARGIN,
 ) -> dict[str, list[tuple[str, float]]]:
     """Score every video with frame embeddings against `prompts`, write the
     auto_tags table, return what landed for the caller to display.
 
-    Filters that protect against false positives:
+    Two selection modes:
 
-    - `threshold`: absolute minimum cosine. Below this, the tag isn't applied
-      even if it's a video's top score. This is the primary precision knob.
-    - `margin` (only when `use_median_margin`): a tag must beat the per-video
-      median score by at least this amount. Kills the "everything scores ~0.10,
-      take top-K anyway" pattern that shows up when scoring a large fixed prompt
-      list where a clip matches one prompt strongly and dozens weakly.
+    - Legacy absolute (`relative=False`): a tag lands on a clip if its cosine
+      clears `threshold` (and, when `use_median_margin`, beats that clip's
+      median by `margin`). Kept for the fixed curated prompt list.
 
-    `use_median_margin=False` is the mode for a small user-supplied vocabulary
-    (the tags the person actually typed). There the median trick backfires:
-    with 3 tags, "beat the median" cuts the bottom tag even when it's genuinely
-    present, and lets a top tag through on a clip that has none of them. For a
-    user's own tags we want a pure per-tag absolute-threshold decision — does
-    THIS tag appear in THIS clip, independent of the others.
+    - Relative (`relative=True`, used for the user's own typed tags): a tag
+      lands on a clip only if the score clears `floor` AND is either a `strong`
+      absolute match OR stands out on BOTH axes — above that tag's own
+      mean+`k_tag`·std across the library (so a tag that scores high everywhere,
+      like "casino", doesn't get applied everywhere) and above that clip's
+      median tag-score by `clip_margin` (so a clip that scores high on
+      everything doesn't collect every tag). This is what stops the
+      every-tag-on-every-clip over-tagging while still putting each tag on the
+      clips it actually belongs to.
 
     Returns {video_path: [(tag, score), ...]} sorted highest score first.
     """
@@ -181,16 +200,49 @@ def apply_auto_tags(
     tag_names = [t for _, t in prompts_list]
     prompt_mat = encode_tag_embeddings(encoder, prompts_list)
 
-    out: dict[str, list[tuple[str, float]]] = {}
+    # Pass 1: score every video, holding the full (video × tag) matrix so the
+    # relative mode can compute per-tag statistics across the library.
+    entries: list[tuple[int, str, np.ndarray]] = []
     for vid, path in _db.videos_with_embeddings(conn):
         rows = _db.load_frame_embeddings(conn, vid)
         if not rows:
             continue
-        frame_mat = np.stack([_clip.embedding_from_bytes(b) for _, b in rows])
-        frame_mat = _normalize_rows(frame_mat)
-        scores = score_video(frame_mat, prompt_mat)
-        median = float(np.median(scores))
+        frame_mat = _normalize_rows(np.stack([_clip.embedding_from_bytes(b) for _, b in rows]))
+        entries.append((vid, path, score_video(frame_mat, prompt_mat)))
+    if not entries:
+        return {}
 
+    out: dict[str, list[tuple[str, float]]] = {}
+
+    if relative:
+        M = np.array([s for _, _, s in entries])           # (n_vid, n_tags)
+        tag_mean = M.mean(axis=0)
+        tag_std = M.std(axis=0)
+        # Per-tag standout needs a few clips to have a meaningful distribution;
+        # with fewer, fall back to the absolute floor (+ strong) alone.
+        enough = len(entries) >= 3
+        for vid, path, scores in entries:
+            clip_median = float(np.median(scores))
+            picks: list[tuple[str, float]] = []
+            for j in range(len(tag_names)):
+                s = float(scores[j])
+                if s < floor:
+                    continue
+                if s >= strong or not enough:
+                    picks.append((tag_names[j], s))
+                    continue
+                per_tag = s >= tag_mean[j] + k_tag * tag_std[j]
+                per_clip = s >= clip_median + clip_margin
+                if per_tag and per_clip:
+                    picks.append((tag_names[j], s))
+            picks = sorted(picks, key=lambda x: -x[1])[:max_tags_per_video]
+            _db.replace_auto_tags(conn, vid, picks)
+            if picks:
+                out[path] = picks
+        return out
+
+    for vid, path, scores in entries:
+        median = float(np.median(scores))
         picks = sorted(
             (
                 (tag_names[i], float(scores[i]))
@@ -200,7 +252,6 @@ def apply_auto_tags(
             ),
             key=lambda x: -x[1],
         )[:max_tags_per_video]
-
         _db.replace_auto_tags(conn, vid, picks)
         if picks:
             out[path] = picks
