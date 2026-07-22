@@ -436,9 +436,25 @@ body {
   color: var(--text-faint);
   text-align: center;
 }
+.tags__overwrite {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin-top: 12px;
+  font-size: 11px;
+  color: var(--text-faint);
+  text-align: left;
+  cursor: pointer;
+}
+.tags__overwrite input {
+  margin-top: 1px;
+  accent-color: var(--accent);
+  cursor: pointer;
+  flex: none;
+}
 .tags__actions {
   display: flex; gap: 10px; justify-content: center;
-  margin-top: 6px;
+  margin-top: 12px;
 }
 
 /* LABEL */

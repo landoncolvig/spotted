@@ -61,9 +61,14 @@ const tagsPath = document.getElementById("tags-path") as HTMLElement;
 const tagsInput = document.getElementById("tags-input") as HTMLInputElement;
 const tagsStart = document.getElementById("tags-start") as HTMLButtonElement;
 const tagsSkip = document.getElementById("tags-skip") as HTMLButtonElement;
+const tagsOverwrite = document.getElementById("tags-overwrite") as HTMLInputElement;
 
 const LABEL_PORT = 8765;
 let currentPath: string | null = null;
+// Whether the final tag-write replaces each clip's whole keyword set (start
+// fresh) vs merging. Captured from the tags-screen checkbox when a run begins,
+// because that screen is gone by the time keywords are written.
+let overwriteKeywords = false;
 
 function setState(s: State) {
   stage.setAttribute("data-state", s);
@@ -605,7 +610,7 @@ async function runWrite(excludeTags: string[]) {
   workingLabel.textContent = "Writing keywords";
   workingDetail.textContent = "Running exiftool, per clip…";
   try {
-    await invoke<number>("tag_videos", { excludeTags });
+    await invoke<number>("tag_videos", { excludeTags, overwrite: overwriteKeywords });
 
     // Markers are a bonus — Premiere/DaVinci-only feature. Failures here
     // should not break the flow because keywords already succeeded.
@@ -1388,10 +1393,12 @@ function flashToast(msg: string, isError = false) {
 function wireTagsScreen() {
   tagsStart.addEventListener("click", () => {
     if (!currentPath) return;
+    overwriteKeywords = tagsOverwrite.checked;
     runBatch(currentPath, readTagsInput());
   });
   tagsSkip.addEventListener("click", () => {
     if (!currentPath) return;
+    overwriteKeywords = tagsOverwrite.checked;
     runBatch(currentPath, []);
   });
   tagsInput.addEventListener("keydown", (e) => {

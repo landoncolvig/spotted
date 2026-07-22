@@ -177,12 +177,20 @@ async fn tag_videos(
     app: AppHandle,
     window: Window,
     exclude_tags: Option<Vec<String>>,
+    overwrite: Option<bool>,
 ) -> Result<i32, String> {
     let mut args = vec!["tag-write".to_string()];
     let excluded = exclude_tags.unwrap_or_default();
     if !excluded.is_empty() {
         args.push("--exclude-tags".to_string());
         args.push(excluded.join(","));
+    }
+    // Overwrite replaces each clip's whole keyword set with Spotted's current
+    // one (vs the default merge, which only swaps Spotted's own prior tags).
+    // Lets a user re-run a clip and get a clean slate instead of accumulation.
+    let overwrite = overwrite.unwrap_or(false);
+    if overwrite {
+        args.push("--overwrite".to_string());
     }
     let result = run_sidecar(app, window, args).await;
     let mut payload = HashMap::new();
@@ -191,6 +199,7 @@ async fn tag_videos(
         if result.is_ok() { "ok" } else { "error" }.into(),
     );
     payload.insert("excluded".into(), excluded.len().to_string());
+    payload.insert("overwrite".into(), overwrite.to_string());
     telemetry::track("tag-write-complete", payload);
     result
 }
