@@ -77,7 +77,7 @@ def _embed_only(conn, clip_encoder, video_path, video_id: int, sample_fps: float
     return written
 
 
-def _clip_thumb_datauri(path: str, cache: dict, *, width: int = 160) -> str | None:
+def _clip_thumb_datauri(path: str, cache: dict, *, width: int = 128) -> str | None:
     """Small base64 JPEG data-URI (a frame ~1s into the clip) so the activity
     review can SHOW which clips a tag matched, the way faces show a photo grid.
 
@@ -308,7 +308,10 @@ def activity_suggest(
         rollup: list[dict] = []
         for t, hits in agg.items():
             ordered = sorted(hits, key=lambda x: -x[1])
-            thumbs = [u for p, _ in ordered[:6] if (u := _clip_thumb_datauri(p, thumb_cache))]
+            # Cap thumbnails per tag: enough to preview what matched (the count
+            # carries the total) while keeping the base64 payload on the emit
+            # line well within the shell reader's per-line budget.
+            thumbs = [u for p, _ in ordered[:4] if (u := _clip_thumb_datauri(p, thumb_cache))]
             rollup.append({
                 "tag": t,
                 "clips": len(hits),
