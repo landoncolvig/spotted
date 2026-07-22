@@ -549,6 +549,22 @@ body {
   font-size: 11px; color: var(--text-dim);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
+/* Clip thumbnails for a matched tag, pushed to the right of the row. */
+.review-row__thumbs {
+  display: flex;
+  gap: 6px;
+  margin-left: auto;
+  flex: 0 1 auto;
+  overflow: hidden;
+}
+.review-thumb {
+  width: 64px; height: 40px;
+  object-fit: cover;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  flex: none;
+  background: var(--surface-2);
+}
 /* Unchecked rows read as "won't be written". */
 .review-row:has(.review-check:not(:checked)) { opacity: 0.45; }
 .review-bar {

@@ -8,7 +8,7 @@ import {
 } from "@tauri-apps/plugin-notification";
 
 type State = "idle" | "tags" | "working" | "label" | "review" | "library" | "done";
-type MatchedTag = { tag: string; clips: number; peak: number; sample: string };
+type MatchedTag = { tag: string; clips: number; peak: number; sample: string; thumbs?: string[] };
 type SidecarLine = { kind: "stdout" | "stderr"; line: string };
 type SpottedEvent =
   | { event: "scan-start"; total: number }
@@ -569,6 +569,20 @@ function renderReview(matched: MatchedTag[]) {
     meta.textContent = `${m.clips} clip${m.clips === 1 ? "" : "s"} · e.g. ${m.sample}`;
     main.append(name, meta);
     row.append(input, main);
+    // Thumbnails of the clips this tag matched, so the user can SEE what it's
+    // tagging (faces get a photo grid; this brings the same to activities).
+    if (m.thumbs && m.thumbs.length) {
+      const thumbs = makeEl("div", "review-row__thumbs");
+      for (const src of m.thumbs) {
+        const img = document.createElement("img");
+        img.className = "review-thumb";
+        img.src = src;
+        img.alt = m.tag;
+        img.loading = "lazy";
+        thumbs.appendChild(img);
+      }
+      row.appendChild(thumbs);
+    }
     list.appendChild(row);
     checks.push(input);
   }

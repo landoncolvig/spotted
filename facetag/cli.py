@@ -1,7 +1,9 @@
 """CLI entry point. `facetag --help` to explore."""
 from __future__ import annotations
 
+import base64
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -73,6 +75,33 @@ def _embed_only(conn, clip_encoder, video_path, video_id: int, sample_fps: float
         _db.add_frame_embeddings_bulk(conn, video_id, pending)
         written += len(pending)
     return written
+
+
+def _clip_thumb_datauri(path: str, cache: dict, *, width: int = 160) -> str | None:
+    """Small base64 JPEG data-URI (a frame ~1s into the clip) so the activity
+    review can SHOW which clips a tag matched, the way faces show a photo grid.
+
+    Data URI (not a file path) so the webview can render it without any Tauri
+    file-scope config. Cached per path; returns None if extraction fails and the
+    review just omits that thumbnail.
+    """
+    if path in cache:
+        return cache[path]
+    uri = None
+    for seek in ("1", "0"):  # ~1s in, then the very start for sub-1s clips
+        try:
+            out = subprocess.run(
+                ["ffmpeg", "-v", "error", "-ss", seek, "-i", path, "-frames:v", "1",
+                 "-vf", f"scale={width}:-2", "-c:v", "mjpeg", "-f", "image2pipe", "-"],
+                capture_output=True, timeout=15,
+            ).stdout
+            if out:
+                uri = "data:image/jpeg;base64," + base64.b64encode(out).decode("ascii")
+                break
+        except Exception:  # noqa: BLE001 - a bad clip just loses its thumbnail
+            pass
+    cache[path] = uri
+    return uri
 
 
 def _score_energy(conn, video_path, video_id: int, do_motion: bool):
@@ -268,18 +297,26 @@ def activity_suggest(
         raise typer.Exit(0)
 
     def _aggregate(results: dict[str, list[tuple[str, float]]]) -> list[dict]:
-        """Per-tag rollup the review screen reads: clip count, peak score, a sample."""
+        """Per-tag rollup the review screen reads: clip count, peak score, a
+        sample name, and up to a few clip thumbnails so the user can SEE what
+        each tag matched instead of trusting a bare count."""
         agg: dict[str, list[tuple[str, float]]] = defaultdict(list)
         for path, picks in results.items():
             for t, s in picks:
-                agg[t].append((Path(path).name, s))
-        return sorted(
-            (
-                {"tag": t, "clips": len(hits), "peak": round(max(s for _, s in hits), 3), "sample": hits[0][0]}
-                for t, hits in agg.items()
-            ),
-            key=lambda m: (-m["clips"], -m["peak"]),
-        )
+                agg[t].append((path, s))
+        thumb_cache: dict = {}
+        rollup: list[dict] = []
+        for t, hits in agg.items():
+            ordered = sorted(hits, key=lambda x: -x[1])
+            thumbs = [u for p, _ in ordered[:6] if (u := _clip_thumb_datauri(p, thumb_cache))]
+            rollup.append({
+                "tag": t,
+                "clips": len(hits),
+                "peak": round(max(s for _, s in hits), 3),
+                "sample": Path(ordered[0][0]).name,
+                "thumbs": thumbs,
+            })
+        return sorted(rollup, key=lambda m: (-m["clips"], -m["peak"]))
 
     def _emit_complete(results: dict[str, list[tuple[str, float]]], total: int) -> None:
         sample = None
