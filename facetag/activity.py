@@ -158,6 +158,31 @@ REL_K_TAG = 1.0        # per-tag: score must beat that tag's mean by k standard 
 REL_CLIP_MARGIN = 0.03  # per-clip: score must beat this clip's median tag-score by this
 
 
+def relative_keep(
+    M: np.ndarray,
+    *,
+    floor: float = REL_FLOOR,
+    strong: float = REL_STRONG,
+    k_tag: float = REL_K_TAG,
+    clip_margin: float = REL_CLIP_MARGIN,
+) -> np.ndarray:
+    """Boolean (video × tag) keep-mask for relative tag selection.
+
+    Keep (v, t) iff score >= floor AND (score >= strong OR it stands out on BOTH
+    axes: above tag t's mean + k_tag·std across clips, and above clip v's median
+    tag-score + clip_margin). With fewer than 3 clips the per-tag distribution
+    is unreliable, so fall back to the floor alone.
+    """
+    M = np.asarray(M, dtype=np.float32)
+    keep = M >= floor
+    if M.shape[0] >= 3:
+        tag_cut = M.mean(axis=0) + k_tag * M.std(axis=0)          # (T,) per-tag
+        clip_cut = (np.median(M, axis=1) + clip_margin)[:, None]  # (V, 1) per-clip
+        standout = (M >= tag_cut) & (M >= clip_cut)
+        keep &= (M >= strong) | standout
+    return keep
+
+
 def apply_auto_tags(
     conn: sqlite3.Connection,
     encoder: _clip.ClipEncoder,
@@ -215,27 +240,13 @@ def apply_auto_tags(
     out: dict[str, list[tuple[str, float]]] = {}
 
     if relative:
-        M = np.array([s for _, _, s in entries])           # (n_vid, n_tags)
-        tag_mean = M.mean(axis=0)
-        tag_std = M.std(axis=0)
-        # Per-tag standout needs a few clips to have a meaningful distribution;
-        # with fewer, fall back to the absolute floor (+ strong) alone.
-        enough = len(entries) >= 3
-        for vid, path, scores in entries:
-            clip_median = float(np.median(scores))
-            picks: list[tuple[str, float]] = []
-            for j in range(len(tag_names)):
-                s = float(scores[j])
-                if s < floor:
-                    continue
-                if s >= strong or not enough:
-                    picks.append((tag_names[j], s))
-                    continue
-                per_tag = s >= tag_mean[j] + k_tag * tag_std[j]
-                per_clip = s >= clip_median + clip_margin
-                if per_tag and per_clip:
-                    picks.append((tag_names[j], s))
-            picks = sorted(picks, key=lambda x: -x[1])[:max_tags_per_video]
+        M = np.array([s for _, _, s in entries], dtype=np.float32)   # (n_vid, n_tags)
+        keep = relative_keep(M, floor=floor, strong=strong, k_tag=k_tag, clip_margin=clip_margin)
+        for i, (vid, path, scores) in enumerate(entries):
+            picks = sorted(
+                ((tag_names[j], float(scores[j])) for j in range(len(tag_names)) if keep[i, j]),
+                key=lambda x: -x[1],
+            )[:max_tags_per_video]
             _db.replace_auto_tags(conn, vid, picks)
             if picks:
                 out[path] = picks
