@@ -95,6 +95,19 @@ PROMPT_TEMPLATES: list[str] = [
     "a home video of {}",
 ]
 
+# Map a bare user tag to the curated, more-specific subject phrase when we have
+# one — "pool" -> "a swimming pool", "wedding" -> "a wedding ceremony", "baby"
+# -> "a baby". CLIP is far more accurate on a concrete noun phrase than a lone
+# ambiguous word (a bare "pool" also matches pool tables and puddles), which is
+# why the curated list uses phrases. User-typed tags get the same benefit.
+CURATED_BY_TAG: dict[str, str] = {tag: subject for subject, tag in CURATED_PROMPTS}
+
+
+def enrich_tag(tag: str) -> str:
+    """The best CLIP subject phrase for a user tag: the curated description when
+    we have one, else the tag exactly as typed."""
+    return CURATED_BY_TAG.get(tag.strip().lower(), tag)
+
 
 def _normalize_rows(mat: np.ndarray) -> np.ndarray:
     """L2-normalize each row, returning a (N, D) array safe to dot against."""
@@ -168,18 +181,25 @@ def relative_keep(
 ) -> np.ndarray:
     """Boolean (video × tag) keep-mask for relative tag selection.
 
-    Keep (v, t) iff score >= floor AND (score >= strong OR it stands out on BOTH
-    axes: above tag t's mean + k_tag·std across clips, and above clip v's median
-    tag-score + clip_margin). With fewer than 3 clips the per-tag distribution
-    is unreliable, so fall back to the floor alone.
+    Keep (v, t) iff score >= floor AND it stands out for tag t (above t's
+    mean + k_tag·std across clips) AND EITHER it also stands out on clip v
+    (above v's median tag-score + clip_margin) OR it's a strong absolute match.
+
+    The per-tag stand-out is required even for a strong match: otherwise a tag
+    CLIP loves — "baby" on family footage, say, scoring high almost everywhere —
+    clears the strong bar on every clip and gets stamped on all of them. Strong
+    only lets a distinctive tag skip the per-CLIP test (a busy clip that scores
+    high on several tags), not the per-tag one. With fewer than 3 clips the
+    per-tag distribution is unreliable, so fall back to the floor alone.
     """
     M = np.asarray(M, dtype=np.float32)
     keep = M >= floor
     if M.shape[0] >= 3:
         tag_cut = M.mean(axis=0) + k_tag * M.std(axis=0)          # (T,) per-tag
         clip_cut = (np.median(M, axis=1) + clip_margin)[:, None]  # (V, 1) per-clip
-        standout = (M >= tag_cut) & (M >= clip_cut)
-        keep &= (M >= strong) | standout
+        per_tag = M >= tag_cut
+        per_clip = M >= clip_cut
+        keep &= per_tag & (per_clip | (M >= strong))
     return keep
 
 

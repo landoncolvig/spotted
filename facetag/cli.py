@@ -407,9 +407,11 @@ def activity_suggest(
         _emit("activity-empty", message="no clips on disk to analyze")
         raise typer.Exit(0)
 
-    # Precise per-clip matching. Each user tag is its own subject and output
-    # label; activity.py's templates wrap and ensemble it (the CLIP zero-shot trick).
-    prompts = [(t, t) for t in user_tags]
+    # Precise per-clip matching. Encode each tag with the most-specific subject
+    # we have (curated phrase when known, e.g. "pool" -> "a swimming pool"), but
+    # keep the user's word as the written label; activity.py's templates wrap and
+    # ensemble it (the CLIP zero-shot trick).
+    prompts = [(_activity.enrich_tag(t), t) for t in user_tags]
 
     _emit("activity-start", total=len(videos))
     console.print(

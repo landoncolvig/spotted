@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from facetag.activity import relative_keep
+from facetag.activity import enrich_tag, relative_keep
 
 # tags:   restaurant  casino  graduation
 M = np.array([
@@ -59,3 +59,26 @@ def test_few_clips_fall_back_to_floor():
     two = np.array([[0.25, 0.05], [0.10, 0.20]], dtype=np.float32)
     keep = relative_keep(two, floor=0.15)
     assert keep.tolist() == [[True, False], [False, True]]
+
+
+def test_strong_but_not_standout_tag_not_stamped_everywhere():
+    # "baby" (col 0) clears the strong bar (>=0.24) on every clip but is only
+    # distinctive on clip0. The tightening keeps it where it stands out for the
+    # tag, not on all four — the "baby everywhere" complaint.
+    M = np.array([
+        [0.30, 0.10],
+        [0.25, 0.11],
+        [0.25, 0.30],
+        [0.24, 0.10],
+    ], dtype=np.float32)
+    keep = relative_keep(M)
+    assert keep[:, 0].sum() < 4     # not on every clip
+    assert keep[0, 0]               # kept where it genuinely stands out
+
+
+def test_enrich_tag_uses_curated_phrase():
+    assert enrich_tag("pool") == "a swimming pool"
+    assert enrich_tag("wedding") == "a wedding ceremony"
+    assert enrich_tag("baby") == "a baby"
+    assert enrich_tag("Pool") == "a swimming pool"   # case-insensitive
+    assert enrich_tag("kayaking") == "kayaking"       # unknown passes through
