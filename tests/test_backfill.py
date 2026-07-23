@@ -54,11 +54,15 @@ def test_db_helpers_roundtrip(tmp_path):
 
 
 def _seed_preclip_video(conn, path_str: str) -> int:
-    """Simulate a pre-activity-detection scan: one face, zero embeddings."""
+    """Simulate a pre-activity-detection scan: one face, zero embeddings, and
+    marked scan-complete — a real pre-CLIP library reaches that state via the
+    migration backfill (which sets scan_complete=1 for clips that already have
+    faces), and is_scanned now keys off that flag rather than face existence."""
     vid = _db.add_video(conn, path_str, 1.0)
     _db.add_faces_bulk(
         conn, vid, [(0.0, (1, 2, 3, 4), np.ones(512, dtype=np.float32))]
     )
+    _db.mark_scan_complete(conn, vid)
     conn.commit()
     return vid
 
