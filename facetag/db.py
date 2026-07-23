@@ -92,6 +92,18 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE videos ADD COLUMN energy_score REAL")
         conn.execute("ALTER TABLE videos ADD COLUMN energy_bucket TEXT")
         conn.execute("ALTER TABLE videos ADD COLUMN energy_peaks TEXT")
+    if "scan_complete" not in cols:
+        # A reliable "this clip finished scanning" flag. is_scanned used to infer
+        # it from "has >=1 face row", which mis-fires both ways: a clip that
+        # crashed mid-scan looked done (and got skipped forever, losing the rest
+        # of its faces/embeddings), and a legitimately face-less clip never
+        # looked done (so it re-embedded on every re-drop). Backfill 1 for clips
+        # that already have faces so existing libraries aren't force-rescanned.
+        conn.execute("ALTER TABLE videos ADD COLUMN scan_complete INTEGER NOT NULL DEFAULT 0")
+        conn.execute(
+            "UPDATE videos SET scan_complete = 1 "
+            "WHERE EXISTS (SELECT 1 FROM faces f WHERE f.video_id = videos.id)"
+        )
     # hidden_clusters table is created by SCHEMA's IF NOT EXISTS — no migration needed.
     conn.commit()
 
@@ -221,13 +233,23 @@ def add_video(conn: sqlite3.Connection, path: str, duration_sec: float) -> int:
 
 
 def is_scanned(conn: sqlite3.Connection, path: str) -> bool:
+    """True only if this clip finished a full scan (see the scan_complete flag).
+
+    Keyed off scan_complete rather than face existence so a clip that crashed
+    mid-scan is re-scanned (not skipped forever) and a face-less clip counts as
+    done (not re-embedded on every re-drop)."""
     row = conn.execute(
-        "SELECT v.id FROM videos v WHERE v.path = ? "
-        "AND EXISTS (SELECT 1 FROM faces f WHERE f.video_id = v.id) "
-        "LIMIT 1",
+        "SELECT 1 FROM videos WHERE path = ? AND scan_complete = 1 LIMIT 1",
         (path,),
     ).fetchone()
     return row is not None
+
+
+def mark_scan_complete(conn: sqlite3.Connection, video_id: int) -> None:
+    """Flag a clip as fully scanned — called only after its faces, embeddings,
+    and energy have all been written, so a partial/crashed scan never sticks."""
+    conn.execute("UPDATE videos SET scan_complete = 1 WHERE id = ?", (video_id,))
+    conn.commit()
 
 
 def video_id_for_path(conn: sqlite3.Connection, path: str) -> int | None:

@@ -169,6 +169,11 @@ def scan(
             # nothing), and (2) energy for libraries scanned before energy
             # shipped. Do whichever is missing; only count as skipped if neither.
             vid = _db.video_id_for_path(conn, path_str)
+            # Re-drop with new tags: update this clip's batch vocabulary so
+            # activity-suggest re-matches the words she just typed instead of
+            # silently keeping the original set (the clip is otherwise skipped).
+            if batch_tags and vid is not None:
+                _db.set_batch_tags(conn, vid, batch_tags)
             did_backfill = False
             if clip_encoder is not None and vid is not None and not _db.video_has_embeddings(conn, vid):
                 _emit("video-backfill", name=v.name, index=index, total=len(videos))
@@ -195,73 +200,87 @@ def scan(
                 total_skipped += 1
                 _emit("video-skip", name=v.name, index=index, total=len(videos))
             continue
+        # The whole per-clip body is guarded: a probe error, a detector crash,
+        # or any other failure skips THIS clip and moves on — it never aborts
+        # the batch (clips after a bad one used to be lost). scan_complete is
+        # only set at the very end, so a crash leaves the clip re-scannable.
         try:
             duration, _, _ = _extract.probe(v)
-        except Exception as e:
-            console.print(f"[yellow]Skipping {v.name}: probe failed ({e})[/yellow]")
-            _emit("video-skip", name=v.name, index=index, total=len(videos), reason="probe-failed")
-            continue
-        _emit("video-start", name=v.name, index=index, total=len(videos), duration_sec=duration)
+            _emit("video-start", name=v.name, index=index, total=len(videos), duration_sec=duration)
 
-        video_id = _db.add_video(conn, path_str, duration)
-        if batch_tags:
-            _db.set_batch_tags(conn, video_id, batch_tags)
-        if rescan:
+            video_id = _db.add_video(conn, path_str, duration)
+            if batch_tags:
+                _db.set_batch_tags(conn, video_id, batch_tags)
+            # Reaching here means the clip isn't marked complete, so we're doing
+            # a full (re-)scan: wipe any prior partial faces/embeddings first so
+            # a resumed or repeated scan can't accumulate duplicate rows.
             _db.clear_video_faces(conn, video_id)
             _db.clear_video_embeddings(conn, video_id)
 
-        rows: list = []
-        emb_rows: list[tuple[float, bytes]] = []
-        approx_frames = max(1, int(duration * sample_fps))
-        with Progress(
-            TextColumn("[bold cyan]{task.description}"),
-            BarColumn(),
-            TextColumn("{task.completed}/{task.total} frames"),
-            TextColumn("[green]{task.fields[faces]} faces"),
-            TimeElapsedColumn(),
-            TimeRemainingColumn(),
-            console=console,
-        ) as prog:
-            task = prog.add_task(v.name[:50], total=approx_frames, faces=0)
-            face_count = 0
-            for t, frame in _extract.iter_frames(v, sample_fps=sample_fps):
-                faces = detector.detect(frame)
-                for f in faces:
-                    rows.append((t, f.bbox, f.embedding))
-                face_count += len(faces)
-                if clip_encoder is not None:
+            rows: list = []
+            emb_rows: list[tuple[float, bytes]] = []
+            approx_frames = max(1, int(duration * sample_fps))
+            with Progress(
+                TextColumn("[bold cyan]{task.description}"),
+                BarColumn(),
+                TextColumn("{task.completed}/{task.total} frames"),
+                TextColumn("[green]{task.fields[faces]} faces"),
+                TimeElapsedColumn(),
+                TimeRemainingColumn(),
+                console=console,
+            ) as prog:
+                task = prog.add_task(v.name[:50], total=approx_frames, faces=0)
+                face_count = 0
+                for t, frame in _extract.iter_frames(v, sample_fps=sample_fps):
                     try:
-                        emb = clip_encoder.encode_image(frame)
-                        emb_rows.append((t, _clip.embedding_to_bytes(emb)))
-                    except Exception as e:
-                        # Don't fail the whole scan on one bad frame; log once.
-                        if not getattr(scan, "_clip_warned", False):
-                            console.print(f"[yellow]Activity encoding failed on a frame: {e}[/yellow]")
-                            scan._clip_warned = True
-                prog.update(task, advance=1, faces=face_count)
-                if len(rows) >= 500:
+                        faces = detector.detect(frame)
+                    except Exception as e:  # noqa: BLE001 - one bad frame must not sink the clip
+                        if not getattr(scan, "_detect_warned", False):
+                            console.print(f"[yellow]Face detection failed on a frame: {e}[/yellow]")
+                            scan._detect_warned = True
+                        faces = []
+                    for f in faces:
+                        rows.append((t, f.bbox, f.embedding))
+                    face_count += len(faces)
+                    if clip_encoder is not None:
+                        try:
+                            emb = clip_encoder.encode_image(frame)
+                            emb_rows.append((t, _clip.embedding_to_bytes(emb)))
+                        except Exception as e:
+                            # Don't fail the whole scan on one bad frame; log once.
+                            if not getattr(scan, "_clip_warned", False):
+                                console.print(f"[yellow]Activity encoding failed on a frame: {e}[/yellow]")
+                                scan._clip_warned = True
+                    prog.update(task, advance=1, faces=face_count)
+                    if len(rows) >= 500:
+                        _db.add_faces_bulk(conn, video_id, rows)
+                        rows.clear()
+                    if len(emb_rows) >= 200:
+                        _db.add_frame_embeddings_bulk(conn, video_id, emb_rows)
+                        emb_rows.clear()
+                if rows:
                     _db.add_faces_bulk(conn, video_id, rows)
-                    rows.clear()
-                if len(emb_rows) >= 200:
+                if emb_rows:
                     _db.add_frame_embeddings_bulk(conn, video_id, emb_rows)
-                    emb_rows.clear()
-            if rows:
-                _db.add_faces_bulk(conn, video_id, rows)
-            if emb_rows:
-                _db.add_frame_embeddings_bulk(conn, video_id, emb_rows)
-            total_faces += face_count
-        # Energy is computed outside the progress bar: it runs its own ffmpeg
-        # audio pass + OpenCV motion pass over the raw file, independent of the
-        # sampled frames above. Non-fatal — a scoring failure never sinks the scan.
-        if energy:
-            try:
-                res = _score_energy(conn, v, video_id, energy_motion)
-                console.print(f"[cyan]{v.name}: {res.bucket} energy[/cyan]")
-                _emit("video-energy", name=v.name, bucket=res.bucket, score=round(res.score, 3), peaks=len(res.peaks))
-            except Exception as e:
-                console.print(f"[yellow]Energy scoring failed for {v.name}: {e}[/yellow]")
-                _emit("energy-skip", name=v.name, reason=str(e))
-        _emit("video-done", name=v.name, index=index, total=len(videos), faces=face_count)
+                total_faces += face_count
+            # Energy runs its own ffmpeg audio + OpenCV motion pass over the raw
+            # file, independent of the sampled frames. Non-fatal on its own.
+            if energy:
+                try:
+                    res = _score_energy(conn, v, video_id, energy_motion)
+                    console.print(f"[cyan]{v.name}: {res.bucket} energy[/cyan]")
+                    _emit("video-energy", name=v.name, bucket=res.bucket, score=round(res.score, 3), peaks=len(res.peaks))
+                except Exception as e:
+                    console.print(f"[yellow]Energy scoring failed for {v.name}: {e}[/yellow]")
+                    _emit("energy-skip", name=v.name, reason=str(e))
+            # Faces, embeddings, and energy are all written — safe to mark done.
+            _db.mark_scan_complete(conn, video_id)
+            _emit("video-done", name=v.name, index=index, total=len(videos), faces=face_count)
+        except Exception as e:  # noqa: BLE001 - a bad clip skips; it never aborts the batch
+            console.print(f"[yellow]Skipping {v.name}: scan failed ({e})[/yellow]")
+            _emit("video-skip", name=v.name, index=index, total=len(videos), reason="scan-failed")
+            total_skipped += 1
+            continue
 
     _emit("scan-complete", total_faces=total_faces, total_skipped=total_skipped, total_videos=len(videos), total_backfilled=total_backfilled)
     backfill_note = f", {total_backfilled} backfilled for activity tagging" if total_backfilled else ""
@@ -578,8 +597,13 @@ def cluster(
     if recluster or not _db.has_clusters(conn):
         face_ids, embs = _db.all_embeddings(conn)
         if not face_ids:
-            console.print("[red]No faces in index. Run `facetag scan` first.[/red]")
-            raise typer.Exit(1)
+            # Not an error: a folder of faceless footage (b-roll, landscape,
+            # drone) is legitimate, and the user may still want scene/activity
+            # tags. Exit 0 so the flow continues to activity-suggest instead of
+            # showing a hard error that blocks the second headline feature.
+            console.print("[yellow]No faces detected — skipping face clustering.[/yellow]")
+            _emit("cluster-empty")
+            raise typer.Exit(0)
         _emit("cluster-start", faces=len(face_ids))
         console.print(f"Clustering {len(face_ids)} faces…")
         labels = _cluster.cluster_embeddings(embs, min_cluster_size=min_size, epsilon=epsilon)

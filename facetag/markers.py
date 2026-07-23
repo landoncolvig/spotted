@@ -96,8 +96,12 @@ def write_markers(video_path: Path, face_events: list[tuple[float, str]]) -> Non
     Pro and DaVinci Resolve render these as clickable marker icons on the
     timeline scrubber when the clip is loaded.
 
-    Idempotent: clears existing Markers (-=) before writing the new set,
-    so re-running doesn't duplicate.
+    Idempotent: clears existing Markers before writing the new set, so
+    re-running doesn't duplicate. The clear is a SEPARATE exiftool call —
+    combining a clear and `+=` on the same list tag in one invocation silently
+    drops the clear (the same footgun documented in tag.py), and `-Markers-=`
+    with no value clears nothing, so the old code duplicated every marker on
+    each run.
 
     StartTime is written in seconds (e.g. "10.5s") which is what Premiere
     expects. Duration is left short (0.5s) so markers display as point
@@ -109,7 +113,17 @@ def write_markers(video_path: Path, face_events: list[tuple[float, str]]) -> Non
         return
     exe = _exiftool()
 
-    args: list[str] = [exe, "-overwrite_original", "-q", "-XMP-xmpDM:Markers-="]
+    clear = subprocess.run(
+        [exe, "-overwrite_original", "-q", "-XMP-xmpDM:Markers=", str(video_path)],
+        capture_output=True, text=True,
+    )
+    if clear.returncode != 0:
+        raise RuntimeError(
+            f"exiftool marker clear failed on {video_path.name}: "
+            f"{clear.stderr.strip() or clear.stdout.strip()}"
+        )
+
+    args: list[str] = [exe, "-overwrite_original", "-q"]
     # De-dupe (timestamp, name) collisions
     seen: set[tuple[int, str]] = set()
     for t, name in sorted(face_events):

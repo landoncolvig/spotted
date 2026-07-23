@@ -255,6 +255,11 @@ pub fn init_sentry() -> Option<sentry::ClientInitGuard> {
             // flag that defaults to false but we set it explicitly to
             // make intent unmistakable for anyone auditing.
             send_default_pii: false,
+            // send_default_pii does NOT cover server_name, which the SDK
+            // otherwise auto-fills from the OS hostname — routinely the user's
+            // real name (e.g. "Ellies-MacBook-Pro"). Pin it to a constant so no
+            // crash report ships the machine name.
+            server_name: Some("anonymous".into()),
             // Anonymize sender by setting the user via the install hash,
             // not the raw IP / hostname Sentry would auto-collect.
             ..Default::default()

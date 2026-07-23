@@ -1,6 +1,7 @@
 """Single-page web labeler. One scrollable list of clusters with name inputs and a Save All button."""
 from __future__ import annotations
 
+import html
 import io
 import os
 import threading
@@ -23,7 +24,10 @@ def _render_seen_in(video_paths: list[str], max_shown: int = 3) -> str:
     """
     if not video_paths:
         return ""
-    names = [os.path.basename(p) for p in video_paths]
+    # Filenames are attacker-controlled (users drop third-party footage), so a
+    # clip named "<img onerror=...>.mov" must not render as HTML. Escape every
+    # basename before it goes into markup, in both the text and title contexts.
+    names = [html.escape(os.path.basename(p)) for p in video_paths]
     shown = names[:max_shown]
     extra = len(names) - len(shown)
     label = ", ".join(shown)
@@ -96,7 +100,10 @@ def create_app(
 
         cards = []
         for cid, count, name, video_paths in summary:
-            existing = (name or "").replace('"', "&quot;")
+            # Person names are user-typed; escape fully (not just quotes) — this
+            # value lands in both an element body (the badge) and an attribute
+            # (the input value), so a name like "<script>" must be inert in both.
+            existing = html.escape(name or "")
             badge = f'<span class="hint">already: {existing}</span>' if name else ""
             initial_class = " is-saved" if name else ""
             cards.append(f"""
