@@ -447,7 +447,9 @@ def activity_suggest(
         # and any threshold that catches real matches also stamps it everywhere.
         relative=True,
         floor=threshold,
-        max_tags_per_video=len(user_tags),
+        # Cap tags per clip so a single clip can't collect the whole vocabulary
+        # even if many tags score high on it — keep its strongest few.
+        max_tags_per_video=min(len(user_tags), 6),
         prompts=prompts,
     )
 

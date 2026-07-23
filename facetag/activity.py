@@ -166,9 +166,11 @@ def encode_tag_embeddings(
 # everywhere, and some CLIPS score high on everything. We neutralize both by
 # requiring a (clip, tag) match to stand out on BOTH axes.
 REL_FLOOR = 0.15       # absolute minimum cosine; kills pure noise
-REL_STRONG = 0.24      # unambiguous match — keep regardless of the relative tests
-REL_K_TAG = 1.0        # per-tag: score must beat that tag's mean by k standard devs
+REL_STRONG = 0.24      # unambiguous match — but still needs the per-tag stand-out
+REL_K_TAG = 1.4        # per-tag: score must beat that tag's mean by k standard devs
 REL_CLIP_MARGIN = 0.03  # per-clip: score must beat this clip's median tag-score by this
+REL_MAX_COVERAGE = 0.5  # a tag lands on at most this fraction of clips (its top-
+                        # scoring ones) — no single tag blankets the library
 
 
 def relative_keep(
@@ -178,6 +180,7 @@ def relative_keep(
     strong: float = REL_STRONG,
     k_tag: float = REL_K_TAG,
     clip_margin: float = REL_CLIP_MARGIN,
+    max_coverage: float = REL_MAX_COVERAGE,
 ) -> np.ndarray:
     """Boolean (video × tag) keep-mask for relative tag selection.
 
@@ -189,17 +192,30 @@ def relative_keep(
     CLIP loves — "baby" on family footage, say, scoring high almost everywhere —
     clears the strong bar on every clip and gets stamped on all of them. Strong
     only lets a distinctive tag skip the per-CLIP test (a busy clip that scores
-    high on several tags), not the per-tag one. With fewer than 3 clips the
-    per-tag distribution is unreliable, so fall back to the floor alone.
+    high on several tags), not the per-tag one.
+
+    Finally a per-tag COVERAGE CAP: some tags (baby, casino, bingo on a Las Vegas
+    trip) score high on such a large share of clips that they still clear the
+    relative bar almost everywhere. No tag may land on more than `max_coverage`
+    of the clips — only its highest-scoring ones survive — so nothing blankets
+    the whole library. With fewer than 3 clips the distribution is unreliable, so
+    we fall back to the floor alone.
     """
     M = np.asarray(M, dtype=np.float32)
     keep = M >= floor
-    if M.shape[0] >= 3:
+    n = M.shape[0]
+    if n >= 3:
         tag_cut = M.mean(axis=0) + k_tag * M.std(axis=0)          # (T,) per-tag
         clip_cut = (np.median(M, axis=1) + clip_margin)[:, None]  # (V, 1) per-clip
         per_tag = M >= tag_cut
         per_clip = M >= clip_cut
         keep &= per_tag & (per_clip | (M >= strong))
+        cap = max(1, int(max_coverage * n))
+        for j in range(M.shape[1]):
+            rows = np.flatnonzero(keep[:, j])
+            if rows.size > cap:                       # trim to the top-scoring `cap`
+                drop = rows[np.argsort(-M[rows, j])][cap:]
+                keep[drop, j] = False
     return keep
 
 
