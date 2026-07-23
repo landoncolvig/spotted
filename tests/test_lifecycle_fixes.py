@@ -107,6 +107,29 @@ def test_sidecar_cleanup_removes_only_spotted(test_mov, have_exiftool):
     assert _markers.delete_sidecar_if_spotted(test_mov) is False
 
 
+# --- DaVinci Resolve marker script generation -------------------------------
+def test_resolve_marker_script_is_valid_python_with_data():
+    vm = {
+        "/x/A.mov": [(0.5, "Sarah"), (1.0, "Energy peak")],
+        "/x/B.mov": [(2.0, "Dad")],
+    }
+    script = _markers.resolve_marker_script(vm)
+    assert script
+    compile(script, "Spotted Markers.py", "exec")   # must be runnable Python
+    for token in ("A.mov", "B.mov", "Sarah", "Dad", "Energy peak", "AddMarker", "Yellow", "Blue"):
+        assert token in script
+    assert _markers.resolve_marker_script({}) == ""   # nothing to mark → empty
+
+
+def test_write_resolve_script_lands_a_file(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))         # isolate from the real ~/Library
+    vm = {str(tmp_path / "clip.mov"): [(0.5, "Sarah")]}
+    out = _markers.write_resolve_script(vm, tmp_path)
+    assert out is not None and out.exists() and out.name == "Spotted Markers.py"
+    assert "Sarah" in out.read_text()
+    assert _markers.write_resolve_script({}, tmp_path) is None
+
+
 # --- faceless folder no longer hard-errors ----------------------------------
 def test_cluster_with_no_faces_exits_zero(tmp_path):
     db_path = tmp_path / "empty.db"

@@ -1009,6 +1009,21 @@ def markers_write(
                 _emit("markers-sidecar-error", name=short, message=str(e))
             prog.update(task, advance=1)
 
+    # DaVinci Resolve marker script. DaVinci ignores the in-file XMP markers, so
+    # this script (matching clips by filename and calling the Resolve API) is how
+    # markers reach it. Written once for the whole batch.
+    if resolve and video_markers:
+        import os
+        try:
+            common = os.path.commonpath(list(video_markers.keys()))
+            fallback_dir = Path(common if os.path.isdir(common) else os.path.dirname(common))
+            out = _markers.write_resolve_script(video_markers, fallback_dir)
+            if out:
+                console.print(f"[cyan]DaVinci marker script → {out}[/cyan]")
+                _emit("resolve-script", path=str(out), clips=len(video_markers))
+        except Exception as e:  # noqa: BLE001 - never let the script step fail markers
+            _emit("resolve-script-error", message=str(e))
+
     if failed:
         console.print(f"[red]{len(failed)} failure(s) writing in-file markers:[/red]")
         for n, err in failed:
