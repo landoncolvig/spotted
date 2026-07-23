@@ -14,6 +14,7 @@ shipping needs human verification in the actual editor.
 """
 from __future__ import annotations
 
+import json
 import shutil
 import sqlite3
 import subprocess
@@ -256,3 +257,139 @@ def read_markers_sidecar(video_path: Path) -> str:
         check=False,
     )
     return r.stdout.strip()
+
+
+# --- DaVinci Resolve markers ------------------------------------------------
+# DaVinci does NOT surface the XMP-xmpDM:Markers that Premiere reads, so markers
+# never show up there via metadata. The only reliable path is the Resolve
+# scripting API (MediaPoolItem.AddMarker). We emit a small self-contained script
+# that the user runs inside Resolve; it matches clips by filename and adds a
+# marker on each Media Pool clip at every moment Spotted tagged.
+
+_RESOLVE_TEMPLATE = '''#!/usr/bin/env python
+"""Spotted -> DaVinci Resolve markers.
+
+DaVinci doesn't read the in-file XMP markers Spotted writes (Premiere does), so
+this adds them through the Resolve API instead — as markers on each Media Pool
+clip (the bookmarks on the clip + pins under the source viewer).
+
+HOW TO RUN
+  1. In DaVinci Resolve, open your project and import the footage.
+  2. Workspace menu -> Scripts -> "Spotted Markers".
+     (Or Workspace -> Console, click Py3, and run this file.)
+Clips are matched by filename. Safe to re-run — Resolve ignores a duplicate
+marker on the same frame.
+"""
+import os
+
+MARKERS = __DATA__
+
+
+def _get_resolve():
+    r = globals().get("resolve")
+    if r:
+        return r
+    try:
+        import DaVinciResolveScript as bmd
+        return bmd.scriptapp("Resolve")
+    except Exception:
+        return None
+
+
+def main():
+    resolve = _get_resolve()
+    if not resolve:
+        print("Spotted: couldn't reach DaVinci Resolve. Run this from "
+              "Workspace > Scripts (or the Console) inside Resolve.")
+        return
+    proj = resolve.GetProjectManager().GetCurrentProject()
+    if not proj:
+        print("Spotted: no project is open.")
+        return
+    media_pool = proj.GetMediaPool()
+
+    def walk(folder):
+        clips = list(folder.GetClipList())
+        for sub in folder.GetSubFolderList():
+            clips += walk(sub)
+        return clips
+
+    by_name = {}
+    for clip in walk(media_pool.GetRootFolder()):
+        path = clip.GetClipProperty("File Path") or ""
+        by_name.setdefault(os.path.basename(path) or clip.GetName(), clip)
+
+    total_marks = 0
+    matched = 0
+    missing = 0
+    for name, marks in MARKERS.items():
+        clip = by_name.get(name)
+        if not clip:
+            missing += 1
+            continue
+        try:
+            fps = float(clip.GetClipProperty("FPS") or 0) or 30.0
+        except Exception:
+            fps = 30.0
+        placed = False
+        for sec, label, color in marks:
+            frame = int(round(float(sec) * fps))
+            if clip.AddMarker(frame, color, label, "Spotted", 1):
+                total_marks += 1
+                placed = True
+        matched += 1 if placed else 0
+    print("Spotted: added %d markers to %d clips (%d clips in the script "
+          "weren't found in this project)." % (total_marks, matched, missing))
+
+
+main()
+'''
+
+
+def resolve_marker_script(video_markers: dict[str, list[tuple[float, str]]]) -> str:
+    """Build the self-contained DaVinci Resolve marker script for a batch.
+
+    `video_markers` maps a clip path -> [(timestamp_sec, label)]. Named-person
+    labels get a blue marker, energy peaks yellow. Returns the script text (with
+    the marker data embedded), or "" if there's nothing to mark."""
+    data: dict[str, list] = {}
+    for path, events in video_markers.items():
+        rows: list = []
+        seen: set[tuple[int, str]] = set()
+        for t, label in sorted(events):
+            key = (int(round(t * 1000)), label)
+            if key in seen:
+                continue
+            seen.add(key)
+            color = "Yellow" if label == "Energy peak" else "Blue"
+            rows.append([round(float(t), 3), _sanitize(label), color])
+        if rows:
+            data[Path(path).name] = rows
+    if not data:
+        return ""
+    return _RESOLVE_TEMPLATE.replace("__DATA__", json.dumps(data))
+
+
+def write_resolve_script(
+    video_markers: dict[str, list[tuple[float, str]]],
+    fallback_dir: Path,
+) -> Path | None:
+    """Write the Resolve marker script. Prefer Resolve's user Scripts folder so
+    it appears in Workspace > Scripts; fall back to `fallback_dir` (next to the
+    footage). Returns where it landed, or None if there was nothing to write."""
+    script = resolve_marker_script(video_markers)
+    if not script:
+        return None
+    candidates = [
+        Path.home() / "Library/Application Support/Blackmagic Design/DaVinci Resolve/Fusion/Scripts/Utility",
+        fallback_dir,
+    ]
+    for d in candidates:
+        try:
+            d.mkdir(parents=True, exist_ok=True)
+            out = d / "Spotted Markers.py"
+            out.write_text(script)
+            return out
+        except Exception:  # noqa: BLE001 - try the next location
+            continue
+    return None

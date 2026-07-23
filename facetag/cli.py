@@ -933,6 +933,10 @@ def markers_write(
         False, "--sidecar/--no-sidecar",
         help="Also drop a .xmp sidecar next to each clip (a DaVinci fallback). Off by default: sidecars leave a file beside every clip, which clutters a folder of thousands, and the markers are also written in-file. When off, any sidecar Spotted previously left is cleaned up.",
     ),
+    resolve: bool = typer.Option(
+        True, "--resolve/--no-resolve",
+        help="Also emit a 'Spotted Markers' DaVinci Resolve script (into Resolve's Scripts folder, else next to the footage). DaVinci ignores in-file XMP markers, so this is the only way markers show there — the user runs it from Workspace > Scripts after importing.",
+    ),
 ):
     """Write per-face timeline markers (XMP-xmpDM:Markers) into each video.
 
@@ -963,6 +967,7 @@ def markers_write(
     failed: list[tuple[str, str]] = []
     sidecar_failed: list[tuple[str, str]] = []
     last_written: tuple[Path, int] | None = None  # for the verification readback
+    video_markers: dict[str, list[tuple[float, str]]] = {}  # for the Resolve script
 
     with Progress(
         TextColumn("[bold cyan]{task.description}"),
@@ -977,6 +982,8 @@ def markers_write(
             events = _markers.face_events_for_video(conn, vid)
             events += [(t, "Energy peak") for t in _db.energy_peaks_for_video(conn, vid)]
             events.sort()
+            if events:
+                video_markers[path_str] = events
             _emit("markers-video", name=short, count=len(events), index=idx, total=len(videos))
             try:
                 _markers.write_markers(Path(path_str), events)
