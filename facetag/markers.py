@@ -227,6 +227,22 @@ def write_markers_sidecar(video_path: Path, face_events: list[tuple[float, str]]
     return sidecar
 
 
+def delete_sidecar_if_spotted(video_path: Path) -> bool:
+    """Remove Spotted's own `.xmp` sidecar next to a clip so tagged folders stay
+    clean (a user working with thousands of clips doesn't want a sidecar beside
+    every one). Only deletes a sidecar Spotted wrote (CreatorTool=Spotted); a
+    foreign sidecar — the user's own DaVinci/Bridge color, ratings, or markers —
+    is never touched. Returns True if a sidecar was removed."""
+    sidecar = sidecar_path_for(video_path)
+    if not sidecar.exists():
+        return False
+    exe = _exiftool()
+    if _sidecar_is_spotted(sidecar, exe):
+        sidecar.unlink()
+        return True
+    return False
+
+
 def read_markers_sidecar(video_path: Path) -> str:
     """Return the raw Markers value from the sidecar XMP, for verification."""
     sidecar = sidecar_path_for(video_path)

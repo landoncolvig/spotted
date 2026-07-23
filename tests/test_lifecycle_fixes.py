@@ -78,6 +78,35 @@ def test_seen_in_escapes_malicious_filename():
     assert "onerror=alert(1)" not in out or "&lt;img" in out
 
 
+# --- sidecar auto-cleanup keeps folders tidy, never eats a foreign sidecar --
+def test_sidecar_cleanup_removes_only_spotted(test_mov, have_exiftool):
+    import shutil
+    import subprocess
+
+    if not have_exiftool:
+        import pytest
+        pytest.skip("exiftool not on PATH")
+    exe = shutil.which("exiftool")
+    sc = _markers.sidecar_path_for(test_mov)
+
+    # Spotted's own sidecar gets cleaned up.
+    _markers.write_markers_sidecar(test_mov, [(0.5, "Sarah")])
+    assert sc.exists()
+    assert _markers.delete_sidecar_if_spotted(test_mov) is True
+    assert not sc.exists()
+
+    # A foreign sidecar (another tool's CreatorTool) is preserved.
+    subprocess.run([exe, "-q", "-o", str(sc), "-XMP-xmp:CreatorTool=DaVinci"],
+                   check=True, capture_output=True)
+    assert sc.exists()
+    assert _markers.delete_sidecar_if_spotted(test_mov) is False
+    assert sc.exists()
+
+    # No sidecar → no-op.
+    sc.unlink()
+    assert _markers.delete_sidecar_if_spotted(test_mov) is False
+
+
 # --- faceless folder no longer hard-errors ----------------------------------
 def test_cluster_with_no_faces_exits_zero(tmp_path):
     db_path = tmp_path / "empty.db"

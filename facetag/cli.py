@@ -929,12 +929,20 @@ def tag_write(
 @app.command("markers-write")
 def markers_write(
     db_path: Path = typer.Option(DEFAULT_DB, "--db"),
+    sidecar: bool = typer.Option(
+        False, "--sidecar/--no-sidecar",
+        help="Also drop a .xmp sidecar next to each clip (a DaVinci fallback). Off by default: sidecars leave a file beside every clip, which clutters a folder of thousands, and the markers are also written in-file. When off, any sidecar Spotted previously left is cleaned up.",
+    ),
 ):
     """Write per-face timeline markers (XMP-xmpDM:Markers) into each video.
 
     Premiere Pro and DaVinci Resolve render these as clip markers on the
     timeline scrubber. Each marker is one face detection: "Sarah at 0:03,
     Dad at 0:08…". Editors can click a marker to jump to that frame.
+
+    Markers are written in-file into each .mov. By default no .xmp sidecar is
+    left behind (and any Spotted wrote before is removed) so tagged folders stay
+    clean; pass --sidecar if you specifically need DaVinci's sidecar-file path.
     """
     conn = _db.connect(db_path)
     # Markers come from two sources: named-face appearances and energy peaks.
@@ -980,11 +988,15 @@ def markers_write(
             except Exception as e:
                 failed.append((short, str(e)))
                 _emit("markers-error", name=short, message=str(e))
-            # Sidecar XMP — additive, non-fatal. DaVinci reads sidecars
-            # more reliably than in-file XMP across versions; Premiere
-            # users still get the in-file write above.
+            # Sidecar XMP. Opt-in (--sidecar) as a DaVinci fallback; otherwise
+            # we clean up any sidecar Spotted left before, so tagged folders
+            # don't accumulate a .xmp beside every clip. In-file markers above
+            # cover Premiere and DaVinci setups that read in-file.
             try:
-                _markers.write_markers_sidecar(Path(path_str), events)
+                if sidecar:
+                    _markers.write_markers_sidecar(Path(path_str), events)
+                else:
+                    _markers.delete_sidecar_if_spotted(Path(path_str))
             except Exception as e:
                 sidecar_failed.append((short, str(e)))
                 _emit("markers-sidecar-error", name=short, message=str(e))
