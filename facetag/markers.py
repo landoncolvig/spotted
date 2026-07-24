@@ -274,8 +274,10 @@ this adds them through the Resolve API instead — as markers on each Media Pool
 clip (the bookmarks on the clip + pins under the source viewer).
 
 HOW TO RUN
-  1. In DaVinci Resolve, open your project and import the footage.
-  2. Workspace menu -> Scripts -> "Spotted Markers".
+  1. QUIT and reopen DaVinci Resolve if it was already running — it only scans
+     for scripts at launch, so a freshly-written one won't appear until restart.
+  2. Open your project and import the footage.
+  3. Workspace menu -> Scripts -> "Spotted Markers".
      (Or Workspace -> Console, click Py3, and run this file.)
 Clips are matched by filename. Safe to re-run — Resolve ignores a duplicate
 marker on the same frame.
@@ -374,14 +376,17 @@ def write_resolve_script(
     video_markers: dict[str, list[tuple[float, str]]],
     fallback_dir: Path,
 ) -> Path | None:
-    """Write the Resolve marker script. Prefer Resolve's user Scripts folder so
-    it appears in Workspace > Scripts; fall back to `fallback_dir` (next to the
-    footage). Returns where it landed, or None if there was nothing to write."""
+    """Write the Resolve marker script. Prefer the ROOT of Resolve's user Scripts
+    folder (so it shows at the top level of Workspace > Scripts, not tucked in a
+    Utility submenu that may not render); fall back to `fallback_dir` (next to
+    the footage). Returns where it landed, or None if there was nothing to
+    write. NOTE: Resolve scans this folder only at launch, so a just-written
+    script needs a Resolve restart to appear."""
     script = resolve_marker_script(video_markers)
     if not script:
         return None
     candidates = [
-        Path.home() / "Library/Application Support/Blackmagic Design/DaVinci Resolve/Fusion/Scripts/Utility",
+        Path.home() / "Library/Application Support/Blackmagic Design/DaVinci Resolve/Fusion/Scripts",
         fallback_dir,
     ]
     for d in candidates:
