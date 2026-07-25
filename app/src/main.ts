@@ -32,6 +32,8 @@ type SpottedEvent =
   | { event: "tag-verify-error"; message: string }
   | { event: "markers-verified"; file: string; event_count: number; in_file_present: boolean; sidecar_present: boolean; failed?: number; written?: number }
   | { event: "markers-verify-error"; message: string }
+  | { event: "resolve-script"; path: string; clips: number }
+  | { event: "resolve-script-error"; message: string }
   | { event: "markers-sidecar-error"; name: string; message: string }
   | { event: "activity-start"; total: number }
   | { event: "activity-complete"; total: number; tagged: number; sample: { file: string; tags: string[] } | null; matched?: MatchedTag[] }
@@ -233,6 +235,11 @@ function parseSpotted(line: string): SpottedEvent | null {
 let lastStats: SpottedEvent | null = null;
 let lastVerification: Extract<SpottedEvent, { event: "tag-verified" }> | null = null;
 let lastMarkersVerification: Extract<SpottedEvent, { event: "markers-verified" }> | null = null;
+/** Why the marker step failed, if it did. Shown on the done screen so a broken
+ *  marker run is reportable instead of silently rendering as "empty". */
+let lastMarkerError: string | null = null;
+/** Where the DaVinci marker script was written, if it was. */
+let lastResolveScript: string | null = null;
 let lastActivityResult: Extract<SpottedEvent, { event: "activity-complete" }> | null = null;
 
 async function fetchLibraryStats(): Promise<SpottedEvent | null> {
@@ -326,6 +333,12 @@ function handleSpottedEvent(evt: SpottedEvent) {
       break;
     case "tag-verified":
       lastVerification = evt;
+      break;
+    case "resolve-script":
+      lastResolveScript = evt.path;
+      break;
+    case "resolve-script-error":
+      lastResolveScript = `failed: ${evt.message}`;
       break;
     case "markers-verified":
       lastMarkersVerification = evt;
@@ -631,8 +644,15 @@ async function runWrite(excludeTags: string[]) {
     workingLabel.textContent = "Writing timeline markers";
     workingDetail.textContent = "For Premiere & DaVinci scrubber…";
     try {
+      lastMarkerError = null;
       await invoke<number>("write_markers");
     } catch (e) {
+      // Non-fatal: keywords already succeeded, so the run still counts. But do
+      // NOT swallow this. It used to be a bare console.warn, which meant a
+      // marker step that died left the done screen showing "Markers: empty"
+      // with no reason — indistinguishable from "no markers to write", and
+      // impossible for a user to report back. Surface it on the done screen.
+      lastMarkerError = String(e);
       console.warn("marker write failed (non-fatal):", e);
     }
 
@@ -714,6 +734,14 @@ function renderVerification() {
     // clips were skipped rather than letting the row read as empty.
     if (markers.failed) markerCells.push(`${markers.failed} clip(s) failed`);
   }
+  if (!markerCells.length && lastMarkerError) {
+    markerCells.push(`failed: ${lastMarkerError.slice(0, 120)}`);
+  }
+
+  // Where the DaVinci script landed. Users cannot find this on their own —
+  // it goes into ~/Library, which Spotlight does not index — so show the path.
+  const resolveCells: string[] = [];
+  if (lastResolveScript) resolveCells.push(lastResolveScript);
 
   const rows: Array<{ label: string; values: string[]; help: string }> = [
     {
@@ -735,6 +763,11 @@ function renderVerification() {
       label: "Markers (timeline)",
       values: markerCells,
       help: "Per-face timeline markers. In-file XMP for Premiere; sidecar .xmp next to the clip for DaVinci (enable 'Use Sidecar Files' in project settings).",
+    },
+    {
+      label: "DaVinci script",
+      values: resolveCells,
+      help: "The 'Spotted Markers' script for DaVinci Resolve. Quit and reopen Resolve, then run it from Workspace > Scripts. It lives in ~/Library, which Spotlight does not search.",
     },
     {
       label: "Your tags (matched)",
