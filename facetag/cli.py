@@ -1019,6 +1019,20 @@ def markers_write(
         try:
             common = os.path.commonpath(list(video_markers.keys()))
             fallback_dir = Path(common if os.path.isdir(common) else os.path.dirname(common))
+
+            # Primary path: an FCPXML timeline sitting next to the footage.
+            # DaVinci imports it with File > Import > Timeline — no scripting,
+            # no preference to enable, nothing hidden in ~/Library. Tested
+            # against a clean Resolve 21 install, where the Scripts menu
+            # enumerated nothing from any documented location, which is what
+            # made the script route unusable for real users.
+            xml_out = _markers.write_fcpxml(video_markers, fallback_dir)
+            if xml_out:
+                console.print(f"[cyan]DaVinci timeline → {xml_out}[/cyan]")
+                _emit("resolve-timeline", path=str(xml_out), clips=len(video_markers))
+
+            # Secondary: keep emitting the script for anyone whose Resolve does
+            # pick scripts up. It costs one small file and needs no user setup.
             out = _markers.write_resolve_script(video_markers, fallback_dir)
             if out:
                 console.print(f"[cyan]DaVinci marker script → {out}[/cyan]")

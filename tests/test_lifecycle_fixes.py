@@ -136,3 +136,42 @@ def test_cluster_with_no_faces_exits_zero(tmp_path):
     _db.connect(db_path).close()      # valid, empty index — no faces
     res = CliRunner().invoke(_cli.app, ["cluster", "--db", str(db_path)])
     assert res.exit_code == 0, res.output   # was Exit(1) before; must not block the flow
+
+
+# --- FCPXML timeline export (the DaVinci path that needs no scripting) -------
+def test_fcpxml_is_well_formed_and_carries_markers(tmp_path):
+    import xml.dom.minidom as _md
+
+    clip = tmp_path / "a.mov"
+    clip.write_bytes(b"")
+    vm = {str(clip): [(0.5, "Sarah"), (1.0, "Energy peak")]}
+    xml = _markers.fcpxml_for_markers(vm)
+    assert xml
+    _md.parseString(xml)                      # must be parseable XML
+    assert "<fcpxml" in xml and "asset-clip" in xml
+    for token in ("Sarah", "Energy peak", "<marker"):
+        assert token in xml
+    assert _markers.fcpxml_for_markers({}) == ""       # nothing to mark
+    assert _markers.fcpxml_for_markers({str(clip): []}) == ""
+
+
+def test_fcpxml_escapes_xml_and_snaps_to_frame_grid(tmp_path):
+    clip = tmp_path / "b.mov"
+    clip.write_bytes(b"")
+    vm = {str(clip): [(1.0, 'Mom & Dad <"x">')]}
+    xml = _markers.fcpxml_for_markers(vm)
+    assert "&amp;" in xml and "&lt;" in xml and "&quot;" in xml
+    assert 'Mom & Dad' not in xml                # raw ampersand would break import
+    # every time value must be a rational on the timebase, never a bare float
+    import re as _re
+    for t in _re.findall(r'(?:start|duration|offset)="([^"]+)"', xml):
+        assert t == "0s" or _re.fullmatch(r"\d+/\d+s", t), t
+
+
+def test_write_fcpxml_lands_next_to_footage(tmp_path):
+    clip = tmp_path / "c.mov"
+    clip.write_bytes(b"")
+    out = _markers.write_fcpxml({str(clip): [(0.5, "Sarah")]}, tmp_path)
+    assert out is not None and out.exists()
+    assert out.name == "Spotted Markers.fcpxml"
+    assert _markers.write_fcpxml({}, tmp_path) is None

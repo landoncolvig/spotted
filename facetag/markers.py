@@ -400,3 +400,164 @@ def write_resolve_script(
         except Exception:  # noqa: BLE001 - try the next location
             continue
     return None
+
+
+# --- FCPXML timeline export ---------------------------------------------------
+#
+# DaVinci Resolve ignores the in-file XMP markers Spotted writes, and the
+# Workspace > Scripts route proved unreliable: on a clean Resolve 21 install the
+# Scripts menu enumerated nothing at all, from any of the documented locations.
+# Importing a timeline is the path that needs no scripting, no preference
+# change, and no file hidden inside ~/Library — File > Import > Timeline, and
+# the markers are simply there.
+
+# Frame durations Resolve accepts, keyed by nominal fps. NTSC rates must stay
+# rational (1001/30000) or markers drift out of sync over a long clip.
+_FRAME_DURATIONS: list[tuple[float, int, int]] = [
+    (23.976, 1001, 24000),
+    (24.0, 1, 24),
+    (25.0, 1, 25),
+    (29.97, 1001, 30000),
+    (30.0, 1, 30),
+    (50.0, 1, 50),
+    (59.94, 1001, 60000),
+    (60.0, 1, 60),
+]
+
+
+def _frame_duration(fps: float) -> tuple[int, int]:
+    """Nearest standard frame duration as (numerator, denominator)."""
+    best = min(_FRAME_DURATIONS, key=lambda f: abs(f[0] - fps))
+    return best[1], best[2]
+
+
+def _fcp_time(seconds: float, num: int, den: int) -> str:
+    """Seconds as an FCPXML rational snapped to the frame grid.
+
+    FCPXML wants times on the timebase; a raw float like "1.234s" is either
+    rejected or silently rounded, which is how markers end up on the wrong
+    frame.
+    """
+    frames = int(round(seconds * den / num))
+    return f"{frames * num}/{den}s"
+
+
+def _video_duration(video_path: Path, fps: float) -> float:
+    """Clip length in seconds. Falls back to 0 when undetectable."""
+    try:
+        import cv2
+
+        cap = cv2.VideoCapture(str(video_path))
+        try:
+            frames = cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0.0
+        finally:
+            cap.release()
+        if frames > 0 and fps > 0:
+            return float(frames) / fps
+    except Exception:  # noqa: BLE001 - duration is best-effort
+        pass
+    return 0.0
+
+
+def fcpxml_for_markers(video_markers: dict[str, list[tuple[float, str]]]) -> str:
+    """Build an FCPXML timeline whose clips carry Spotted's markers.
+
+    Returns "" when there is nothing to write. Clips are laid end to end on a
+    single spine in filename order, each with its own markers, so importing the
+    result gives one timeline containing every marked clip.
+    """
+    clips = [(p, ev) for p, ev in sorted(video_markers.items()) if ev]
+    if not clips:
+        return ""
+
+    # The sequence format follows the first clip; mixed-rate footage still
+    # imports, Resolve just conforms it.
+    first_fps = get_video_fps(Path(clips[0][0]))
+    num, den = _frame_duration(first_fps)
+
+    resources: list[str] = [
+        f'    <format id="r0" name="FFVideoFormat" frameDuration="{num}/{den}s" '
+        f'width="1920" height="1080" colorSpace="1-1-1 (Rec. 709)"/>'
+    ]
+    spine: list[str] = []
+    offset = 0.0
+
+    for i, (path_str, events) in enumerate(clips, start=1):
+        p = Path(path_str)
+        fps = get_video_fps(p)
+        dur = _video_duration(p, fps)
+        if dur <= 0:
+            # Unknown length: make the clip long enough to hold its last marker
+            # so nothing gets clipped off the end of the timeline.
+            dur = max((t for t, _ in events), default=0.0) + 1.0
+
+        asset_id = f"a{i}"
+        name = _xml_escape(p.stem)
+        resources.append(
+            f'    <asset id="{asset_id}" name="{name}" src="{_file_url(p)}" '
+            f'start="0s" duration="{_fcp_time(dur, num, den)}" '
+            f'hasVideo="1" hasAudio="1" format="r0"/>'
+        )
+
+        markers = "".join(
+            f'\n        <marker start="{_fcp_time(min(t, max(dur - (num / den), 0.0)), num, den)}" '
+            f'duration="{num}/{den}s" value="{_xml_escape(label)}"/>'
+            for t, label in sorted(events)
+        )
+        spine.append(
+            f'      <asset-clip ref="{asset_id}" name="{name}" '
+            f'offset="{_fcp_time(offset, num, den)}" start="0s" '
+            f'duration="{_fcp_time(dur, num, den)}" format="r0">{markers}\n'
+            f'      </asset-clip>'
+        )
+        offset += dur
+
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        "<!DOCTYPE fcpxml>\n"
+        '<fcpxml version="1.8">\n'
+        "  <resources>\n" + "\n".join(resources) + "\n  </resources>\n"
+        '  <library>\n'
+        '    <event name="Spotted">\n'
+        '      <project name="Spotted Markers">\n'
+        f'        <sequence format="r0" duration="{_fcp_time(offset, num, den)}" '
+        'tcStart="0s" tcFormat="NDF">\n'
+        "    <spine>\n" + "\n".join(spine) + "\n    </spine>\n"
+        "        </sequence>\n"
+        "      </project>\n"
+        "    </event>\n"
+        "  </library>\n"
+        "</fcpxml>\n"
+    )
+
+
+def _xml_escape(s: str) -> str:
+    return (
+        s.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+    )
+
+
+def _file_url(p: Path) -> str:
+    from urllib.parse import quote
+
+    return "file://" + quote(str(p.resolve()))
+
+
+def write_fcpxml(
+    video_markers: dict[str, list[tuple[float, str]]], out_dir: Path
+) -> Path | None:
+    """Write "Spotted Markers.fcpxml" next to the footage. Returns the path, or
+    None if there was nothing to write."""
+    xml = fcpxml_for_markers(video_markers)
+    if not xml:
+        return None
+    try:
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out = out_dir / "Spotted Markers.fcpxml"
+        out.write_text(xml)
+        return out
+    except Exception:  # noqa: BLE001 - never let the export fail the marker run
+        return None

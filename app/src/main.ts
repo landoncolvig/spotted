@@ -33,6 +33,7 @@ type SpottedEvent =
   | { event: "markers-verified"; file: string; event_count: number; in_file_present: boolean; sidecar_present: boolean; failed?: number; written?: number }
   | { event: "markers-verify-error"; message: string }
   | { event: "resolve-script"; path: string; clips: number }
+  | { event: "resolve-timeline"; path: string; clips: number }
   | { event: "resolve-script-error"; message: string }
   | { event: "markers-sidecar-error"; name: string; message: string }
   | { event: "activity-start"; total: number }
@@ -240,6 +241,9 @@ let lastMarkersVerification: Extract<SpottedEvent, { event: "markers-verified" }
 let lastMarkerError: string | null = null;
 /** Where the DaVinci marker script was written, if it was. */
 let lastResolveScript: string | null = null;
+/** Where the DaVinci FCPXML timeline was written. This is the path that
+ *  actually works for users: File > Import > Timeline, markers included. */
+let lastResolveTimeline: string | null = null;
 let lastActivityResult: Extract<SpottedEvent, { event: "activity-complete" }> | null = null;
 
 async function fetchLibraryStats(): Promise<SpottedEvent | null> {
@@ -336,6 +340,9 @@ function handleSpottedEvent(evt: SpottedEvent) {
       break;
     case "resolve-script":
       lastResolveScript = evt.path;
+      break;
+    case "resolve-timeline":
+      lastResolveTimeline = evt.path;
       break;
     case "resolve-script-error":
       lastResolveScript = `failed: ${evt.message}`;
@@ -741,7 +748,8 @@ function renderVerification() {
   // Where the DaVinci script landed. Users cannot find this on their own —
   // it goes into ~/Library, which Spotlight does not index — so show the path.
   const resolveCells: string[] = [];
-  if (lastResolveScript) resolveCells.push(lastResolveScript);
+  if (lastResolveTimeline) resolveCells.push(lastResolveTimeline);
+  else if (lastResolveScript) resolveCells.push(lastResolveScript);
 
   const rows: Array<{ label: string; values: string[]; help: string }> = [
     {
