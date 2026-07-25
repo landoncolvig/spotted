@@ -1035,25 +1035,40 @@ def markers_write(
         for n, err in sidecar_failed:
             console.print(f"  [yellow]{n}[/yellow]  {err}")
 
-    if not failed:
-        # Read back markers from a sample clip and surface to the UI so
-        # users see proof markers landed without opening the .mov in an
-        # editor. Same shape as the tag-verified event.
-        if last_written is not None:
-            sample_path, event_count = last_written
-            try:
-                in_file = _markers.read_markers(sample_path)
-                sidecar = _markers.read_markers_sidecar(sample_path)
-                _emit(
-                    "markers-verified",
-                    file=sample_path.name,
-                    event_count=event_count,
-                    in_file_present=bool(in_file),
-                    sidecar_present=bool(sidecar),
-                )
-            except Exception as e:
-                _emit("markers-verify-error", message=str(e))
-        _emit("markers-complete", total=len(videos))
+    # Read back markers from a sample clip and surface to the UI so users see
+    # proof markers landed without opening the .mov in an editor. Same shape as
+    # the tag-verified event.
+    #
+    # This is deliberately NOT gated on `failed` being empty. It used to be, and
+    # that meant a single bad clip out of hundreds suppressed the verification
+    # for the whole batch — the UI then rendered "Markers (timeline): empty",
+    # which reads as "markers didn't work" even when every other clip was
+    # marked correctly. Report what actually landed, and report the failures
+    # alongside it instead of hiding both.
+    if last_written is not None:
+        sample_path, event_count = last_written
+        try:
+            in_file = _markers.read_markers(sample_path)
+            sidecar = _markers.read_markers_sidecar(sample_path)
+            _emit(
+                "markers-verified",
+                file=sample_path.name,
+                event_count=event_count,
+                in_file_present=bool(in_file),
+                sidecar_present=bool(sidecar),
+                failed=len(failed),
+                written=len(videos) - len(failed),
+            )
+        except Exception as e:
+            _emit("markers-verify-error", message=str(e))
+    _emit("markers-complete", total=len(videos), failed=len(failed))
+    if failed:
+        console.print(
+            f"[bold yellow]Done.[/bold yellow] Wrote markers to "
+            f"{len(videos) - len(failed)} of {len(videos)} clips "
+            f"({len(failed)} failed)."
+        )
+    else:
         console.print(f"[bold green]Done.[/bold green] Wrote markers to {len(videos)} clips.")
 
 

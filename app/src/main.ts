@@ -30,7 +30,7 @@ type SpottedEvent =
   | { event: "markers-complete"; total: number }
   | { event: "tag-verified"; file: string; xmp: string[]; keys: string[]; comment: string }
   | { event: "tag-verify-error"; message: string }
-  | { event: "markers-verified"; file: string; event_count: number; in_file_present: boolean; sidecar_present: boolean }
+  | { event: "markers-verified"; file: string; event_count: number; in_file_present: boolean; sidecar_present: boolean; failed?: number; written?: number }
   | { event: "markers-verify-error"; message: string }
   | { event: "markers-sidecar-error"; name: string; message: string }
   | { event: "activity-start"; total: number }
@@ -710,6 +710,9 @@ function renderVerification() {
   if (markers) {
     if (markers.in_file_present) markerCells.push(`in-file (${markers.event_count})`);
     if (markers.sidecar_present) markerCells.push(`sidecar .xmp`);
+    // A partial failure is not the same as "nothing landed" — say how many
+    // clips were skipped rather than letting the row read as empty.
+    if (markers.failed) markerCells.push(`${markers.failed} clip(s) failed`);
   }
 
   const rows: Array<{ label: string; values: string[]; help: string }> = [
