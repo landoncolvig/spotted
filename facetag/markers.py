@@ -376,17 +376,19 @@ def write_resolve_script(
     video_markers: dict[str, list[tuple[float, str]]],
     fallback_dir: Path,
 ) -> Path | None:
-    """Write the Resolve marker script. Prefer the ROOT of Resolve's user Scripts
-    folder (so it shows at the top level of Workspace > Scripts, not tucked in a
-    Utility submenu that may not render); fall back to `fallback_dir` (next to
-    the footage). Returns where it landed, or None if there was nothing to
-    write. NOTE: Resolve scans this folder only at launch, so a just-written
-    script needs a Resolve restart to appear."""
+    """Write the Resolve marker script into Resolve's user Scripts/Utility
+    folder, which appears at the top level of the Workspace > Scripts menu.
+    Resolve scans the subfolders (Utility, Comp, Edit, Color, Deliver, Tool),
+    NOT the Scripts root, so a script dropped in the root shows up as "No
+    Scripts". Fall back to `fallback_dir` (next to the footage) if that write
+    fails. Returns where it landed, or None if there was nothing to write.
+    NOTE: Resolve scans this folder only at launch, so a just-written script
+    needs a Resolve restart to appear."""
     script = resolve_marker_script(video_markers)
     if not script:
         return None
     candidates = [
-        Path.home() / "Library/Application Support/Blackmagic Design/DaVinci Resolve/Fusion/Scripts",
+        Path.home() / "Library/Application Support/Blackmagic Design/DaVinci Resolve/Fusion/Scripts/Utility",
         fallback_dir,
     ]
     for d in candidates:
