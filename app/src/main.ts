@@ -34,6 +34,7 @@ type SpottedEvent =
   | { event: "markers-verify-error"; message: string }
   | { event: "resolve-script"; path: string; clips: number }
   | { event: "resolve-timeline"; path: string; clips: number }
+  | { event: "resolve-edl"; path: string; clips: number }
   | { event: "resolve-script-error"; message: string }
   | { event: "markers-sidecar-error"; name: string; message: string }
   | { event: "activity-start"; total: number }
@@ -244,6 +245,8 @@ let lastResolveScript: string | null = null;
 /** Where the DaVinci FCPXML timeline was written. This is the path that
  *  actually works for users: File > Import > Timeline, markers included. */
 let lastResolveTimeline: string | null = null;
+/** Companion EDL carrying the markers themselves. */
+let lastResolveEdl: string | null = null;
 let lastActivityResult: Extract<SpottedEvent, { event: "activity-complete" }> | null = null;
 
 async function fetchLibraryStats(): Promise<SpottedEvent | null> {
@@ -343,6 +346,9 @@ function handleSpottedEvent(evt: SpottedEvent) {
       break;
     case "resolve-timeline":
       lastResolveTimeline = evt.path;
+      break;
+    case "resolve-edl":
+      lastResolveEdl = evt.path;
       break;
     case "resolve-script-error":
       lastResolveScript = `failed: ${evt.message}`;
@@ -750,6 +756,7 @@ function renderVerification() {
   const resolveCells: string[] = [];
   if (lastResolveTimeline) resolveCells.push(lastResolveTimeline);
   else if (lastResolveScript) resolveCells.push(lastResolveScript);
+  if (lastResolveEdl) resolveCells.push(lastResolveEdl);
 
   const rows: Array<{ label: string; values: string[]; help: string }> = [
     {

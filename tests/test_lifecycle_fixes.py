@@ -175,3 +175,36 @@ def test_write_fcpxml_lands_next_to_footage(tmp_path):
     assert out is not None and out.exists()
     assert out.name == "Spotted Markers.fcpxml"
     assert _markers.write_fcpxml({}, tmp_path) is None
+
+
+# --- EDL markers (the DaVinci path verified against Resolve 21) --------------
+def test_edl_timecodes_account_for_clip_offsets(tmp_path):
+    a = tmp_path / "a.mov"; a.write_bytes(b"")
+    b = tmp_path / "b.mov"; b.write_bytes(b"")
+    # No real media, so each clip falls back to (last marker + 1s) long.
+    vm = {str(a): [(1.0, "Ellie")], str(b): [(1.0, "Energy peak")]}
+    edl = _markers.edl_for_markers(vm)
+    assert "TITLE: Spotted Markers" in edl and "FCM: NON-DROP FRAME" in edl
+    assert "|M:Ellie" in edl and "|M:Energy peak" in edl
+    # a.mov is 2s long, so b.mov's marker sits at 2s + 1s = 3s, not 1s.
+    assert "00:00:01:00" in edl      # Ellie on the first clip
+    assert "00:00:03:00" in edl      # Energy peak offset onto the second
+    # energy peaks are yellow, people blue
+    assert "ResolveColorYellow |M:Energy peak" in edl
+    assert "ResolveColorBlue |M:Ellie" in edl
+    assert _markers.edl_for_markers({}) == ""
+
+
+def test_edl_marker_names_cannot_break_the_pipe_format(tmp_path):
+    clip = tmp_path / "c.mov"; clip.write_bytes(b"")
+    edl = _markers.edl_for_markers({str(clip): [(0.5, "Mom |D:9 |M:evil")]})
+    # a raw pipe would inject extra EDL fields and corrupt the marker
+    body = [l for l in edl.splitlines() if l.startswith(" |C:")][0]
+    assert body.count("|M:") == 1 and body.count("|D:") == 1
+
+
+def test_write_edl_lands_next_to_footage(tmp_path):
+    clip = tmp_path / "d.mov"; clip.write_bytes(b"")
+    out = _markers.write_edl({str(clip): [(0.5, "Sarah")]}, tmp_path)
+    assert out is not None and out.exists() and out.name == "Spotted Markers.edl"
+    assert _markers.write_edl({}, tmp_path) is None

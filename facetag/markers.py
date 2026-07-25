@@ -459,6 +459,93 @@ def _video_duration(video_path: Path, fps: float) -> float:
     return 0.0
 
 
+def _timeline_layout(
+    video_markers: dict[str, list[tuple[float, str]]]
+) -> tuple[int, int, list[tuple[Path, float, float, list[tuple[float, str]]]]]:
+    """Lay the marked clips end to end and return (fd_num, fd_den, entries).
+
+    Both the FCPXML and the EDL are built from this one layout, so a marker's
+    timeline position is identical in both files. If they disagreed, the EDL
+    markers would land on the wrong clips.
+    """
+    clips = [(p, ev) for p, ev in sorted(video_markers.items()) if ev]
+    if not clips:
+        return 1, 30, []
+    num, den = _frame_duration(get_video_fps(Path(clips[0][0])))
+    entries: list[tuple[Path, float, float, list[tuple[float, str]]]] = []
+    offset = 0.0
+    for path_str, events in clips:
+        p = Path(path_str)
+        dur = _video_duration(p, get_video_fps(p))
+        if dur <= 0:
+            dur = max((t for t, _ in events), default=0.0) + 1.0
+        entries.append((p, offset, dur, sorted(events)))
+        offset += dur
+    return num, den, entries
+
+
+def _timecode(seconds: float, num: int, den: int) -> str:
+    """Seconds as HH:MM:SS:FF at the timeline frame rate."""
+    fps = den / num                      # e.g. 30000/1001 -> 29.97
+    total = int(round(seconds * fps))
+    rate = int(round(fps))               # frame field counts whole frames
+    f = total % rate
+    total //= rate
+    return f"{total // 3600:02d}:{(total // 60) % 60:02d}:{total % 60:02d}:{f:02d}"
+
+
+def edl_for_markers(video_markers: dict[str, list[tuple[float, str]]]) -> str:
+    """Build a CMX3600 EDL of timeline markers.
+
+    Resolve imports these with: right-click the timeline in the Media Pool ->
+    Timelines > Import > Timeline Markers from EDL. Verified against DaVinci
+    Resolve 21 — markers land at the stated timecodes with the stated colors.
+    The `|C: |M: |D:` comment line is what carries the marker; the event line
+    above it only positions it.
+    """
+    num, den, entries = _timeline_layout(video_markers)
+    if not entries:
+        return ""
+    lines = ["TITLE: Spotted Markers", "FCM: NON-DROP FRAME", ""]
+    n = 0
+    for _p, offset, dur, events in entries:
+        for t, label in events:
+            # Keep the marker inside its own clip; a marker past the last frame
+            # is dropped by Resolve without warning.
+            at = offset + min(t, max(dur - (num / den), 0.0))
+            n += 1
+            tc_in = _timecode(at, num, den)
+            tc_out = _timecode(at + (num / den), num, den)
+            color = "ResolveColorYellow" if label == "Energy peak" else "ResolveColorBlue"
+            lines.append(
+                f"{n:03d}  001      V     C        {tc_in} {tc_out} {tc_in} {tc_out}"
+            )
+            lines.append(f" |C:{color} |M:{_edl_safe(label)} |D:1")
+            lines.append("")
+    return "\n".join(lines)
+
+
+def _edl_safe(name: str) -> str:
+    """Marker names sit in a pipe-delimited comment; strip what would split it."""
+    return name.replace("|", "-").replace("\n", " ").strip()
+
+
+def write_edl(
+    video_markers: dict[str, list[tuple[float, str]]], out_dir: Path
+) -> Path | None:
+    """Write "Spotted Markers.edl" next to the footage."""
+    edl = edl_for_markers(video_markers)
+    if not edl:
+        return None
+    try:
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out = out_dir / "Spotted Markers.edl"
+        out.write_text(edl)
+        return out
+    except Exception:  # noqa: BLE001 - never fail the marker run over this
+        return None
+
+
 def fcpxml_for_markers(video_markers: dict[str, list[tuple[float, str]]]) -> str:
     """Build an FCPXML timeline whose clips carry Spotted's markers.
 

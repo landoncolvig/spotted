@@ -1031,6 +1031,16 @@ def markers_write(
                 console.print(f"[cyan]DaVinci timeline → {xml_out}[/cyan]")
                 _emit("resolve-timeline", path=str(xml_out), clips=len(video_markers))
 
+            # The markers themselves ride in a companion EDL. Resolve's FCPXML
+            # import drops <marker> elements (verified on Resolve 21), but it
+            # does import markers via Timelines > Import > Timeline Markers
+            # from EDL. Both files come from one shared layout so the EDL
+            # timecodes line up with the imported timeline frame for frame.
+            edl_out = _markers.write_edl(video_markers, fallback_dir)
+            if edl_out:
+                console.print(f"[cyan]DaVinci markers → {edl_out}[/cyan]")
+                _emit("resolve-edl", path=str(edl_out), clips=len(video_markers))
+
             # Secondary: keep emitting the script for anyone whose Resolve does
             # pick scripts up. It costs one small file and needs no user setup.
             out = _markers.write_resolve_script(video_markers, fallback_dir)
