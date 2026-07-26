@@ -435,7 +435,7 @@ async fn start_label_server(
     window: Window,
     port: u16,
     scope_paths: Option<Vec<String>>,
-) -> Result<u16, String> {
+) -> Result<String, String> {
     use std::sync::{Arc, Mutex};
 
     let sidecar = app
@@ -560,7 +560,7 @@ async fn start_label_server(
     while start.elapsed() < timeout {
         match client.get(&url).send().await {
             Ok(resp) if resp.status().is_success() => {
-                return Ok(port);
+                return Ok(url);
             }
             _ => {
                 tokio::time::sleep(Duration::from_millis(250)).await;

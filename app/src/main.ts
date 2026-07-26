@@ -73,9 +73,15 @@ const LABEL_PORT = 8765;
 /** Tokenised labeler URL returned by start_label_server. */
 let labelUrl: string | null = null;
 
-/** Cache-bust the labeler without dropping its auth token. */
+/** Cache-bust the labeler without dropping its auth token.
+ *  Defensive about what came back over IPC: this function runs at the very end
+ *  of a batch, so anything it throws surfaces as "Couldn't finish" after the
+ *  user has already waited through the whole scan. */
 function labelFrameSrc(): string {
-  const base = labelUrl ?? `http://127.0.0.1:${LABEL_PORT}/`;
+  const base =
+    typeof labelUrl === "string" && labelUrl
+      ? labelUrl
+      : `http://127.0.0.1:${LABEL_PORT}/`;
   return base + (base.includes("?") ? "&" : "?") + `t=${Date.now()}`;
 }
 let currentPath: string | null = null;
@@ -464,6 +470,7 @@ async function runBatch(path: string, tags: string[] = []) {
     workingDetail.textContent = "Opening labeler…";
     // Rust returns the URL including the per-session token; the labeler
     // rejects any request without it, so the iframe must use this exact URL.
+    // Returns the labeler URL including its per-session token.
     labelUrl = await invoke<string>("start_label_server", {
       port: LABEL_PORT,
       scopePaths: currentPath ? [currentPath] : null,
