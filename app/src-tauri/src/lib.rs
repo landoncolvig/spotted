@@ -181,8 +181,13 @@ async fn tag_videos(
     exclude_tags: Option<Vec<String>>,
     overwrite: Option<bool>,
     scope: Option<String>,
+    all_clips: Option<bool>,
 ) -> Result<i32, String> {
     let mut args = vec!["tag-write".to_string()];
+    // Re-tag Library is the one place library-wide is intended.
+    if all_clips.unwrap_or(false) {
+        args.push("--all".to_string());
+    }
     // Confine the write to the folder this batch was about. Without it every
     // run rewrites every clip ever indexed.
     if let Some(path) = scope.filter(|p| !p.is_empty()) {
@@ -218,6 +223,7 @@ async fn suggest_activities(
     app: AppHandle,
     window: Window,
     scope: Option<String>,
+    all_clips: Option<bool>,
 ) -> Result<String, String> {
     // Capture the sidecar's stdout and RETURN it so the frontend reads the
     // activity-complete payload from the invoke result, not from a racy
@@ -230,6 +236,9 @@ async fn suggest_activities(
     let (mut rx, child) = sidecar
         .args({
             let mut a = vec!["activity-suggest".to_string()];
+            if all_clips.unwrap_or(false) {
+                a.push("--all".to_string());
+            }
             if let Some(path) = scope.filter(|p| !p.is_empty()) {
                 a.push("--scope".to_string());
                 a.push(path);
@@ -413,8 +422,13 @@ async fn write_markers(
     app: AppHandle,
     window: Window,
     scope: Option<String>,
+    all_clips: Option<bool>,
 ) -> Result<i32, String> {
     let mut args = vec!["markers-write".to_string()];
+    // Re-tag Library is the one place library-wide is intended.
+    if all_clips.unwrap_or(false) {
+        args.push("--all".to_string());
+    }
     // Same reason as tag_videos: without a scope the DaVinci timeline is built
     // from every clip ever indexed, including ones long since moved or deleted,
     // which Resolve then reports as missing media.

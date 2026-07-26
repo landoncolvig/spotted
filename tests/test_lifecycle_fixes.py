@@ -456,3 +456,35 @@ def test_non_drop_timecode_is_unchanged(monkeypatch):
     monkeypatch.setattr(_markers, "_ffprobe_field", probe)
     got = _markers.start_timecode_sec(P("x.mov"), 1, 30)
     assert abs(got - 3600.0) < 1e-6
+
+
+def test_scope_falls_back_to_the_recorded_batch(tmp_path):
+    """The UI's folder path is a module global that dies with the app, and the
+    auto-update restarts the app. Without a DB-side fallback, finishing a batch
+    after an update silently widened every write to the whole library."""
+    from facetag.cli import _resolve_scope
+    conn = _db.connect(tmp_path / "s.db")
+    assert _resolve_scope(None, conn) is None          # nothing recorded yet
+    _db.set_setting(conn, "last_scan_root", "/Users/x/May")
+    assert _resolve_scope(None, conn) == "/Users/x/May"
+    # explicit scope still wins, and --all means the whole library on purpose
+    assert _resolve_scope(tmp_path, conn) == str(tmp_path.resolve())
+    assert _resolve_scope(None, conn, allow_all=True) is None
+
+
+def test_tag_vocabulary_is_scoped_to_the_batch(tmp_path):
+    """Unioned library-wide, a Vegas trip gets searched for 'conference room'
+    and 'sticky notes' typed months earlier for different footage."""
+    conn = _db.connect(tmp_path / "v.db")
+    new_dir = tmp_path / "vegas"
+    old_dir = tmp_path / "office"
+    for d, tag in ((new_dir, "casino"), (old_dir, "conference room")):
+        d.mkdir()
+        clip = d / "c.mov"
+        clip.write_bytes(b"")
+        conn.execute("INSERT INTO videos(path) VALUES(?)", (str(clip),))
+        vid = conn.execute("SELECT id FROM videos WHERE path=?", (str(clip),)).fetchone()[0]
+        _db.set_batch_tags(conn, vid, [tag])
+    conn.commit()
+    assert _db.all_batch_tags(conn) == ["casino", "conference room"]
+    assert _db.all_batch_tags(conn, str(new_dir)) == ["casino"]

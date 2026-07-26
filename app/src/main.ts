@@ -586,7 +586,10 @@ function mountLabelScreen() {
   screen.appendChild(wrap);
   stage.appendChild(screen);
 
-  tagBtn.addEventListener("click", startTagFlow);
+  // Wrapped deliberately: passing startTagFlow directly hands the MouseEvent
+  // in as allClips, which is truthy, so every click would re-tag the whole
+  // library instead of this batch.
+  tagBtn.addEventListener("click", () => { void startTagFlow(false); });
 }
 
 // After faces are named: first look for each of the user's own tags in every
@@ -596,7 +599,7 @@ function mountLabelScreen() {
 //
 // If nothing matched (no tags entered, or none crossed the threshold) we skip
 // the review and write face names straight away.
-async function startTagFlow() {
+async function startTagFlow(allClips = false) {
   setState("working");
   setProgressIndeterminate();
   workingLabel.textContent = "Spotting your tags";
@@ -608,13 +611,13 @@ async function startTagFlow() {
   // exact failure the review screen exists to prevent.
   let matched: MatchedTag[] = [];
   try {
-    const out = await invoke<string>("suggest_activities", { scope: currentPath ?? null });
+    const out = await invoke<string>("suggest_activities", { scope: currentPath ?? null, allClips: false });
     matched = parseMatchedTags(out);
   } catch (e) {
     console.warn("activity suggest failed (non-fatal):", e);
   }
   if (matched.length === 0) {
-    await runWrite([]);
+    await runWrite([], allClips);
     return;
   }
   renderReview(matched);
@@ -719,7 +722,7 @@ function renderReview(matched: MatchedTag[]) {
   stage.appendChild(screen);
 }
 
-async function runWrite(excludeTags: string[]) {
+async function runWrite(excludeTags: string[], allClips = false) {
   cancelled = false;
   // These are module-level and were never reset, so a run whose verification
   // never arrived would display the PREVIOUS run's "Verified on beach_01.mov"
@@ -739,6 +742,7 @@ async function runWrite(excludeTags: string[]) {
       excludeTags,
       overwrite: overwriteKeywords,
       scope: currentPath ?? null,
+      allClips,
     });
 
     // Markers are a bonus — Premiere/DaVinci-only feature. Failures here
@@ -747,7 +751,7 @@ async function runWrite(excludeTags: string[]) {
     workingDetail.textContent = "For Premiere & DaVinci scrubber…";
     try {
       lastMarkerError = null;
-      await invoke<number>("write_markers", { scope: currentPath ?? null });
+      await invoke<number>("write_markers", { scope: currentPath ?? null, allClips });
     } catch (e) {
       // Non-fatal: keywords already succeeded, so the run still counts. But do
       // NOT swallow this. It used to be a bare console.warn, which meant a
@@ -1379,7 +1383,8 @@ function wireMenuEvents() {
       return;
     }
     await ensureSidecarListener();
-    await startTagFlow();
+    // The menu item says "Library", so this one really is every clip.
+    await startTagFlow(true);
   });
   listen("menu://show-welcome", () => {
     try { localStorage.removeItem(WELCOME_KEY); } catch {}

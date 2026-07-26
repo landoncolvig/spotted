@@ -111,9 +111,21 @@ def _under_scope(path_str: str, root: str | None) -> bool:
     return path_str == root or path_str.startswith(root.rstrip("/") + "/")
 
 
-def _resolve_scope(scope) -> str | None:
+def _resolve_scope(scope, conn=None, *, allow_all: bool = False) -> str | None:
+    """Folder this run should be confined to.
+
+    Explicit --scope wins. Otherwise fall back to the folder the last scan was
+    about, which the DB remembers, so a restart between scanning and writing
+    cannot silently widen the run to the entire library. `allow_all` is for
+    "Re-tag Library", where library-wide is what the user asked for.
+    """
     if scope is None:
-        return None
+        if allow_all or conn is None:
+            return None
+        try:
+            return _db.get_setting(conn, "last_scan_root")
+        except Exception:  # noqa: BLE001
+            return None
     try:
         return str(Path(scope).resolve())
     except OSError:
@@ -153,6 +165,14 @@ def scan(
     batch_tags = [t.strip().lower() for t in tags.split(",") if t.strip()] if tags else []
 
     conn = _db.connect(db_path)
+    # Remember what this batch was about. The later phases used to be scoped by
+    # a path the UI held in memory, which is lost whenever the app restarts —
+    # including on every auto-update — and they then silently fell back to the
+    # whole library.
+    try:
+        _db.set_setting(conn, "last_scan_root", str(Path(path).resolve()))
+    except Exception:  # noqa: BLE001 - scoping is best-effort, never block a scan
+        pass
     detector = _detect.Detector(min_score=min_score)
 
     # Activity encoder is optional + degrades gracefully. If the .mlpackages
@@ -328,6 +348,7 @@ def scan(
 def activity_suggest(
     db_path: Path = typer.Option(DEFAULT_DB, "--db"),
     scope: Path = typer.Option(None, "--scope", help="Only score clips under this folder. Without it every clip with embeddings is re-scored, which can flip tags off footage the user already reviewed."),
+    all_clips: bool = typer.Option(False, "--all", help="Ignore the batch scope and process every clip in the library (what Re-tag Library means)."),
     threshold: float = typer.Option(0.15, "--threshold", help="Absolute floor (min cosine, per-video MAX over frames) below which a tag is never applied. Selection is otherwise relative — a tag must also stand out for that tag and on that clip — so this is a noise floor, not the primary knob. Calibrated on real footage; raising it trims more aggressively."),
 ):
     """Look for each of the user's typed tags in every clip and apply it only
@@ -347,7 +368,7 @@ def activity_suggest(
 
     conn = _db.connect(db_path)
 
-    user_tags = _db.all_batch_tags(conn)
+    user_tags = _db.all_batch_tags(conn, _resolve_scope(scope, conn, allow_all=all_clips))
     if not user_tags:
         console.print("[yellow]No tags to look for — the user didn't enter any on the welcome screen.[/yellow]")
         _emit("activity-empty", message="no user tags entered")
@@ -404,7 +425,7 @@ def activity_suggest(
     # thing users report). Instead, if the scene encoder loaded, compute
     # embeddings on demand for any indexed clip that lacks them and is still on
     # disk, then match per clip like normal.
-    root = _resolve_scope(scope)
+    root = _resolve_scope(scope, conn, allow_all=all_clips)
     if encoder is not None:
         needs = [
             (vid, p)
@@ -850,6 +871,7 @@ def tag_write(
     dry_run: bool = typer.Option(False, "--dry-run", help="Print what would be written, change nothing."),
     exclude_tags: str = typer.Option("", "--exclude-tags", help="Comma-separated matched tags to leave out (the ones the user unchecked on the review screen)."),
     scope: Path = typer.Option(None, "--scope", help="Only write clips under this folder. Without it every clip in the library is rewritten, which re-runs exiftool over footage that hasn't changed and re-risks every write on files the user isn't touching."),
+    all_clips: bool = typer.Option(False, "--all", help="Ignore the batch scope and process every clip in the library (what Re-tag Library means)."),
 ):
     """Write per-video person keywords into each .mov via exiftool.
 
@@ -870,14 +892,12 @@ def tag_write(
     if exclude and not dry_run:
         _db.delete_auto_tags_by_name(conn, exclude)
     mapping = _tag.videos_with_keywords(conn, exclude_tags=exclude)
+    scope = _resolve_scope(scope, conn, allow_all=all_clips)
     if scope is not None:
         # Writing is the expensive, risky half of a run: two exiftool calls and
         # two xattr writes per clip. Confining it to the batch keeps "add this
         # month's footage" fast and keeps untouched folders untouched.
-        try:
-            root = str(Path(scope).resolve())
-        except OSError:
-            root = str(scope)
+        root = scope
         before = len(mapping)
         mapping = {
             p: names for p, names in mapping.items()
@@ -1021,6 +1041,7 @@ def markers_write(
         help="Also drop a .xmp sidecar next to each clip (a DaVinci fallback). Off by default: sidecars leave a file beside every clip, which clutters a folder of thousands, and the markers are also written in-file. When off, any sidecar Spotted previously left is cleaned up.",
     ),
     scope: Path = typer.Option(None, "--scope", help="Only write markers for clips under this folder, and build the DaVinci timeline from just those. Without it every clip in the library is included."),
+    all_clips: bool = typer.Option(False, "--all", help="Ignore the batch scope and process every clip in the library (what Re-tag Library means)."),
     resolve: bool = typer.Option(
         True, "--resolve/--no-resolve",
         help="Also emit a 'Spotted Markers' DaVinci Resolve script (into Resolve's Scripts folder, else next to the footage). DaVinci ignores in-file XMP markers, so this is the only way markers show there — the user runs it from Workspace > Scripts after importing.",
@@ -1040,7 +1061,7 @@ def markers_write(
     # Markers come from two sources: named-face appearances and energy peaks.
     # Union them by video so a clip with no named faces still gets its energy
     # markers, and a clip with both gets one merged, time-sorted set.
-    root = _resolve_scope(scope)
+    root = _resolve_scope(scope, conn, allow_all=all_clips)
     by_id: dict[int, str] = {}
     for vid, path_str in _markers.videos_with_named_faces(conn):
         if _under_scope(path_str, root):

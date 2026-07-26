@@ -34,6 +34,11 @@ CREATE TABLE IF NOT EXISTS people (
 );
 CREATE INDEX IF NOT EXISTS idx_people_name ON people(name);
 
+CREATE TABLE IF NOT EXISTS app_state (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS hidden_clusters (
     cluster_id INTEGER PRIMARY KEY
 );
@@ -210,14 +215,39 @@ def videos_with_energy_peaks(conn: sqlite3.Connection) -> list[tuple[int, str]]:
     return [(int(i), p) for i, p in rows]
 
 
-def all_batch_tags(conn: sqlite3.Connection) -> list[str]:
-    """Union of every distinct batch tag across all videos, sorted.
+def _split_batch_tag_rows(rows) -> list[str]:
+    seen: set[str] = set()
+    for (csv,) in rows:
+        for t in csv.split(","):
+            t = t.strip()
+            if t:
+                seen.add(t)
+    return sorted(seen)
+
+
+def all_batch_tags(conn: sqlite3.Connection, scope_root: str | None = None) -> list[str]:
+    """Distinct batch tags, optionally only for clips under `scope_root`.
 
     These are the tags the user typed on the welcome screen. The activity
     matcher uses them as its whole vocabulary: it looks for each of these
     tags per clip (via CLIP) and applies it only where it actually appears,
     the same way face names attach only to clips a person is in.
+
+    Scoping matters: unioned across the whole library, a new batch gets
+    searched for words the user typed months ago for entirely different
+    footage. "conference room" and "sticky notes" turned up on a tester's
+    Vegas trip that way.
     """
+    if scope_root:
+        rows = conn.execute(
+            "SELECT DISTINCT batch_tags FROM videos "
+            "WHERE batch_tags IS NOT NULL AND batch_tags != '' "
+            "AND (path = ? OR path LIKE ? || '/%')",
+            (scope_root.rstrip("/"), scope_root.rstrip("/")),
+        ).fetchall()
+        if rows:
+            return _split_batch_tag_rows(rows)
+        # fall through: nothing recorded for this folder yet
     rows = conn.execute(
         "SELECT DISTINCT batch_tags FROM videos WHERE batch_tags IS NOT NULL AND batch_tags != ''"
     ).fetchall()
@@ -280,6 +310,20 @@ def video_has_embeddings(conn: sqlite3.Connection, video_id: int) -> bool:
         "SELECT 1 FROM frame_embeddings WHERE video_id = ? LIMIT 1", (video_id,)
     ).fetchone()
     return row is not None
+
+
+def set_setting(conn: sqlite3.Connection, key: str, value: str) -> None:
+    conn.execute(
+        "INSERT INTO app_state(key, value) VALUES(?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        (key, value),
+    )
+    conn.commit()
+
+
+def get_setting(conn: sqlite3.Connection, key: str) -> str | None:
+    row = conn.execute("SELECT value FROM app_state WHERE key = ?", (key,)).fetchone()
+    return row[0] if row else None
 
 
 def mark_scan_incomplete(conn: sqlite3.Connection, video_id: int) -> None:
