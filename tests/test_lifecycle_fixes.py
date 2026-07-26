@@ -419,3 +419,40 @@ def test_sqlite_is_wal_with_a_real_busy_timeout(tmp_path):
     conn = _db.connect(tmp_path / "w.db")
     assert conn.execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal"
     assert conn.execute("PRAGMA busy_timeout").fetchone()[0] >= 30000
+
+
+def test_drop_frame_timecode_is_not_treated_as_non_drop(monkeypatch):
+    """Ellie's clips carry drop-frame timecode. Counting it as non-drop
+    overstates the start by ~0.1%: 4.7s at TC 01:17, 16.3s at TC 04:32. The
+    clip then claims to run past the end of its own media and DaVinci shows the
+    tail as Media Offline."""
+    from pathlib import Path as P
+
+    def probe(_p, args):
+        # 59.94, drop-frame (';' before the frames field)
+        if "stream=r_frame_rate" in " ".join(args):
+            return "60000/1001"
+        return "01:17:36;36"
+
+    monkeypatch.setattr(_markers, "_ffprobe_field", probe)
+    num, den = 1001, 60000
+    got = _markers.start_timecode_sec(P("x.mov"), num, den)
+
+    naive_frames = ((1 * 60 + 17) * 60 + 36) * 60 + 36
+    dropped = 4 * (77 - 7)                     # 4/min except every tenth
+    assert round(got * den / num) == naive_frames - dropped
+    # and the error we removed is the one she measured
+    assert 4.0 < (naive_frames * num / den) - got < 5.5
+
+
+def test_non_drop_timecode_is_unchanged(monkeypatch):
+    from pathlib import Path as P
+
+    def probe(_p, args):
+        if "stream=r_frame_rate" in " ".join(args):
+            return "30/1"
+        return "01:00:00:00"                   # ':' -> non-drop
+
+    monkeypatch.setattr(_markers, "_ffprobe_field", probe)
+    got = _markers.start_timecode_sec(P("x.mov"), 1, 30)
+    assert abs(got - 3600.0) < 1e-6

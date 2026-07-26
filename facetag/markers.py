@@ -594,6 +594,13 @@ def start_timecode_sec(video_path: Path, num: int = 1, den: int = 30) -> float:
     if not raw:
         return 0.0
 
+    # A ';' before the frames field means DROP-FRAME. It is a labelling scheme,
+    # not a different clock: NTSC timecode skips frame NUMBERS so the label
+    # keeps pace with wall time. Treating it as non-drop overcounts by ~0.1%,
+    # which is 4.7s at TC 01:17 and 16.3s at TC 04:32. The clip is then declared
+    # as starting later than it does, its declared range runs past the real end
+    # of the media, and DaVinci shows the last N seconds as Media Offline.
+    drop_frame = ";" in raw
     parts = raw.replace(";", ":").split(":")
     if len(parts) != 4:
         return 0.0
@@ -604,6 +611,11 @@ def start_timecode_sec(video_path: Path, num: int = 1, den: int = 30) -> float:
 
     nominal = max(1, int(round(den / num)))          # 60 for 1001/60000
     frames = ((h * 60 + m) * 60 + sec) * nominal + fr
+    if drop_frame:
+        # 2 frames a minute at 29.97, 4 at 59.94, except every tenth minute.
+        per_min = round(nominal * 0.066666)
+        total_min = h * 60 + m
+        frames -= per_min * (total_min - total_min // 10)
     return frames * (num / den)
 
 

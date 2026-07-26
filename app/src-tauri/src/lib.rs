@@ -786,6 +786,24 @@ pub fn run() {
             let _ = telemetry::boot();
             telemetry::track("app-launch", HashMap::new());
 
+            // Re-register the bundle with Spotlight. The updater replaces
+            // Spotted.app wholesale, and an ad-hoc signed bundle swapped out
+            // from under LaunchServices can drop out of the Spotlight index —
+            // the app stops appearing in Cmd+Space and has to be found by
+            // hand in Applications. Cheap, backgrounded, and harmless if the
+            // index is already fine.
+            if let Ok(exe) = std::env::current_exe() {
+                // .../Spotted.app/Contents/MacOS/Spotted -> .../Spotted.app
+                if let Some(bundle) = exe.ancestors().nth(3) {
+                    if bundle.extension().and_then(|e| e.to_str()) == Some("app") {
+                        let b = bundle.to_path_buf();
+                        std::thread::spawn(move || {
+                            let _ = std::process::Command::new("mdimport").arg(&b).status();
+                        });
+                    }
+                }
+            }
+
             // Auto-check for updates on launch. Tauri v2 (unlike v1) ignores
             // the `dialog: true` updater config and does not show any UI on
             // its own — the previous version of this code called
