@@ -322,3 +322,53 @@ def test_read_keywords_raises_instead_of_reporting_empty(tmp_path):
     import pytest
     with pytest.raises(Exception):
         _tag.read_keywords(tmp_path / "does_not_exist.mov")
+
+
+# --- audit fixes: scoping, auth, rescan safety, injection -------------------
+def test_rescan_clears_scan_complete_before_wiping_faces(tmp_path):
+    """Cancelling a rescan must not leave clips flagged complete with 0 faces."""
+    import numpy as np
+    db = tmp_path / "r.db"
+    conn = _db.connect(db)
+    clip = tmp_path / "v.mov"; clip.write_bytes(b"")
+    conn.execute("INSERT INTO videos(path) VALUES(?)", (str(clip),))
+    vid = conn.execute("SELECT id FROM videos WHERE path=?", (str(clip),)).fetchone()[0]
+    conn.execute(
+        "INSERT INTO faces(video_id,timestamp_sec,cluster_id,embedding) VALUES(?,?,?,?)",
+        (vid, 1.0, 1, np.zeros(512, dtype=np.float32).tobytes()),
+    )
+    _db.mark_scan_complete(conn, vid)
+    conn.commit()
+    assert _db.is_scanned(conn, str(clip))
+
+    _db.mark_scan_incomplete(conn, vid)
+    _db.clear_video_faces(conn, vid)
+    # A cancel landing here must leave the clip re-scannable, not skipped.
+    assert not _db.is_scanned(conn, str(clip))
+
+
+def test_labeler_requires_token_and_loopback_host(tmp_path):
+    """No token, wrong token, or a rebound Host must all be refused."""
+    from facetag import web as _web
+    _db.connect(tmp_path / "t.db").close()
+    app = _web.create_app(tmp_path / "t.db", tmp_path / "thumbs")
+    _web._install_guard(app, "TOKEN123")
+    c = app.test_client()
+    assert c.get("/").status_code == 403
+    assert c.get("/?k=nope").status_code == 403
+    assert c.post("/hide/1").status_code == 403
+    assert c.get("/?k=TOKEN123").status_code == 200
+    # DNS rebinding: correct token, attacker's Host header
+    assert c.get("/?k=TOKEN123", headers={"Host": "evil.com"}).status_code == 403
+
+
+def test_scope_label_is_escaped(tmp_path):
+    """A folder name is user data and lands in markup."""
+    from facetag import web as _web
+    _db.connect(tmp_path / "s.db").close()
+    evil = tmp_path / '<img src=x onerror=alert(1)>'
+    evil.mkdir()
+    app = _web.create_app(tmp_path / "s.db", tmp_path / "thumbs", scope_paths=[str(evil)])
+    _web._install_guard(app, "T")
+    body = app.test_client().get("/?k=T").get_data(as_text=True)
+    assert "<img src=x onerror=" not in body

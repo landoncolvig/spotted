@@ -37,6 +37,33 @@ def _render_seen_in(video_paths: list[str], max_shown: int = 3) -> str:
     return f'<span class="seen-in" title="{title}">seen in: {label}</span>'
 
 
+def _install_guard(app, token: str) -> None:
+    """Require a per-session token and refuse non-loopback Host headers.
+
+    The labeler serves cropped faces of the user's family, their names, and
+    their file paths, with no login. Without this, any web page the user has
+    open can rebind DNS to 127.0.0.1, become same-origin with this server, and
+    read or modify all of it. The token is generated per launch and handed to
+    the app; nothing else can guess it.
+    """
+    from flask import request, abort
+
+    @app.before_request
+    def _guard():  # noqa: ANN202 - flask hook
+        host = (request.host or "").split(":")[0]
+        if host not in ("127.0.0.1", "localhost", "::1"):
+            abort(403)
+        # Cross-site requests never carry the token, so this also closes CSRF
+        # on the POST routes.
+        supplied = (
+            request.args.get("k")
+            or request.headers.get("X-Spotted-Token")
+            or (request.cookies.get("spotted_token") or "")
+        )
+        if not token or supplied != token:
+            abort(403)
+
+
 def create_app(
     db_path: Path,
     thumb_dir: Path,
@@ -161,7 +188,10 @@ def create_app(
 
         scope_chip = ""
         if app.config["SCOPE_PATHS"]:
-            label = _scope_label()
+            # Escaped: this is a folder name off the user's disk, and it lands
+            # in markup. A folder named with an <img onerror=...> payload used
+            # to run script inside the labeler origin.
+            label = html.escape(_scope_label())
             tail = "&view=" + view if view != "needs" else ""
             if show_all:
                 scope_chip = (
@@ -284,9 +314,12 @@ def serve(
     port: int = 8765,
     open_browser: bool = True,
     scope_paths: list[str] | None = None,
+    token: str = "",
 ) -> None:
     app = create_app(db_path, thumb_dir, scope_paths=scope_paths)
-    url = f"http://127.0.0.1:{port}/"
+    if token:
+        _install_guard(app, token)
+    url = f"http://127.0.0.1:{port}/" + (f"?k={token}" if token else "")
     if open_browser:
         threading.Timer(0.7, lambda: webbrowser.open(url)).start()
     print(f"\nfacetag web labeler running at {url}")

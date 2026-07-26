@@ -272,6 +272,18 @@ def video_has_embeddings(conn: sqlite3.Connection, video_id: int) -> bool:
     return row is not None
 
 
+def mark_scan_incomplete(conn: sqlite3.Connection, video_id: int) -> None:
+    """Flag a video as not fully scanned.
+
+    Called before wiping its faces for a rescan. Without this, cancelling a
+    rescan (SIGTERM, no handler) leaves every not-yet-reached clip flagged
+    complete with zero faces, is_scanned() skips it forever, and the people in
+    it are gone with no way to get them back.
+    """
+    conn.execute("UPDATE videos SET scan_complete = 0 WHERE id = ?", (video_id,))
+    conn.commit()
+
+
 def clear_video_faces(conn: sqlite3.Connection, video_id: int) -> None:
     conn.execute("DELETE FROM faces WHERE video_id = ?", (video_id,))
     conn.commit()

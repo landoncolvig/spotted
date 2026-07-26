@@ -69,6 +69,14 @@ const tagsSkip = document.getElementById("tags-skip") as HTMLButtonElement;
 const tagsOverwrite = document.getElementById("tags-overwrite") as HTMLInputElement;
 
 const LABEL_PORT = 8765;
+/** Tokenised labeler URL returned by start_label_server. */
+let labelUrl: string | null = null;
+
+/** Cache-bust the labeler without dropping its auth token. */
+function labelFrameSrc(): string {
+  const base = labelUrl ?? `http://127.0.0.1:${LABEL_PORT}/`;
+  return base + (base.includes("?") ? "&" : "?") + `t=${Date.now()}`;
+}
 let currentPath: string | null = null;
 // Whether the final tag-write replaces each clip's whole keyword set (start
 // fresh) vs merging. Captured from the tags-screen checkbox when a run begins,
@@ -420,7 +428,9 @@ async function runBatch(path: string, tags: string[] = []) {
     await invoke<number>("cluster_faces");
     workingLabel.textContent = "Naming people";
     workingDetail.textContent = "Opening labeler…";
-    await invoke<number>("start_label_server", {
+    // Rust returns the URL including the per-session token; the labeler
+    // rejects any request without it, so the iframe must use this exact URL.
+    labelUrl = await invoke<string>("start_label_server", {
       port: LABEL_PORT,
       scopePaths: currentPath ? [currentPath] : null,
     });
@@ -491,7 +501,7 @@ function mountLabelScreen() {
     // fresh clusters on the same port; setting the same URL wouldn't reload,
     // so without the cache-buster we'd show the previous batch's named faces.
     const frame = existing.querySelector(".label-frame") as HTMLIFrameElement | null;
-    if (frame) frame.src = `http://127.0.0.1:${LABEL_PORT}/?t=${Date.now()}`;
+    if (frame) frame.src = labelFrameSrc();
     return;
   }
 
@@ -499,7 +509,7 @@ function mountLabelScreen() {
   const wrap = makeEl("div", "label-wrap");
 
   const frame = makeEl("iframe", "label-frame");
-  frame.src = `http://127.0.0.1:${LABEL_PORT}/?t=${Date.now()}`;
+  frame.src = labelFrameSrc();
   frame.title = "Spotted labeler";
 
   const bar = makeEl("div", "label-bar");
@@ -653,7 +663,11 @@ async function runWrite(excludeTags: string[]) {
   workingLabel.textContent = "Writing keywords";
   workingDetail.textContent = "Running exiftool, per clip…";
   try {
-    await invoke<number>("tag_videos", { excludeTags, overwrite: overwriteKeywords });
+    await invoke<number>("tag_videos", {
+      excludeTags,
+      overwrite: overwriteKeywords,
+      scope: currentPath ?? null,
+    });
 
     // Markers are a bonus — Premiere/DaVinci-only feature. Failures here
     // should not break the flow because keywords already succeeded.

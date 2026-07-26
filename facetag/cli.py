@@ -214,6 +214,12 @@ def scan(
             # Reaching here means the clip isn't marked complete, so we're doing
             # a full (re-)scan: wipe any prior partial faces/embeddings first so
             # a resumed or repeated scan can't accumulate duplicate rows.
+            #
+            # Drop the completion flag BEFORE the wipe. On --rescan the flag is
+            # still 1 from the previous run, and cancelling mid-scan (SIGTERM,
+            # no handler) would otherwise leave this clip flagged complete with
+            # zero faces — permanently skipped, its people unrecoverable.
+            _db.mark_scan_incomplete(conn, video_id)
             _db.clear_video_faces(conn, video_id)
             _db.clear_video_embeddings(conn, video_id)
 
@@ -682,6 +688,7 @@ def label_web(
             "Repeatable. Users can toggle 'show all' from the chip in the UI."
         ),
     ),
+    token: str = typer.Option("", "--token", help="Require this token on every request. Without it the labeler is readable by any local process and by any web page via DNS rebinding."),
 ):
     """Open a one-page web labeler. See every cluster, type names, hit Save All."""
     _web.serve(
@@ -690,6 +697,7 @@ def label_web(
         port=port,
         open_browser=not no_browser,
         scope_paths=list(scope_path) if scope_path else None,
+        token=token,
     )
 
 
@@ -806,6 +814,7 @@ def tag_write(
     merge: bool = typer.Option(True, "--merge/--overwrite", help="Merge Spotted's keywords with any already in the file (default), preserving keywords set by other tools (Premiere, Photos, Bridge). --overwrite replaces the file's entire keyword set."),
     dry_run: bool = typer.Option(False, "--dry-run", help="Print what would be written, change nothing."),
     exclude_tags: str = typer.Option("", "--exclude-tags", help="Comma-separated matched tags to leave out (the ones the user unchecked on the review screen)."),
+    scope: Path = typer.Option(None, "--scope", help="Only write clips under this folder. Without it every clip in the library is rewritten, which re-runs exiftool over footage that hasn't changed and re-risks every write on files the user isn't touching."),
 ):
     """Write per-video person keywords into each .mov via exiftool.
 
@@ -826,6 +835,24 @@ def tag_write(
     if exclude and not dry_run:
         _db.delete_auto_tags_by_name(conn, exclude)
     mapping = _tag.videos_with_keywords(conn, exclude_tags=exclude)
+    if scope is not None:
+        # Writing is the expensive, risky half of a run: two exiftool calls and
+        # two xattr writes per clip. Confining it to the batch keeps "add this
+        # month's footage" fast and keeps untouched folders untouched.
+        try:
+            root = str(Path(scope).resolve())
+        except OSError:
+            root = str(scope)
+        before = len(mapping)
+        mapping = {
+            p: names for p, names in mapping.items()
+            if p == root or p.startswith(root.rstrip("/") + "/")
+        }
+        if before != len(mapping):
+            console.print(
+                f"[dim]Scoped to {Path(root).name}: "
+                f"{len(mapping)} of {before} clip(s).[/dim]"
+            )
     if not mapping:
         # Treat as a hard error so the Tauri shell shows it via showError()
         # instead of silently jumping to the Done screen. Otherwise the user

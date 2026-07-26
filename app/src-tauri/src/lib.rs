@@ -21,6 +21,8 @@ struct ActiveChildren(Arc<Mutex<Vec<u32>>>);
 /// batch's) server.
 #[derive(Default)]
 struct LabelServer(Arc<Mutex<Option<u32>>>);
+#[derive(Default)]
+struct LabelToken(Arc<Mutex<String>>);
 
 #[derive(Serialize, Clone)]
 struct SidecarLine {
@@ -178,8 +180,15 @@ async fn tag_videos(
     window: Window,
     exclude_tags: Option<Vec<String>>,
     overwrite: Option<bool>,
+    scope: Option<String>,
 ) -> Result<i32, String> {
     let mut args = vec!["tag-write".to_string()];
+    // Confine the write to the folder this batch was about. Without it every
+    // run rewrites every clip ever indexed.
+    if let Some(path) = scope.filter(|p| !p.is_empty()) {
+        args.push("--scope".to_string());
+        args.push(path);
+    }
     let excluded = exclude_tags.unwrap_or_default();
     if !excluded.is_empty() {
         args.push("--exclude-tags".to_string());
@@ -448,11 +457,23 @@ async fn start_label_server(
     // frontend hands us so the labeler shows only clusters touching the
     // freshly-dropped clip(s). The labeler still exposes a "show all"
     // toggle in its header chip for cross-batch labeling.
+    // Per-session token. The labeler serves cropped faces, names and file
+    // paths with no login, so without this any local process (and any web page
+    // via DNS rebinding) can read and modify all of it.
+    let token = uuid::Uuid::new_v4().simple().to_string();
+    if let Some(s) = app.try_state::<LabelToken>() {
+        if let Ok(mut g) = s.0.lock() {
+            *g = token.clone();
+        }
+    }
+
     let mut args: Vec<String> = vec![
         "label-web".to_string(),
         "--port".to_string(),
         port.to_string(),
         "--no-browser".to_string(),
+        "--token".to_string(),
+        token.clone(),
     ];
     if let Some(paths) = scope_paths {
         for p in paths {
@@ -505,7 +526,7 @@ async fn start_label_server(
     // Poll until Flask actually responds on the port. Flask's cold start
     // inside the PyInstaller-extracted environment can take 2-5 seconds
     // on a slower Mac, so the old 900ms fixed sleep wasn't enough.
-    let url = format!("http://127.0.0.1:{port}/");
+    let url = format!("http://127.0.0.1:{port}/?k={token}");
     let timeout = Duration::from_secs(20);
     let start = std::time::Instant::now();
     let client = reqwest::Client::builder()
@@ -730,6 +751,7 @@ pub fn run() {
     tauri::Builder::default()
         .manage(ActiveChildren::default())
         .manage(LabelServer::default())
+        .manage(LabelToken::default())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
@@ -962,6 +984,33 @@ pub fn run() {
             telemetry::cmds::telemetry_active,
             app_version
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running Spotted");
+        .build(tauri::generate_context!())
+        .expect("error while running Spotted")
+        .run(|app, event| {
+            // Tauri only auto-kills children spawned from JS; these are spawned
+            // from Rust, so without this the label server (and any running
+            // scan) is reparented to launchd and keeps going after quit.
+            if let tauri::RunEvent::Exit = event {
+                if let Some(s) = app.try_state::<LabelServer>() {
+                    if let Ok(mut g) = s.0.lock() {
+                        if let Some(pid) = g.take() {
+                            let _ = std::process::Command::new("kill")
+                                .arg("-TERM")
+                                .arg(pid.to_string())
+                                .status();
+                        }
+                    }
+                }
+                if let Some(s) = app.try_state::<ActiveChildren>() {
+                    if let Ok(mut g) = s.0.lock() {
+                        for pid in g.drain(..) {
+                            let _ = std::process::Command::new("kill")
+                                .arg("-TERM")
+                                .arg(pid.to_string())
+                                .status();
+                        }
+                    }
+                }
+            }
+        });
 }
