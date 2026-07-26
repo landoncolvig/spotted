@@ -85,6 +85,15 @@ jobs:
           "$BIN" status --db "$RUNNER_TEMP/smoke.db" >/dev/null
           "$BIN" selftest
 
+      - name: Check IPC contract (frontend vs Rust commands)
+        run: |
+          set -euo pipefail
+          # tsc takes every invoke<T> annotation at its word and no test crosses
+          # the IPC boundary, so a Rust return type can change under the
+          # frontend and every existing check stays green. That shipped in
+          # v0.0.62 and broke every batch at the final step.
+          python3 scripts/check_ipc_contract.py
+
       - name: Install JS deps
         working-directory: app
         run: npm ci
@@ -136,6 +145,38 @@ jobs:
           # secret is unset, sentry::init never runs (no-op).
           SPOTTED_SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
         run: npm run tauri build -- --target aarch64-apple-darwin
+
+      - name: Verify the assembled .app
+        run: |
+          set -euo pipefail
+          APP="app/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/Spotted.app"
+          if [ ! -d "$APP" ]; then
+            echo "::error::bundle missing at $APP"
+            exit 1
+          fi
+
+          # The pre-bundle smoke test runs the sidecar from the build directory.
+          # Tauri then copies and re-signs it into the bundle, so what ships is
+          # not what was tested. Run the one that ships.
+          EMBEDDED="$APP/Contents/MacOS/spotted-sidecar"
+          if [ ! -x "$EMBEDDED" ]; then
+            echo "::error::sidecar missing inside the bundle at $EMBEDDED"
+            exit 1
+          fi
+          "$EMBEDDED" --help >/dev/null
+          "$EMBEDDED" status --db "$RUNNER_TEMP/bundle-smoke.db" >/dev/null
+          "$EMBEDDED" selftest
+
+          # The bundle must still be signed and the entitlements must have
+          # survived re-signing, or the app dies on launch with a library
+          # validation error that no test here would otherwise see.
+          codesign --verify --deep --strict "$APP"
+          codesign -d --entitlements - "$APP" 2>&1 | grep -q "disable-library-validation" \
+            || { echo "::error::entitlements missing from the signed bundle"; exit 1; }
+
+          # The binary the updater ships must be the one we just verified.
+          test -f "app/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/Spotted.app.tar.gz" \
+            || { echo "::error::updater artifact not produced"; exit 1; }
 
       - name: Build latest.json
         env:
