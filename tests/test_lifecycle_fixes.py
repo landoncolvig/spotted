@@ -385,3 +385,37 @@ def test_scope_helper_matches_only_inside_the_folder():
     assert not _under_scope("/Users/x/Footage/MayOld/d.mov", root)
     # no scope means the whole library, which is still what Re-tag Library wants
     assert _under_scope("/anything", None)
+
+
+# --- engine robustness ------------------------------------------------------
+def test_unwritable_containers_are_detected_not_attempted():
+    """mkv/avi scan fine but exiftool refuses to write them; that must read as
+    'skipped', not as a raw exiftool failure."""
+    from facetag.tag import can_write_metadata
+    from pathlib import Path as P
+    for ok in ("a.mov", "b.mp4", "c.M4V"):
+        assert can_write_metadata(P(ok))
+    for bad in ("d.mkv", "e.avi", "f.webm", "g.WMV", "h.mpg"):
+        assert not can_write_metadata(P(bad))
+
+
+def test_incremental_assign_matches_naive_without_the_huge_allocation():
+    """The (n,k,d) broadcast was a 4.1 GB allocation at 5k faces / 200 clusters."""
+    import numpy as np
+    from facetag import cluster as _cluster
+    rng = np.random.default_rng(7)
+    new = rng.normal(size=(300, 512)).astype(np.float32)
+    cents = {i: rng.normal(size=512) for i in range(25)}
+    ids = list(cents.keys())
+    C = np.stack([cents[i] for i in ids]).astype(np.float64)
+    naive = np.sqrt(((new.astype(np.float64)[:, None, :] - C[None, :, :]) ** 2).sum(-1))
+    got = _cluster.incremental_assign(new, cents, 9999, match_threshold=1e9)
+    assert list(got) == [ids[i] for i in naive.argmin(1)]
+
+
+def test_sqlite_is_wal_with_a_real_busy_timeout(tmp_path):
+    """The labeler runs concurrently with scans; at the default timeout a name
+    typed during a commit raised 'database is locked' and was lost."""
+    conn = _db.connect(tmp_path / "w.db")
+    assert conn.execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal"
+    assert conn.execute("PRAGMA busy_timeout").fetchone()[0] >= 30000

@@ -18,6 +18,18 @@ class ExiftoolMissing(RuntimeError):
     pass
 
 
+# exiftool cannot write metadata into these containers at all. They are still
+# worth scanning (faces land in the index and the app can still find them), but
+# a write attempt returns a raw "Writing of MKV files is not yet supported"
+# that reads as a crash. Detect them up front and report them as skipped.
+UNWRITABLE_EXTS = {".mkv", ".avi", ".webm", ".flv", ".wmv", ".mpg", ".mpeg"}
+
+
+def can_write_metadata(video_path: Path) -> bool:
+    """False for containers exiftool refuses to write."""
+    return video_path.suffix.lower() not in UNWRITABLE_EXTS
+
+
 def _exiftool_path() -> str:
     path = shutil.which("exiftool")
     if not path:

@@ -44,6 +44,10 @@ def probe(video_path: Path) -> tuple[float, int, int]:
     return duration, int(stream["width"]), int(stream["height"])
 
 
+def _noop_marker():  # pragma: no cover - placeholder so the attr always exists
+    pass
+
+
 def iter_frames(
     video_path: Path,
     sample_fps: float = 1.0,
@@ -68,7 +72,7 @@ def iter_frames(
         "-f", "rawvideo",
         "-",
     ]
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
     frame_size = out_w * out_h * 3
     idx = 0
@@ -87,3 +91,24 @@ def iter_frames(
         if proc.stdout:
             proc.stdout.close()
         proc.wait(timeout=5)
+        # A decode that dies partway used to be invisible: stderr was discarded,
+        # the return code never checked, and the loop simply broke on a short
+        # read. The clip was then marked fully scanned with half its faces
+        # missing and nothing anywhere said so.
+        err = b""
+        if proc.stderr:
+            try:
+                err = proc.stderr.read() or b""
+            except Exception:  # noqa: BLE001
+                err = b""
+            proc.stderr.close()
+        expected = int(duration * sample_fps) if duration else 0
+        iter_frames.last_result = {
+            "returncode": proc.returncode,
+            "frames": idx,
+            "expected": expected,
+            "stderr": err.decode("utf-8", "replace").strip()[:400],
+            # Losing a couple of frames at the tail is normal; losing a third of
+            # the clip is a failed decode.
+            "short": bool(expected and idx < expected * 0.66),
+        }

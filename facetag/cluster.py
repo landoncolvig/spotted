@@ -77,10 +77,28 @@ def incremental_assign(
         cids = list(existing_centroids.keys())
         cents = np.stack([existing_centroids[c] for c in cids]).astype(np.float64)
         new = new_embeddings.astype(np.float64)
-        # (n, 1, d) - (1, k, d) → (n, k, d) → sqrt(sum sq) → (n, k)
-        dists = np.sqrt(((new[:, None, :] - cents[None, :, :]) ** 2).sum(axis=-1))
-        best = dists.argmin(axis=1)
-        best_d = dists[np.arange(n), best]
+        # |a-b|^2 = |a|^2 + |b|^2 - 2ab, computed in row chunks.
+        # The obvious (n, 1, d) - (1, k, d) broadcast materialises an
+        # (n, k, d) float64 tensor first: 5,000 new faces against 200 existing
+        # clusters is a 4.1 GB single allocation, and a large library raises
+        # MemoryError after the whole scan has already completed.
+        cent_sq = (cents ** 2).sum(axis=1)
+        best = np.empty(n, dtype=np.int64)
+        best_d = np.empty(n, dtype=np.float64)
+        CHUNK = 2048
+        for start in range(0, n, CHUNK):
+            block = new[start : start + CHUNK]
+            d2 = (
+                (block ** 2).sum(axis=1)[:, None]
+                + cent_sq[None, :]
+                - 2.0 * (block @ cents.T)
+            )
+            np.maximum(d2, 0.0, out=d2)   # tiny negatives from float error
+            bi = d2.argmin(axis=1)
+            best[start : start + len(block)] = bi
+            best_d[start : start + len(block)] = np.sqrt(
+                d2[np.arange(len(block)), bi]
+            )
         for i in range(n):
             if best_d[i] < match_threshold:
                 out[i] = cids[best[i]]

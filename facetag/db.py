@@ -65,8 +65,18 @@ CREATE INDEX IF NOT EXISTS idx_auto_tags_video ON auto_tags(video_id);
 
 def connect(db_path: Path) -> sqlite3.Connection:
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(db_path)
+    # timeout: the labeling server stays alive across batches by design, so it
+    # genuinely contends with scan/tag-write running as separate processes. At
+    # the default 5s a name typed during a commit raised "database is locked",
+    # the labeler card showed "x retry" and the typed name was lost.
+    conn = sqlite3.connect(db_path, timeout=30.0)
     conn.execute("PRAGMA foreign_keys = ON")
+    # WAL lets the labeler read while a scan writes instead of blocking.
+    try:
+        conn.execute("PRAGMA journal_mode = WAL")
+    except sqlite3.DatabaseError:
+        pass  # a read-only or unusual filesystem; the default journal still works
+    conn.execute("PRAGMA busy_timeout = 30000")
     conn.executescript(SCHEMA)
     _migrate(conn)
     return conn

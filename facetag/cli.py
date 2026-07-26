@@ -295,9 +295,24 @@ def scan(
                 except Exception as e:
                     console.print(f"[yellow]Energy scoring failed for {v.name}: {e}[/yellow]")
                     _emit("energy-skip", name=v.name, reason=str(e))
-            # Faces, embeddings, and energy are all written — safe to mark done.
-            _db.mark_scan_complete(conn, video_id)
-            _emit("video-done", name=v.name, index=index, total=len(videos), faces=face_count)
+            # Only mark complete if the decode actually got through the clip.
+            # A truncated or corrupt file yields a fraction of its frames while
+            # ffmpeg still exits 0, and marking it done means is_scanned() skips
+            # it forever with most of its faces missing.
+            decode = getattr(_extract.iter_frames, "last_result", None)
+            if decode and (decode.get("short") or decode.get("returncode")):
+                total_skipped += 1
+                reason = (
+                    f"only decoded {decode.get('frames')} of about "
+                    f"{decode.get('expected')} frames"
+                )
+                if decode.get("stderr"):
+                    reason += f" ({decode['stderr'].splitlines()[0][:120]})"
+                console.print(f"[yellow]{v.name}: {reason}; will retry next scan[/yellow]")
+                _emit("video-skip", name=v.name, index=index, total=len(videos), reason=reason)
+            else:
+                _db.mark_scan_complete(conn, video_id)
+                _emit("video-done", name=v.name, index=index, total=len(videos), faces=face_count)
         except Exception as e:  # noqa: BLE001 - a bad clip skips; it never aborts the batch
             console.print(f"[yellow]Skipping {v.name}: scan failed ({e})[/yellow]")
             _emit("video-skip", name=v.name, index=index, total=len(videos), reason="scan-failed")
@@ -888,6 +903,7 @@ def tag_write(
     _emit("tag-start", total=len(mapping))
     console.print(f"Writing keywords to [bold]{len(mapping)}[/bold] video(s)…")
     table = Table("video", "names")
+    unwritable: list[str] = []
     failed: list[tuple[str, str]] = []
 
     with Progress(
@@ -900,6 +916,13 @@ def tag_write(
         task = prog.add_task("tagging", total=len(mapping))
         for idx, (path_str, names) in enumerate(mapping.items(), start=1):
             short = Path(path_str).name
+            if not _tag.can_write_metadata(Path(path_str)):
+                # Scanned fine, but the container can't hold keywords. Say so
+                # instead of surfacing a raw exiftool error as a failure.
+                unwritable.append(short)
+                _emit("tag-skip", name=short, reason="format can't store keywords")
+                prog.update(task, advance=1)
+                continue
             vid = _db.video_id_for_path(conn, path_str)
             # Merge mode: keep keywords already in the file that Spotted didn't
             # write, drop Spotted's own previous set (so a rename/removal sticks),
@@ -944,6 +967,12 @@ def tag_write(
                     _emit("finder-error", name=short, message=str(e))
             prog.update(task, advance=1)
 
+    if unwritable:
+        console.print(
+            f"[yellow]{len(unwritable)} clip(s) skipped: their format can't store "
+            f"keywords (mkv/avi/webm and similar). They're still searchable inside "
+            f"Spotted.[/yellow]"
+        )
     console.print(table)
     if dry_run:
         console.print(f"[dim]Dry run. No files changed.[/dim]")
