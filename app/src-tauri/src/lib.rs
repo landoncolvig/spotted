@@ -214,7 +214,11 @@ async fn tag_videos(
 }
 
 #[tauri::command]
-async fn suggest_activities(app: AppHandle, window: Window) -> Result<String, String> {
+async fn suggest_activities(
+    app: AppHandle,
+    window: Window,
+    scope: Option<String>,
+) -> Result<String, String> {
     // Capture the sidecar's stdout and RETURN it so the frontend reads the
     // activity-complete payload from the invoke result, not from a racy
     // side-channel event. Still emits sidecar://line for live progress, and
@@ -224,7 +228,14 @@ async fn suggest_activities(app: AppHandle, window: Window) -> Result<String, St
         .sidecar("spotted-sidecar")
         .map_err(|e| format!("sidecar lookup: {e}"))?;
     let (mut rx, child) = sidecar
-        .args(["activity-suggest".to_string()])
+        .args({
+            let mut a = vec!["activity-suggest".to_string()];
+            if let Some(path) = scope.filter(|p| !p.is_empty()) {
+                a.push("--scope".to_string());
+                a.push(path);
+            }
+            a
+        })
         .spawn()
         .map_err(|e| format!("sidecar spawn: {e}"))?;
 
@@ -398,8 +409,20 @@ fn dirs_home_dir() -> Option<std::path::PathBuf> {
 }
 
 #[tauri::command]
-async fn write_markers(app: AppHandle, window: Window) -> Result<i32, String> {
-    run_sidecar(app, window, vec!["markers-write".into()]).await
+async fn write_markers(
+    app: AppHandle,
+    window: Window,
+    scope: Option<String>,
+) -> Result<i32, String> {
+    let mut args = vec!["markers-write".to_string()];
+    // Same reason as tag_videos: without a scope the DaVinci timeline is built
+    // from every clip ever indexed, including ones long since moved or deleted,
+    // which Resolve then reports as missing media.
+    if let Some(path) = scope.filter(|p| !p.is_empty()) {
+        args.push("--scope".to_string());
+        args.push(path);
+    }
+    run_sidecar(app, window, args).await
 }
 
 /// Spawn the Flask label-web in a long-lived background task. Polls the

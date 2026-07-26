@@ -16,6 +16,7 @@ type SpottedEvent =
   | { event: "video-start"; name: string; index: number; total: number; duration_sec?: number }
   | { event: "video-done"; name: string; index: number; total: number; faces: number }
   | { event: "video-skip"; name: string; index: number; total: number; reason?: string }
+  | { event: "video-backfill"; name: string; index: number; total: number }
   | { event: "scan-complete"; total_faces: number; total_skipped: number; total_videos: number }
   | { event: "cluster-start"; faces: number }
   | { event: "cluster-complete"; clusters: number }
@@ -258,6 +259,9 @@ let lastResolveTimeline: string | null = null;
 let lastResolveEdl: string | null = null;
 /** Resolved once at startup; person thumbnails live under it. */
 let homePath: string | null = null;
+/** Set when the user cancels, so the resulting sidecar rejection isn't
+ *  reported to them as a crash. */
+let cancelled = false;
 let lastActivityResult: Extract<SpottedEvent, { event: "activity-complete" }> | null = null;
 
 async function fetchLibraryStats(): Promise<SpottedEvent | null> {
@@ -279,20 +283,37 @@ const batch = {
   scanDone: 0,
   scanFaces: 0,
   tagTotal: 0,
+  startedAt: 0,
 };
+
+/** " · about 12 min left" once there's enough history to mean anything.
+ *  A scan runs for hours; a bar with no time estimate reads as a hang. */
+function etaSuffix(): string {
+  if (!batch.startedAt || batch.scanDone < 2 || batch.scanTotal <= batch.scanDone) return "";
+  const elapsed = Date.now() - batch.startedAt;
+  const remaining = (elapsed / batch.scanDone) * (batch.scanTotal - batch.scanDone);
+  const mins = Math.round(remaining / 60000);
+  if (mins < 1) return " · under a minute left";
+  if (mins < 60) return ` · about ${mins} min left`;
+  const h = Math.floor(mins / 60);
+  return ` · about ${h}h ${mins % 60}m left`;
+}
 
 function handleSpottedEvent(evt: SpottedEvent) {
   switch (evt.event) {
     case "scan-start":
       batch.scanTotal = evt.total;
       batch.scanDone = 0;
+      batch.startedAt = Date.now();
       batch.scanFaces = 0;
       workingLabel.textContent = "Spotting";
       workingDetail.textContent = `Reading ${evt.total} clips`;
       setProgress(2);
       break;
     case "video-start":
-      workingDetail.textContent = `${evt.name} — clip ${evt.index} of ${evt.total}`;
+      if (batch.startedAt === 0) batch.startedAt = Date.now();
+      workingDetail.textContent =
+        `${evt.name} — clip ${evt.index} of ${evt.total}` + etaSuffix();
       break;
     case "video-done":
       batch.scanDone = evt.index;
@@ -300,7 +321,20 @@ function handleSpottedEvent(evt: SpottedEvent) {
       if (batch.scanTotal > 0) {
         setProgress((batch.scanDone / batch.scanTotal) * 80);
       }
-      workingDetail.textContent = `${batch.scanDone}/${batch.scanTotal} clips · ${batch.scanFaces} faces · ${evt.name}`;
+      workingDetail.textContent =
+        `${batch.scanDone}/${batch.scanTotal} clips · ${batch.scanFaces} faces` +
+        etaSuffix();
+      break;
+    case "video-skip":
+    case "video-backfill":
+      // Already-scanned clips emit these instead of video-done. Without
+      // advancing here the bar froze at 2% for the whole pass.
+      batch.scanDone = evt.index;
+      if (batch.scanTotal > 0) {
+        setProgress((batch.scanDone / batch.scanTotal) * 80);
+      }
+      workingDetail.textContent =
+        `${batch.scanDone}/${batch.scanTotal} clips · already scanned` + etaSuffix();
       break;
     case "scan-complete":
       batch.scanFaces = evt.total_faces;
@@ -437,7 +471,13 @@ async function runBatch(path: string, tags: string[] = []) {
     mountLabelScreen();
     setState("label");
   } catch (err) {
-    showError(String(err));
+    if (cancelled) {
+      cancelled = false;
+      setState("idle");
+      flashToast("Cancelled.");
+    } else {
+      showError(String(err));
+    }
   }
 }
 
@@ -518,7 +558,22 @@ function mountLabelScreen() {
   const tagBtn = makeEl("button", "btn");
   tagBtn.id = "btn-tag";
   tagBtn.textContent = "Tag & finish";
-  bar.append(hint, tagBtn);
+  // The labeling screen used to be a dead end: its only control was
+  // "Tag & finish" and every other action was blocked as busy, so a user who
+  // dropped the wrong folder or wanted to stop naming 95 people had to quit
+  // the app. Names autosave, so leaving is safe.
+  const backBtn = makeEl("button", "btn btn--ghost");
+  backBtn.id = "btn-label-back";
+  backBtn.textContent = "Finish later";
+  backBtn.addEventListener("click", async () => {
+    const ok = await confirm(
+      "Leave naming for now?\n\nThe names you've typed are saved. You can pick up where you left off by dropping the same folder again.",
+    );
+    if (!ok) return;
+    setState("idle");
+    refreshFooterStatus();
+  });
+  bar.append(hint, backBtn, tagBtn);
 
   wrap.append(frame, bar);
   screen.appendChild(wrap);
@@ -546,7 +601,7 @@ async function startTagFlow() {
   // exact failure the review screen exists to prevent.
   let matched: MatchedTag[] = [];
   try {
-    const out = await invoke<string>("suggest_activities");
+    const out = await invoke<string>("suggest_activities", { scope: currentPath ?? null });
     matched = parseMatchedTags(out);
   } catch (e) {
     console.warn("activity suggest failed (non-fatal):", e);
@@ -658,6 +713,16 @@ function renderReview(matched: MatchedTag[]) {
 }
 
 async function runWrite(excludeTags: string[]) {
+  cancelled = false;
+  // These are module-level and were never reset, so a run whose verification
+  // never arrived would display the PREVIOUS run's "Verified on beach_01.mov"
+  // as proof that this run landed.
+  lastVerification = null;
+  lastMarkersVerification = null;
+  lastResolveScript = null;
+  lastResolveTimeline = null;
+  lastResolveEdl = null;
+  lastMarkerError = null;
   setState("working");
   setProgressIndeterminate();
   workingLabel.textContent = "Writing keywords";
@@ -675,7 +740,7 @@ async function runWrite(excludeTags: string[]) {
     workingDetail.textContent = "For Premiere & DaVinci scrubber…";
     try {
       lastMarkerError = null;
-      await invoke<number>("write_markers");
+      await invoke<number>("write_markers", { scope: currentPath ?? null });
     } catch (e) {
       // Non-fatal: keywords already succeeded, so the run still counts. But do
       // NOT swallow this. It used to be a bare console.warn, which meant a
@@ -692,7 +757,13 @@ async function runWrite(excludeTags: string[]) {
     renderDone(stats);
     notifyIfBackground("Spotted finished", summarizeDone(stats));
   } catch (err) {
-    showError(String(err));
+    if (cancelled) {
+      cancelled = false;
+      setState("idle");
+      flashToast("Cancelled.");
+    } else {
+      showError(String(err));
+    }
   }
 }
 
@@ -846,6 +917,9 @@ const btnCancel = document.getElementById("btn-cancel") as HTMLButtonElement | n
 btnCancel?.addEventListener("click", async () => {
   const ok = await confirm("Stop the current batch? Anything already detected stays in the index.");
   if (!ok) return;
+  // The killed sidecar rejects with its stderr tail; without this the user's
+  // deliberate cancel lands on a red "Couldn't finish" crash screen.
+  cancelled = true;
   btnCancel.disabled = true;
   btnCancel.textContent = "Cancelling…";
   try {

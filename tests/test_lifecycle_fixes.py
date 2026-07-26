@@ -372,3 +372,16 @@ def test_scope_label_is_escaped(tmp_path):
     _web._install_guard(app, "T")
     body = app.test_client().get("/?k=T").get_data(as_text=True)
     assert "<img src=x onerror=" not in body
+
+
+def test_scope_helper_matches_only_inside_the_folder():
+    from facetag.cli import _under_scope
+    root = "/Users/x/Footage/May"
+    assert _under_scope("/Users/x/Footage/May/a.mov", root)
+    assert _under_scope("/Users/x/Footage/May/sub/b.mov", root)
+    # the sibling folder that was silently getting rewritten
+    assert not _under_scope("/Users/x/Footage/April/c.mov", root)
+    # prefix collision: "MayOld" must not match "May"
+    assert not _under_scope("/Users/x/Footage/MayOld/d.mov", root)
+    # no scope means the whole library, which is still what Re-tag Library wants
+    assert _under_scope("/anything", None)

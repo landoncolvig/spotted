@@ -104,6 +104,22 @@ def _clip_thumb_datauri(path: str, cache: dict, *, width: int = 128) -> str | No
     return uri
 
 
+def _under_scope(path_str: str, root: str | None) -> bool:
+    """Is this clip inside the folder the current batch was about?"""
+    if not root:
+        return True
+    return path_str == root or path_str.startswith(root.rstrip("/") + "/")
+
+
+def _resolve_scope(scope) -> str | None:
+    if scope is None:
+        return None
+    try:
+        return str(Path(scope).resolve())
+    except OSError:
+        return str(scope)
+
+
 def _score_energy(conn, video_path, video_id: int, do_motion: bool):
     """Compute a clip's energy (audio + optional motion) and persist it.
 
@@ -296,6 +312,7 @@ def scan(
 @app.command("activity-suggest")
 def activity_suggest(
     db_path: Path = typer.Option(DEFAULT_DB, "--db"),
+    scope: Path = typer.Option(None, "--scope", help="Only score clips under this folder. Without it every clip with embeddings is re-scored, which can flip tags off footage the user already reviewed."),
     threshold: float = typer.Option(0.15, "--threshold", help="Absolute floor (min cosine, per-video MAX over frames) below which a tag is never applied. Selection is otherwise relative — a tag must also stand out for that tag and on that clip — so this is a noise floor, not the primary knob. Calibrated on real footage; raising it trims more aggressively."),
 ):
     """Look for each of the user's typed tags in every clip and apply it only
@@ -372,11 +389,14 @@ def activity_suggest(
     # thing users report). Instead, if the scene encoder loaded, compute
     # embeddings on demand for any indexed clip that lacks them and is still on
     # disk, then match per clip like normal.
+    root = _resolve_scope(scope)
     if encoder is not None:
         needs = [
             (vid, p)
             for vid, p in conn.execute("SELECT id, path FROM videos").fetchall()
-            if not _db.video_has_embeddings(conn, vid) and Path(p).exists()
+            if not _db.video_has_embeddings(conn, vid)
+            and Path(p).exists()
+            and _under_scope(p, root)
         ]
         if needs:
             console.print(f"[cyan]Computing scene embeddings for {len(needs)} clip(s) that lack them…[/cyan]")
@@ -397,7 +417,7 @@ def activity_suggest(
                         console.print(f"[yellow]Scene embedding failed for {Path(p).name}: {e}[/yellow]")
                     prog.update(task, advance=1)
 
-    videos = _db.videos_with_embeddings(conn)
+    videos = [v for v in _db.videos_with_embeddings(conn) if _under_scope(v[1], root)]
 
     if not videos:
         # We couldn't get embeddings for anything. Two very different causes:
@@ -971,6 +991,7 @@ def markers_write(
         False, "--sidecar/--no-sidecar",
         help="Also drop a .xmp sidecar next to each clip (a DaVinci fallback). Off by default: sidecars leave a file beside every clip, which clutters a folder of thousands, and the markers are also written in-file. When off, any sidecar Spotted previously left is cleaned up.",
     ),
+    scope: Path = typer.Option(None, "--scope", help="Only write markers for clips under this folder, and build the DaVinci timeline from just those. Without it every clip in the library is included."),
     resolve: bool = typer.Option(
         True, "--resolve/--no-resolve",
         help="Also emit a 'Spotted Markers' DaVinci Resolve script (into Resolve's Scripts folder, else next to the footage). DaVinci ignores in-file XMP markers, so this is the only way markers show there — the user runs it from Workspace > Scripts after importing.",
@@ -990,11 +1011,14 @@ def markers_write(
     # Markers come from two sources: named-face appearances and energy peaks.
     # Union them by video so a clip with no named faces still gets its energy
     # markers, and a clip with both gets one merged, time-sorted set.
+    root = _resolve_scope(scope)
     by_id: dict[int, str] = {}
     for vid, path_str in _markers.videos_with_named_faces(conn):
-        by_id[vid] = path_str
+        if _under_scope(path_str, root):
+            by_id[vid] = path_str
     for vid, path_str in _db.videos_with_energy_peaks(conn):
-        by_id.setdefault(vid, path_str)
+        if _under_scope(path_str, root):
+            by_id.setdefault(vid, path_str)
     videos = sorted(by_id.items())
     if not videos:
         console.print("[yellow]No markers to write (no named faces or energy peaks).[/yellow]")
@@ -1012,6 +1036,7 @@ def markers_write(
     console.print(f"Writing markers to [bold]{len(videos)}[/bold] video(s)…")
     failed: list[tuple[str, str]] = []
     sidecar_failed: list[tuple[str, str]] = []
+    missing: list[str] = []
     last_written: tuple[Path, int] | None = None  # for the verification readback
     video_markers: dict[str, list[tuple[float, str]]] = {}  # for the Resolve script
 
@@ -1031,6 +1056,14 @@ def markers_write(
                 _markers.face_events_for_video(conn, vid)
             )
             events += [(t, "Energy peak") for t in _db.energy_peaks_for_video(conn, vid)]
+            if not Path(path_str).exists():
+                # The index outlives the disk. A clip that moved or was deleted
+                # cannot be marked, and putting it in the DaVinci timeline makes
+                # Resolve report it as missing media.
+                missing.append(short)
+                _emit("markers-video", name=short, count=0, index=idx, total=len(videos))
+                prog.update(task, advance=1)
+                continue
             events.sort()
             if events:
                 video_markers[path_str] = events
@@ -1133,7 +1166,12 @@ def markers_write(
             )
         except Exception as e:
             _emit("markers-verify-error", message=str(e))
-    _emit("markers-complete", total=len(videos), failed=len(failed))
+    if missing:
+        console.print(
+            f"[yellow]{len(missing)} clip(s) in the index are no longer on disk "
+            f"and were left out of the timeline.[/yellow]"
+        )
+    _emit("markers-complete", total=len(videos), failed=len(failed), missing=len(missing))
     if failed:
         console.print(
             f"[bold yellow]Done.[/bold yellow] Wrote markers to "

@@ -1164,3 +1164,23 @@ body {
   color: var(--text-faint);
   text-align: center;
 }
+
+
+/* Error dumps and file paths are things the user is asked to report or open,
+   so they have to be selectable. body sets user-select:none for the app-chrome
+   feel and nothing re-enabled it. */
+.done__sub,
+.done-verify__value,
+.status__path,
+.tags__path,
+.library-clip__path {
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+/* The done screen stacks a title, subtitle, a verification panel and actions.
+   At the minimum window height the buttons were being clipped with no way to
+   scroll to them. */
+.screen {
+  overflow-y: auto;
+}
