@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import shutil
 import sqlite3
+import json
 import subprocess
 from pathlib import Path
 
@@ -179,17 +180,52 @@ def write_keywords(video_path: Path, names: list[str], *, replace: bool = True) 
 
 
 def read_keywords(video_path: Path) -> dict[str, list[str]]:
-    """Read back keywords from each namespace. Useful for verification."""
+    """Read back keywords from each namespace. Useful for verification.
+
+    Uses -json so each keyword comes back as its own array element. Reading
+    with a `-sep ", "` and splitting on "," corrupted any keyword that
+    contained a comma: a single existing keyword "Smith, John Wedding" read
+    back as two, and the next merge-write then stamped three keywords into the
+    file, destroying the original.
+
+    Raises RuntimeError if exiftool cannot read the file. Callers merging into
+    existing keywords MUST distinguish that from "no keywords present" —
+    treating a failed read as empty turns a merge into a full overwrite of the
+    user's data.
+    """
     exe = _exiftool_path()
-    out: dict[str, list[str]] = {}
-    for ns, tag in [("xmp", "-XMP-dc:Subject"), ("keys", "-Keys:Keywords")]:
-        result = subprocess.run(
-            [exe, "-s", "-s", "-s", "-sep", ", ", tag, str(video_path)],
-            capture_output=True, text=True, check=False,
+    result = subprocess.run(
+        [exe, "-json", "-XMP-dc:Subject", "-Keys:Keywords", str(video_path)],
+        capture_output=True, text=True, check=False,
+    )
+    if result.returncode != 0 or not result.stdout.strip():
+        raise RuntimeError(
+            f"exiftool keyword read failed on {video_path.name}: "
+            f"{result.stderr.strip() or 'no output'}"
         )
-        if result.returncode == 0:
-            raw = result.stdout.strip()
-            out[ns] = [k.strip() for k in raw.split(",") if k.strip()] if raw else []
-        else:
-            out[ns] = []
-    return out
+    try:
+        payload = json.loads(result.stdout)[0]
+    except (ValueError, IndexError) as e:
+        raise RuntimeError(f"unreadable exiftool JSON for {video_path.name}: {e}") from e
+
+    def _as_list(v) -> list[str]:
+        if v is None:
+            return []
+        if isinstance(v, list):
+            return [str(x).strip() for x in v if str(x).strip()]
+        return [str(v).strip()] if str(v).strip() else []
+
+    # XMP-dc:Subject is a real XMP bag, so -json gives one array element per
+    # keyword and a keyword containing a comma survives intact. This is the
+    # namespace the merge diff trusts.
+    #
+    # Keys:Keywords is the QuickTime keywords atom, which stores ONE
+    # comma-joined string by design, so it has to be split on the same
+    # separator the writer used. A comma inside a keyword is ambiguous in that
+    # field no matter what; XMP above carries the unambiguous copy.
+    keys_raw = payload.get("Keywords")
+    keys = (
+        [k.strip() for k in keys_raw.split(",") if k.strip()]
+        if isinstance(keys_raw, str) else _as_list(keys_raw)
+    )
+    return {"xmp": _as_list(payload.get("Subject")), "keys": keys}

@@ -32,8 +32,31 @@ def _exiftool() -> str:
     return p
 
 
+def _ffprobe_field(video_path: Path, args: list[str]) -> str:
+    """One ffprobe scalar, or "" on any failure."""
+    try:
+        return subprocess.run(
+            ["ffprobe", "-v", "error", *args, "-of", "default=nw=1:nk=1", str(video_path)],
+            capture_output=True, text=True, timeout=30,
+        ).stdout.strip()
+    except Exception:  # noqa: BLE001 - callers all have a fallback
+        return ""
+
+
 def get_video_fps(video_path: Path) -> float:
-    """Pull frame rate from the file. Falls back to 29.97 if undetectable."""
+    """Frame rate from the file. ffprobe first: OpenCV silently reports a wrong
+    rate (or none) for 10-bit HEVC and HDR footage, and a wrong rate corrupts
+    the timecode conversion below. Falls back to 29.97 if undetectable."""
+    raw = _ffprobe_field(
+        video_path, ["-select_streams", "v:0", "-show_entries", "stream=r_frame_rate"]
+    )
+    if "/" in raw:
+        try:
+            n, d = raw.split("/")
+            if float(d) > 0 and float(n) > 0:
+                return float(n) / float(d)
+        except (ValueError, ZeroDivisionError):
+            pass
     try:
         import cv2
 
@@ -64,6 +87,37 @@ def face_events_for_video(
     return [(float(t), n) for t, n in rows]
 
 
+# A person sampled at 1 fps produces one detection per second, so someone on
+# screen for a minute becomes 60 identical markers. Treat a run of detections
+# as a single appearance and mark only where it starts. A gap longer than this
+# means they left and came back, which is worth its own marker.
+APPEARANCE_GAP_SEC = 10.0
+
+
+def collapse_to_appearances(
+    events: list[tuple[float, str]], gap_sec: float = APPEARANCE_GAP_SEC
+) -> list[tuple[float, str]]:
+    """Collapse per-second detections into one marker per appearance.
+
+    Each name is tracked separately, so two people on screen together still get
+    one marker each. Returns [(start_sec, name)] sorted by time.
+    """
+    by_name: dict[str, list[float]] = {}
+    for t, name in events:
+        by_name.setdefault(name, []).append(float(t))
+
+    out: list[tuple[float, str]] = []
+    for name, times in by_name.items():
+        times.sort()
+        prev: float | None = None
+        for t in times:
+            if prev is None or (t - prev) > gap_sec:
+                out.append((t, name))
+            prev = t
+    out.sort()
+    return out
+
+
 def videos_with_named_faces(conn: sqlite3.Connection) -> list[tuple[int, str]]:
     """Return [(video_id, video_path)] for videos that have at least one named face."""
     rows = conn.execute(
@@ -90,23 +144,54 @@ def _sanitize(name: str) -> str:
     )
 
 
-def write_markers(video_path: Path, face_events: list[tuple[float, str]]) -> None:
+# exiftool silently truncates an XMP list write at 1000 entries: it exits 0 and
+# writes the first 1000. Stay under it and say so rather than losing markers
+# with no error.
+MAX_MARKERS_PER_CLIP = 900
+
+
+def _parse_markers(raw: str) -> list[dict[str, str]]:
+    """Parse exiftool's struct readback into [{Name, StartTime, Duration, Type}]."""
+    out: list[dict[str, str]] = []
+    for chunk in raw.split("{")[1:]:
+        chunk = chunk.split("}")[0]
+        fields: dict[str, str] = {}
+        for field in chunk.split(","):
+            if "=" in field:
+                k, v = field.split("=", 1)
+                fields[k.strip()] = v.strip()
+        if fields.get("Name"):
+            out.append(fields)
+    return out
+
+
+def write_markers(
+    video_path: Path, face_events: list[tuple[float, str]], known_names: set[str] | None = None
+) -> None:
     """Write per-face markers to video_path's XMP-xmpDM:Markers.
 
-    Each face appearance becomes a Marker on the clip's timeline. Premiere
-    Pro and DaVinci Resolve render these as clickable marker icons on the
-    timeline scrubber when the clip is loaded.
+    Each face appearance becomes a Marker on the clip's timeline. Premiere Pro
+    and DaVinci Resolve render these as clickable marker icons on the timeline
+    scrubber when the clip is loaded.
 
-    Idempotent: clears existing Markers before writing the new set, so
-    re-running doesn't duplicate. The clear is a SEPARATE exiftool call —
-    combining a clear and `+=` on the same list tag in one invocation silently
-    drops the clear (the same footgun documented in tag.py), and `-Markers-=`
-    with no value clears nothing, so the old code duplicated every marker on
-    each run.
+    PRESERVES FOREIGN MARKERS. Re-running has to replace Spotted's own markers
+    without duplicating them, but the clip may also carry markers a human set
+    in Premiere, and those are unrecoverable if we drop them. Any existing
+    marker whose Name is not a name Spotted knows about is read back and
+    rewritten alongside the new set. `known_names` is the set of names Spotted
+    may claim (every person in the library plus its own labels); anything else
+    is treated as the user's.
 
-    StartTime is written in seconds (e.g. "10.5s") which is what Premiere
-    expects. Duration is left short (0.5s) so markers display as point
-    markers rather than ranges.
+    The clear is a SEPARATE exiftool call — combining a clear and `+=` on the
+    same list tag in one invocation silently drops the clear (the same footgun
+    documented in tag.py), and `-Markers-=` with no value clears nothing.
+
+    Arguments go through an argfile: one `+=` per detection blows past ARG_MAX
+    on a long clip, and because the clear runs first, that used to leave the
+    clip with no markers at all.
+
+    StartTime is written in seconds, which is what Premiere expects. Duration
+    is left short so markers display as points rather than ranges.
 
     Raises RuntimeError if exiftool fails.
     """
@@ -114,37 +199,72 @@ def write_markers(video_path: Path, face_events: list[tuple[float, str]]) -> Non
         return
     exe = _exiftool()
 
-    clear = subprocess.run(
-        [exe, "-overwrite_original", "-q", "-XMP-xmpDM:Markers=", str(video_path)],
-        capture_output=True, text=True,
-    )
-    if clear.returncode != 0:
-        raise RuntimeError(
-            f"exiftool marker clear failed on {video_path.name}: "
-            f"{clear.stderr.strip() or clear.stdout.strip()}"
-        )
+    # What's already on the clip that isn't ours?
+    mine = {n.strip() for n in (known_names or set())}
+    mine |= {name for _t, name in face_events}
+    mine.add("Energy peak")
+    foreign: list[dict[str, str]] = []
+    try:
+        existing = read_markers(video_path)
+        if existing:
+            foreign = [f for f in _parse_markers(existing) if f.get("Name") not in mine]
+    except Exception:  # noqa: BLE001 - a failed read must not block the write
+        foreign = []
 
-    args: list[str] = [exe, "-overwrite_original", "-q"]
-    # De-dupe (timestamp, name) collisions
+    # De-dupe (timestamp, name) collisions.
     seen: set[tuple[int, str]] = set()
+    entries: list[str] = []
     for t, name in sorted(face_events):
         key = (int(round(t * 1000)), name)
         if key in seen:
             continue
         seen.add(key)
-        safe = _sanitize(name)
-        # 's' suffix tells exiftool/Premiere this is seconds (not samples)
-        args.append(
-            f"-XMP-xmpDM:Markers+={{Name={safe},StartTime={t:.3f}s,Duration=0.5s,Type=Cue}}"
+        entries.append(
+            f"-XMP-xmpDM:Markers+={{Name={_sanitize(name)},"
+            f"StartTime={t:.3f}s,Duration=0.5s,Type=Cue}}"
         )
-    args.append(str(video_path))
+    # Re-add anything a human put there, keeping its original position.
+    for f in foreign:
+        entries.append(
+            f"-XMP-xmpDM:Markers+={{Name={_sanitize(f['Name'])},"
+            f"StartTime={f.get('StartTime', '0.000s')},"
+            f"Duration={f.get('Duration', '0.5s')},"
+            f"Type={f.get('Type', 'Cue')}}}"
+        )
 
-    result = subprocess.run(args, capture_output=True, text=True)
-    if result.returncode != 0:
-        raise RuntimeError(
-            f"exiftool markers failed on {video_path.name}: "
-            f"{result.stderr.strip() or result.stdout.strip()}"
+    if len(entries) > MAX_MARKERS_PER_CLIP:
+        entries = entries[:MAX_MARKERS_PER_CLIP]
+
+    import tempfile
+
+    with tempfile.NamedTemporaryFile("w", suffix=".args", delete=False) as fh:
+        fh.write("\n".join(entries))
+        fh.write("\n-overwrite_original\n-q\n")
+        fh.write(f"{video_path}\n")
+        argfile = fh.name
+
+    try:
+        clear = subprocess.run(
+            [exe, "-overwrite_original", "-q", "-XMP-xmpDM:Markers=", str(video_path)],
+            capture_output=True, text=True,
         )
+        if clear.returncode != 0:
+            raise RuntimeError(
+                f"exiftool marker clear failed on {video_path.name}: "
+                f"{clear.stderr.strip() or clear.stdout.strip()}"
+            )
+
+        result = subprocess.run([exe, "-@", argfile], capture_output=True, text=True)
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"exiftool markers failed on {video_path.name}: "
+                f"{result.stderr.strip() or result.stdout.strip()}"
+            )
+    finally:
+        try:
+            Path(argfile).unlink()
+        except OSError:
+            pass
 
 
 def read_markers(video_path: Path) -> str:
@@ -442,39 +562,64 @@ def _fcp_time(seconds: float, num: int, den: int) -> str:
     return f"{frames * num}/{den}s"
 
 
-def start_timecode_sec(video_path: Path) -> float:
-    """The clip's embedded start timecode, in seconds. 0.0 if it has none.
+def start_timecode_sec(video_path: Path, num: int = 1, den: int = 30) -> float:
+    """The clip's embedded start timecode in seconds, on the (num/den) timebase.
 
     Camera footage carries a real start timecode (a DJI clip might begin at
     01:17:36:36). DaVinci links XML clips to media by timecode, so declaring
     every asset as starting at 0s makes Resolve reject the match with
     "Mismatch between specified target timecodes ... and located file
-    timecodes" and report every clip as not found.
+    timecodes" and leave every clip Media Offline.
+
+    Where the timecode lives depends on the container: .mp4 puts it in format
+    tags, .mov on the video stream and a tmcd data stream. Check all of them.
+    A ';' before the frames field means drop-frame.
+
+    The frames field counts at the NOMINAL rate (60 for 59.94), so the value is
+    converted to whole frames and then multiplied by the timeline's own frame
+    duration. Computing it as `frames / fps` with a guessed fps puts the clip
+    fractions of a second off, which Resolve rejects just as hard as being an
+    hour off. Returns 0.0 for footage with no timecode (phone video).
     """
+    raw = ""
+    for args in (
+        ["-show_entries", "format_tags=timecode"],
+        ["-select_streams", "v:0", "-show_entries", "stream_tags=timecode"],
+        ["-show_entries", "stream_tags=timecode"],      # tmcd/data tracks
+    ):
+        raw = _ffprobe_field(video_path, args)
+        raw = next((ln.strip() for ln in raw.splitlines() if ln.strip()), "")
+        if raw:
+            break
+    if not raw:
+        return 0.0
+
+    parts = raw.replace(";", ":").split(":")
+    if len(parts) != 4:
+        return 0.0
     try:
-        for args in (
-            ["-show_entries", "format_tags=timecode"],
-            ["-select_streams", "v:0", "-show_entries", "stream_tags=timecode"],
-        ):
-            out = subprocess.run(
-                ["ffprobe", "-v", "error", *args, "-of", "default=nw=1:nk=1", str(video_path)],
-                capture_output=True, text=True, timeout=20,
-            ).stdout.strip()
-            if not out:
-                continue
-            parts = out.split(":")
-            if len(parts) != 4:
-                continue
-            h, m, sec, fr = (int(x) for x in parts)
-            fps = get_video_fps(video_path) or 30.0
-            return h * 3600 + m * 60 + sec + fr / fps
-    except Exception:  # noqa: BLE001 - no timecode is normal for phone footage
-        pass
-    return 0.0
+        h, m, sec, fr = (int(x) for x in parts)
+    except ValueError:
+        return 0.0
+
+    nominal = max(1, int(round(den / num)))          # 60 for 1001/60000
+    frames = ((h * 60 + m) * 60 + sec) * nominal + fr
+    return frames * (num / den)
 
 
 def _video_duration(video_path: Path, fps: float) -> float:
-    """Clip length in seconds. Falls back to 0 when undetectable."""
+    """Clip length in seconds, ffprobe first for the same reason as fps."""
+    raw = _ffprobe_field(video_path, ["-show_entries", "format=duration"])
+    try:
+        if raw and float(raw) > 0:
+            return float(raw)
+    except ValueError:
+        pass
+    return _video_duration_cv2(video_path, fps)
+
+
+def _video_duration_cv2(video_path: Path, fps: float) -> float:
+    """OpenCV fallback. Returns 0.0 when undetectable."""
     try:
         import cv2
 
@@ -608,7 +753,7 @@ def fcpxml_for_markers(video_markers: dict[str, list[tuple[float, str]]]) -> str
     spine: list[str] = []
 
     for i, (p, offset, dur, events) in enumerate(entries, start=1):
-        tc = start_timecode_sec(p)
+        tc = start_timecode_sec(p, num, den)
         asset_id = f"a{i}"
         name = _xml_escape(p.stem)
         resources.append(

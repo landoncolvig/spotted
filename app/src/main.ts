@@ -1,6 +1,7 @@
 import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { open, confirm } from "@tauri-apps/plugin-dialog";
+import { homeDir } from "@tauri-apps/api/path";
 import {
   isPermissionGranted,
   requestPermission,
@@ -247,6 +248,8 @@ let lastResolveScript: string | null = null;
 let lastResolveTimeline: string | null = null;
 /** Companion EDL carrying the markers themselves. */
 let lastResolveEdl: string | null = null;
+/** Resolved once at startup; person thumbnails live under it. */
+let homePath: string | null = null;
 let lastActivityResult: Extract<SpottedEvent, { event: "activity-complete" }> | null = null;
 
 async function fetchLibraryStats(): Promise<SpottedEvent | null> {
@@ -827,7 +830,7 @@ btnReveal.addEventListener("click", async () => {
 
 const btnCancel = document.getElementById("btn-cancel") as HTMLButtonElement | null;
 btnCancel?.addEventListener("click", async () => {
-  const ok = confirm("Stop the current batch? Anything already detected stays in the index.");
+  const ok = await confirm("Stop the current batch? Anything already detected stays in the index.");
   if (!ok) return;
   btnCancel.disabled = true;
   btnCancel.textContent = "Cancelling…";
@@ -945,13 +948,12 @@ function handleLibraryEvent(evt: SpottedEvent) {
 }
 
 function personThumbUrl(p: LibraryPerson): string | null {
-  if (p.clusterId == null) return null;
+  if (p.clusterId == null || !homePath) return null;
   // ~/.facetag/person_thumbs/<cluster_id>.jpg via the Tauri asset protocol.
-  // We resolve $HOME via the standard convertFileSrc helper.
-  const home = (window as any).__TAURI_INTERNALS__?.metadata?.os?.platform
-    ? "/Users/" + ((window as any).__TAURI_INTERNALS__?.metadata?.os?.user || "qb")
-    : "/Users/qb";
-  return convertFileSrc(`${home}/.facetag/person_thumbs/${p.clusterId}.jpg`);
+  // This used to build "/Users/" + a metadata field that does not exist in
+  // Tauri v2, so it always fell through to a hardcoded "/Users/qb" and every
+  // thumbnail 404'd on every machine except the developer's.
+  return convertFileSrc(`${homePath}/.facetag/person_thumbs/${p.clusterId}.jpg`);
 }
 
 function librarySearchQuery(): string {
@@ -1202,7 +1204,7 @@ async function commitRename(newName: string) {
 async function deletePerson() {
   const name = library.selected;
   if (!name) return;
-  if (!confirm(`Delete ${name} from the library?\n\nClips on disk keep their existing Keywords until you re-tag.`)) {
+  if (!(await confirm(`Delete ${name} from the library?\n\nClips on disk keep their existing Keywords until you re-tag.`))) {
     return;
   }
   try {
@@ -1478,6 +1480,11 @@ function wireTagsScreen() {
 }
 
 window.addEventListener("DOMContentLoaded", () => {
+  // Person thumbnails need the real home directory. Resolve it before the
+  // library can render so the sidebar isn't a column of blank circles.
+  homeDir()
+    .then((h) => { homePath = h.replace(/\/$/, ""); })
+    .catch(() => { homePath = null; });
   loadVersion();
   wireDragDrop();
   wireMenuEvents();

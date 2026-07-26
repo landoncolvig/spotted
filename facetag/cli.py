@@ -858,7 +858,16 @@ def tag_write(
             # write, drop Spotted's own previous set (so a rename/removal sticks),
             # add the current set. Overwrite mode: write exactly the current set.
             if merge:
-                existing = _tag.read_keywords(Path(path_str))
+                try:
+                    existing = _tag.read_keywords(Path(path_str))
+                except Exception as e:
+                    # Cannot see what's already in the file, so writing would
+                    # replace the user's keywords with only Spotted's. Skip the
+                    # clip and report it instead of silently destroying them.
+                    failed.append((short, f"couldn't read existing keywords: {e}"))
+                    _emit("tag-error", name=short, message=str(e))
+                    prog.update(task, advance=1)
+                    continue
                 in_file = set(existing.get("xmp", [])) | set(existing.get("keys", []))
                 prior_spotted = set(_db.get_spotted_keywords(conn, vid)) if vid else set()
                 final = sorted((in_file - prior_spotted) | set(names))
@@ -964,6 +973,14 @@ def markers_write(
         console.print("[yellow]No markers to write (no named faces or energy peaks).[/yellow]")
         raise typer.Exit(0)
 
+    # Every name Spotted may claim. Markers on a clip whose name isn't in here
+    # were put there by a human in Premiere, and write_markers preserves them.
+    known_names = {
+        r[0] for r in conn.execute(
+            "SELECT DISTINCT name FROM people WHERE name IS NOT NULL AND name != ''"
+        ).fetchall()
+    }
+
     _emit("markers-start", total=len(videos))
     console.print(f"Writing markers to [bold]{len(videos)}[/bold] video(s)…")
     failed: list[tuple[str, str]] = []
@@ -981,14 +998,18 @@ def markers_write(
         task = prog.add_task("markers", total=len(videos))
         for idx, (vid, path_str) in enumerate(videos, start=1):
             short = Path(path_str).name
-            events = _markers.face_events_for_video(conn, vid)
+            # One marker per appearance, not one per sampled second. A person
+            # on screen for a minute was producing 60 stacked markers.
+            events = _markers.collapse_to_appearances(
+                _markers.face_events_for_video(conn, vid)
+            )
             events += [(t, "Energy peak") for t in _db.energy_peaks_for_video(conn, vid)]
             events.sort()
             if events:
                 video_markers[path_str] = events
             _emit("markers-video", name=short, count=len(events), index=idx, total=len(videos))
             try:
-                _markers.write_markers(Path(path_str), events)
+                _markers.write_markers(Path(path_str), events, known_names=known_names)
                 last_written = (Path(path_str), len(events))
             except _markers.ExiftoolMissing as e:
                 console.print(f"\n[red]{e}[/red]")

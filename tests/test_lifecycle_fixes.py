@@ -234,7 +234,7 @@ def test_asset_start_uses_embedded_timecode(tmp_path, monkeypatch):
     """A clip stamped 01:00:00:00 must be declared as starting there, or
     DaVinci reports a timecode mismatch and leaves the media offline."""
     clip = tmp_path / "tc.mov"; clip.write_bytes(b"")
-    monkeypatch.setattr(_markers, "start_timecode_sec", lambda p: 3600.0)
+    monkeypatch.setattr(_markers, "start_timecode_sec", lambda p, num=1, den=30: 3600.0)
     monkeypatch.setattr(_markers, "get_video_fps", lambda p: 30.0)
     monkeypatch.setattr(_markers, "_video_duration", lambda p, fps: 10.0)
     xml = _markers.fcpxml_for_markers({str(clip): [(1.0, "Sarah")]})
@@ -247,3 +247,78 @@ def test_asset_start_uses_embedded_timecode(tmp_path, monkeypatch):
 def test_missing_timecode_falls_back_to_zero(tmp_path):
     clip = tmp_path / "notc.mov"; clip.write_bytes(b"")
     assert _markers.start_timecode_sec(clip) == 0.0
+
+
+# --- the user's own data must survive a Spotted run -------------------------
+def test_markers_preserve_foreign_markers(tmp_path, have_exiftool=None):
+    """A marker a human set in Premiere must survive, with its position."""
+    import shutil, subprocess
+    if not shutil.which("exiftool"):
+        import pytest; pytest.skip("exiftool not on PATH")
+    src = tmp_path / "m.mov"
+    subprocess.run(["ffmpeg", "-f", "lavfi", "-i", "testsrc=duration=2:size=64x64:rate=10",
+                    "-pix_fmt", "yuv420p", "-y", str(src)],
+                   capture_output=True, check=False)
+    if not src.exists():
+        import pytest; pytest.skip("ffmpeg not available")
+    subprocess.run(["exiftool", "-overwrite_original", "-q",
+                    "-XMP-xmpDM:Markers+={Name=USER MARKER,StartTime=1.750s,Duration=2.0s,Type=Cue}",
+                    str(src)], capture_output=True, check=False)
+    _markers.write_markers(src, [(0.5, "Sarah")], known_names={"Sarah"})
+    back = _markers.read_markers(src)
+    assert "USER MARKER" in back, "a human's marker was destroyed"
+    assert "1.750s" in back, "the foreign marker lost its position"
+    assert "Sarah" in back
+
+
+def test_marker_names_are_capped_below_exiftool_truncation():
+    """exiftool silently writes only the first 1000 list entries and exits 0."""
+    assert _markers.MAX_MARKERS_PER_CLIP < 1000
+
+
+def test_collapse_to_appearances_is_one_marker_per_appearance():
+    ev = [(float(t), "Ellie") for t in range(77)]
+    assert _markers.collapse_to_appearances(ev) == [(0.0, "Ellie")]
+    # leaves and comes back -> two markers
+    ev2 = [(float(t), "Ellie") for t in list(range(0, 20)) + list(range(50, 60))]
+    assert [t for t, _ in _markers.collapse_to_appearances(ev2)] == [0.0, 50.0]
+    # two people on screen together stay separate
+    ev3 = [(1.0, "Ellie"), (1.0, "Taylor"), (2.0, "Ellie")]
+    assert sorted(_markers.collapse_to_appearances(ev3)) == [(1.0, "Ellie"), (1.0, "Taylor")]
+
+
+def test_finder_write_preserves_user_tags_and_comment(tmp_path):
+    import plistlib, subprocess, shutil
+    from facetag import finder as _finder
+    if not shutil.which("xattr"):
+        import pytest; pytest.skip("xattr unavailable")
+    f = tmp_path / "f.mov"; f.write_bytes(b"x")
+
+    def setx(key, val):
+        subprocess.run(["xattr", "-wx", key,
+                        plistlib.dumps(val, fmt=plistlib.FMT_BINARY).hex(), str(f)], check=True)
+    setx(_finder.XATTR_USER_TAGS, ["Important\n6", "Wedding Keep\n0"])
+    setx(_finder.XATTR_FINDER_COMMENT, "My note: master take")
+
+    _finder.write_finder_comment(f, ["Sarah", "high energy"])
+    tags = _finder._read_xattr(f, _finder.XATTR_USER_TAGS)
+    comment = _finder._read_xattr(f, _finder.XATTR_FINDER_COMMENT)
+    assert "Important\n6" in tags, "a coloured Finder tag was destroyed"
+    assert "Wedding Keep\n0" in tags
+    assert "Sarah\n0" in tags
+    assert "My note: master take" in comment, "the user's note was destroyed"
+
+    # re-running must not duplicate
+    _finder.write_finder_comment(f, ["Sarah", "high energy"])
+    tags2 = _finder._read_xattr(f, _finder.XATTR_USER_TAGS)
+    assert len(tags2) == len(tags)
+    assert (_finder._read_xattr(f, _finder.XATTR_FINDER_COMMENT)).count("Spotted:") == 1
+
+
+def test_read_keywords_raises_instead_of_reporting_empty(tmp_path):
+    """A failed read must not look like 'no keywords', or merge mode silently
+    overwrites the user's existing keywords."""
+    from facetag import tag as _tag
+    import pytest
+    with pytest.raises(Exception):
+        _tag.read_keywords(tmp_path / "does_not_exist.mov")
