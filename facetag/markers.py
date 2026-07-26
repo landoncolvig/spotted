@@ -442,6 +442,37 @@ def _fcp_time(seconds: float, num: int, den: int) -> str:
     return f"{frames * num}/{den}s"
 
 
+def start_timecode_sec(video_path: Path) -> float:
+    """The clip's embedded start timecode, in seconds. 0.0 if it has none.
+
+    Camera footage carries a real start timecode (a DJI clip might begin at
+    01:17:36:36). DaVinci links XML clips to media by timecode, so declaring
+    every asset as starting at 0s makes Resolve reject the match with
+    "Mismatch between specified target timecodes ... and located file
+    timecodes" and report every clip as not found.
+    """
+    try:
+        for args in (
+            ["-show_entries", "format_tags=timecode"],
+            ["-select_streams", "v:0", "-show_entries", "stream_tags=timecode"],
+        ):
+            out = subprocess.run(
+                ["ffprobe", "-v", "error", *args, "-of", "default=nw=1:nk=1", str(video_path)],
+                capture_output=True, text=True, timeout=20,
+            ).stdout.strip()
+            if not out:
+                continue
+            parts = out.split(":")
+            if len(parts) != 4:
+                continue
+            h, m, sec, fr = (int(x) for x in parts)
+            fps = get_video_fps(video_path) or 30.0
+            return h * 3600 + m * 60 + sec + fr / fps
+    except Exception:  # noqa: BLE001 - no timecode is normal for phone footage
+        pass
+    return 0.0
+
+
 def _video_duration(video_path: Path, fps: float) -> float:
     """Clip length in seconds. Falls back to 0 when undetectable."""
     try:
@@ -472,15 +503,21 @@ def _timeline_layout(
     if not clips:
         return 1, 30, []
     num, den = _frame_duration(get_video_fps(Path(clips[0][0])))
+    spf = num / den                      # seconds per frame on the timeline
     entries: list[tuple[Path, float, float, list[tuple[float, str]]]] = []
-    offset = 0.0
+    frame_cursor = 0                     # integer frames, never floats
     for path_str, events in clips:
         p = Path(path_str)
         dur = _video_duration(p, get_video_fps(p))
         if dur <= 0:
             dur = max((t for t, _ in events), default=0.0) + 1.0
-        entries.append((p, offset, dur, sorted(events)))
-        offset += dur
+        # Snap the duration to whole frames and advance the cursor by exactly
+        # that many. Accumulating float seconds and rounding each offset
+        # independently drifts, and Resolve then reports "Trimming item on V1
+        # because it overlaps previous items" and mangles the edit.
+        dur_frames = max(1, int(round(dur / spf)))
+        entries.append((p, frame_cursor * spf, dur_frames * spf, sorted(events)))
+        frame_cursor += dur_frames
     return num, den, entries
 
 
@@ -552,53 +589,51 @@ def fcpxml_for_markers(video_markers: dict[str, list[tuple[float, str]]]) -> str
     Returns "" when there is nothing to write. Clips are laid end to end on a
     single spine in filename order, each with its own markers, so importing the
     result gives one timeline containing every marked clip.
-    """
-    clips = [(p, ev) for p, ev in sorted(video_markers.items()) if ev]
-    if not clips:
-        return ""
 
-    # The sequence format follows the first clip; mixed-rate footage still
-    # imports, Resolve just conforms it.
-    first_fps = get_video_fps(Path(clips[0][0]))
-    num, den = _frame_duration(first_fps)
+    Times inside a clip are expressed from its embedded start timecode, not
+    from zero. DaVinci links XML clips to media by timecode: claim a clip
+    starts at 00:00:00:00 when the camera stamped it 01:17:36:36 and Resolve
+    reports "Mismatch between specified target timecodes and located file
+    timecodes" and leaves every clip Media Offline.
+    """
+    num, den, entries = _timeline_layout(video_markers)
+    if not entries:
+        return ""
+    spf = num / den
 
     resources: list[str] = [
         f'    <format id="r0" name="FFVideoFormat" frameDuration="{num}/{den}s" '
         f'width="1920" height="1080" colorSpace="1-1-1 (Rec. 709)"/>'
     ]
     spine: list[str] = []
-    offset = 0.0
 
-    for i, (path_str, events) in enumerate(clips, start=1):
-        p = Path(path_str)
-        fps = get_video_fps(p)
-        dur = _video_duration(p, fps)
-        if dur <= 0:
-            # Unknown length: make the clip long enough to hold its last marker
-            # so nothing gets clipped off the end of the timeline.
-            dur = max((t for t, _ in events), default=0.0) + 1.0
-
+    for i, (p, offset, dur, events) in enumerate(entries, start=1):
+        tc = start_timecode_sec(p)
         asset_id = f"a{i}"
         name = _xml_escape(p.stem)
         resources.append(
-            f'    <asset id="{asset_id}" name="{name}" src="{_file_url(p)}" '
-            f'start="0s" duration="{_fcp_time(dur, num, den)}" '
-            f'hasVideo="1" hasAudio="1" format="r0"/>'
+            f'    <asset id="{asset_id}" name="{name}" '
+            f'start="{_fcp_time(tc, num, den)}" duration="{_fcp_time(dur, num, den)}" '
+            f'hasVideo="1" hasAudio="1" format="r0">'
+            f'<media-rep kind="original-media" src="{_file_url(p)}"/>'
+            f'</asset>'
         )
 
         markers = "".join(
-            f'\n        <marker start="{_fcp_time(min(t, max(dur - (num / den), 0.0)), num, den)}" '
+            f'\n        <marker start="'
+            f'{_fcp_time(tc + min(t, max(dur - spf, 0.0)), num, den)}" '
             f'duration="{num}/{den}s" value="{_xml_escape(label)}"/>'
             for t, label in sorted(events)
         )
         spine.append(
             f'      <asset-clip ref="{asset_id}" name="{name}" '
-            f'offset="{_fcp_time(offset, num, den)}" start="0s" '
+            f'offset="{_fcp_time(offset, num, den)}" '
+            f'start="{_fcp_time(tc, num, den)}" '
             f'duration="{_fcp_time(dur, num, den)}" format="r0">{markers}\n'
             f'      </asset-clip>'
         )
-        offset += dur
 
+    total = sum(d for _p, _o, d, _e in entries)
     return (
         '<?xml version="1.0" encoding="UTF-8"?>\n'
         "<!DOCTYPE fcpxml>\n"
@@ -607,7 +642,7 @@ def fcpxml_for_markers(video_markers: dict[str, list[tuple[float, str]]]) -> str
         '  <library>\n'
         '    <event name="Spotted">\n'
         '      <project name="Spotted Markers">\n'
-        f'        <sequence format="r0" duration="{_fcp_time(offset, num, den)}" '
+        f'        <sequence format="r0" duration="{_fcp_time(total, num, den)}" '
         'tcStart="0s" tcFormat="NDF">\n'
         "    <spine>\n" + "\n".join(spine) + "\n    </spine>\n"
         "        </sequence>\n"

@@ -208,3 +208,42 @@ def test_write_edl_lands_next_to_footage(tmp_path):
     out = _markers.write_edl({str(clip): [(0.5, "Sarah")]}, tmp_path)
     assert out is not None and out.exists() and out.name == "Spotted Markers.edl"
     assert _markers.write_edl({}, tmp_path) is None
+
+
+# --- clips must not overlap, and timecode must be honoured -------------------
+def test_layout_never_overlaps_on_the_frame_grid(tmp_path):
+    """Resolve logs 'Trimming item on V1 because it overlaps previous items'
+    and mangles the edit if two clips share a frame. Offsets accumulate in
+    whole frames, so end(n) must equal start(n+1) exactly."""
+    clips = []
+    for i in range(6):
+        c = tmp_path / f"c{i}.mov"; c.write_bytes(b"")
+        clips.append(c)
+    # durations fall back to last-marker+1s; use awkward values that would
+    # drift if offsets were accumulated as floats
+    vm = {str(c): [(0.1 * (i + 1), f"P{i}")] for i, c in enumerate(clips)}
+    num, den, entries = _markers._timeline_layout(vm)
+    spf = num / den
+    for (_p, off, dur, _e), (_p2, nxt, _d2, _e2) in zip(entries, entries[1:]):
+        end_frame = round((off + dur) / spf)
+        next_frame = round(nxt / spf)
+        assert end_frame == next_frame, f"gap/overlap: {end_frame} vs {next_frame}"
+
+
+def test_asset_start_uses_embedded_timecode(tmp_path, monkeypatch):
+    """A clip stamped 01:00:00:00 must be declared as starting there, or
+    DaVinci reports a timecode mismatch and leaves the media offline."""
+    clip = tmp_path / "tc.mov"; clip.write_bytes(b"")
+    monkeypatch.setattr(_markers, "start_timecode_sec", lambda p: 3600.0)
+    monkeypatch.setattr(_markers, "get_video_fps", lambda p: 30.0)
+    monkeypatch.setattr(_markers, "_video_duration", lambda p, fps: 10.0)
+    xml = _markers.fcpxml_for_markers({str(clip): [(1.0, "Sarah")]})
+    assert 'start="108000/30s"' in xml           # 3600s at 30fps
+    assert 'start="108030/30s"' in xml           # marker 1s later
+    assert "<media-rep" in xml                    # modern linking form
+    assert 'src=' in xml
+
+
+def test_missing_timecode_falls_back_to_zero(tmp_path):
+    clip = tmp_path / "notc.mov"; clip.write_bytes(b"")
+    assert _markers.start_timecode_sec(clip) == 0.0
