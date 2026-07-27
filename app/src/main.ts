@@ -919,7 +919,7 @@ function renderVerification() {
     {
       label: "DaVinci script",
       values: resolveCells,
-      help: "The 'Spotted Markers' script for DaVinci Resolve. Quit and reopen Resolve, then run it from Workspace > Scripts. It lives in ~/Library, which Spotlight does not search.",
+      help: "The 'Spotted Markers' script for DaVinci Resolve. Run it from Workspace > Scripts, no restart needed. It lives in ~/Library, which Spotlight does not search.",
     },
     {
       label: "Your tags (matched)",

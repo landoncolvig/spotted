@@ -149,7 +149,12 @@ def _resolve_scope(scope, conn=None, *, allow_all: bool = False) -> list[str] | 
 
 # The files the DaVinci hand-off writes. Only these names are ever deleted as
 # stale, and only when Spotted's own DB says it wrote them.
-EXPORT_NAMES = {"Spotted Markers.fcpxml", "Spotted Markers.edl", "Spotted Markers.py"}
+EXPORT_NAMES = {
+    "Spotted Markers.fcpxml",
+    "Spotted Markers.edl",
+    "Spotted Markers.lua",
+    "Spotted Markers.py",      # written by builds before 0.0.71
+}
 
 
 def _export_dir(video_markers: dict, root: str | list[str] | None) -> Path:

@@ -385,87 +385,126 @@ def read_markers_sidecar(video_path: Path) -> str:
 # scripting API (MediaPoolItem.AddMarker). We emit a small self-contained script
 # that the user runs inside Resolve; it matches clips by filename and adds a
 # marker on each Media Pool clip at every moment Spotted tagged.
+#
+# The script is LUA, not Python. Resolve hides .py scripts from Workspace >
+# Scripts entirely unless it finds a Python it accepts — a python.org framework
+# build under /Library/Frameworks/Python.framework. Homebrew's python3 and the
+# Apple stub at /usr/bin/python3 do not count. On a Mac without one the menu
+# reads "No Scripts" no matter how correctly the file was written, which is what
+# a tester spent three days reporting as "there is still no script". Verified
+# 2026-07-27 on Resolve 21: dropping one .lua into the same folder appeared in
+# the menu immediately while two .py files beside it stayed invisible.
+#
+# Lua is built into Fusion, so it needs nothing installed, and the menu picks it
+# up without restarting Resolve. Same API, same AddMarker call.
 
-_RESOLVE_TEMPLATE = '''#!/usr/bin/env python
-"""Spotted -> DaVinci Resolve markers.
+_RESOLVE_TEMPLATE = """--[[
+Spotted -> DaVinci Resolve markers.
 
-DaVinci doesn't read the in-file XMP markers Spotted writes (Premiere does), so
-this adds them through the Resolve API instead — as markers on each Media Pool
-clip (the bookmarks on the clip + pins under the source viewer).
+DaVinci does not read the in-file XMP markers Spotted writes (Premiere does), so
+this adds them through the Resolve API instead: a marker on each Media Pool clip
+at every moment Spotted tagged.
 
 HOW TO RUN
-  1. QUIT and reopen DaVinci Resolve if it was already running — it only scans
-     for scripts at launch, so a freshly-written one won't appear until restart.
-  2. Open your project and import the footage.
-  3. Workspace menu -> Scripts -> "Spotted Markers".
-     (Or Workspace -> Console, click Py3, and run this file.)
-Clips are matched by filename. Safe to re-run — Resolve ignores a duplicate
+  1. Open your project and import the footage.
+  2. Workspace menu -> Scripts -> "Spotted Markers".
+Clips are matched by filename. Safe to re-run; Resolve ignores a duplicate
 marker on the same frame.
-"""
-import os
+]]
 
-MARKERS = __DATA__
+local MARKERS = __DATA__
 
+local function basename(p)
+  return string.match(p or "", "[^/\\\\]+$") or ""
+end
 
-def _get_resolve():
-    r = globals().get("resolve")
-    if r:
-        return r
-    try:
-        import DaVinciResolveScript as bmd
-        return bmd.scriptapp("Resolve")
-    except Exception:
-        return None
+local function get_resolve()
+  if resolve then return resolve end
+  if Resolve then return Resolve() end
+  return nil
+end
 
+local function walk(folder, out)
+  for _, clip in ipairs(folder:GetClipList() or {}) do
+    out[#out + 1] = clip
+  end
+  for _, sub in ipairs(folder:GetSubFolderList() or {}) do
+    walk(sub, out)
+  end
+  return out
+end
 
-def main():
-    resolve = _get_resolve()
-    if not resolve:
-        print("Spotted: couldn't reach DaVinci Resolve. Run this from "
-              "Workspace > Scripts (or the Console) inside Resolve.")
-        return
-    proj = resolve.GetProjectManager().GetCurrentProject()
-    if not proj:
-        print("Spotted: no project is open.")
-        return
-    media_pool = proj.GetMediaPool()
+local function main()
+  local r = get_resolve()
+  if not r then
+    print("Spotted: couldn't reach DaVinci Resolve. Run this from " ..
+          "Workspace > Scripts inside Resolve.")
+    return
+  end
+  local proj = r:GetProjectManager():GetCurrentProject()
+  if not proj then
+    print("Spotted: no project is open.")
+    return
+  end
 
-    def walk(folder):
-        clips = list(folder.GetClipList())
-        for sub in folder.GetSubFolderList():
-            clips += walk(sub)
-        return clips
+  local by_name = {}
+  for _, clip in ipairs(walk(proj:GetMediaPool():GetRootFolder(), {})) do
+    local name = basename(clip:GetClipProperty("File Path"))
+    if name == "" then name = clip:GetName() end
+    if name and by_name[name] == nil then by_name[name] = clip end
+  end
 
-    by_name = {}
-    for clip in walk(media_pool.GetRootFolder()):
-        path = clip.GetClipProperty("File Path") or ""
-        by_name.setdefault(os.path.basename(path) or clip.GetName(), clip)
-
-    total_marks = 0
-    matched = 0
-    missing = 0
-    for name, marks in MARKERS.items():
-        clip = by_name.get(name)
-        if not clip:
-            missing += 1
-            continue
-        try:
-            fps = float(clip.GetClipProperty("FPS") or 0) or 30.0
-        except Exception:
-            fps = 30.0
-        placed = False
-        for sec, label, color in marks:
-            frame = int(round(float(sec) * fps))
-            if clip.AddMarker(frame, color, label, "Spotted", 1):
-                total_marks += 1
-                placed = True
-        matched += 1 if placed else 0
-    print("Spotted: added %d markers to %d clips (%d clips in the script "
-          "weren't found in this project)." % (total_marks, matched, missing))
-
+  local total, matched, missing = 0, 0, 0
+  for name, marks in pairs(MARKERS) do
+    local clip = by_name[name]
+    if not clip then
+      missing = missing + 1
+    else
+      -- Resolve reports FPS as a string, and some clips report nothing at all.
+      local fps = tonumber(clip:GetClipProperty("FPS")) or 30.0
+      if fps <= 0 then fps = 30.0 end
+      local placed = false
+      for _, m in ipairs(marks) do
+        local frame = math.floor(m[1] * fps + 0.5)
+        if clip:AddMarker(frame, m[3], m[2], "Spotted", 1) then
+          total = total + 1
+          placed = true
+        end
+      end
+      if placed then matched = matched + 1 end
+    end
+  end
+  print(string.format(
+    "Spotted: added %d markers to %d clips (%d clips in the script weren't " ..
+    "found in this project).", total, matched, missing))
+end
 
 main()
-'''
+"""
+
+
+def _lua_str(s: str) -> str:
+    """A Lua double-quoted string literal.
+
+    Clip names come off the user's disk, so they can hold quotes, backslashes,
+    and non-ASCII. An unescaped one is a syntax error that takes the whole
+    script down, which the user sees as the menu item doing nothing at all.
+    """
+    out = s.replace("\\", "\\\\").replace('"', '\\"')
+    out = out.replace("\n", "\\n").replace("\r", "\\r")
+    return f'"{out}"'
+
+
+def _lua_table(data: dict[str, list]) -> str:
+    """Render the marker map as a Lua table literal."""
+    rows = []
+    for name, marks in sorted(data.items()):
+        items = ", ".join(
+            f"{{{t}, {_lua_str(label)}, {_lua_str(color)}}}"
+            for t, label, color in marks
+        )
+        rows.append(f"  [{_lua_str(name)}] = {{{items}}},")
+    return "{\n" + "\n".join(rows) + "\n}"
 
 
 def resolve_marker_script(video_markers: dict[str, list[tuple[float, str]]]) -> str:
@@ -489,7 +528,7 @@ def resolve_marker_script(video_markers: dict[str, list[tuple[float, str]]]) -> 
             data[Path(path).name] = rows
     if not data:
         return ""
-    return _RESOLVE_TEMPLATE.replace("__DATA__", json.dumps(data))
+    return _RESOLVE_TEMPLATE.replace("__DATA__", _lua_table(data))
 
 
 def write_resolve_script(
@@ -502,8 +541,10 @@ def write_resolve_script(
     NOT the Scripts root, so a script dropped in the root shows up as "No
     Scripts". Fall back to `fallback_dir` (next to the footage) if that write
     fails. Returns where it landed, or None if there was nothing to write.
-    NOTE: Resolve scans this folder only at launch, so a just-written script
-    needs a Resolve restart to appear."""
+
+    Lua, not Python: see the note above _RESOLVE_TEMPLATE. Resolve picks a .lua
+    up without being restarted, so the old "quit and reopen Resolve first"
+    instruction is gone with it."""
     script = resolve_marker_script(video_markers)
     if not script:
         return None
@@ -514,8 +555,18 @@ def write_resolve_script(
     for d in candidates:
         try:
             d.mkdir(parents=True, exist_ok=True)
-            out = d / "Spotted Markers.py"
+            out = d / "Spotted Markers.lua"
             out.write_text(script)
+            # Retire the Python script Spotted used to write here. Left behind
+            # it is dead weight for everyone (Resolve will not list it without a
+            # framework Python) and a duplicate menu entry, holding stale
+            # markers, for anyone who has one.
+            try:
+                legacy = d / "Spotted Markers.py"
+                if legacy.is_file():
+                    legacy.unlink()
+            except OSError:
+                pass
             return out
         except Exception:  # noqa: BLE001 - try the next location
             continue

@@ -109,26 +109,74 @@ def test_sidecar_cleanup_removes_only_spotted(test_mov, have_exiftool):
 
 
 # --- DaVinci Resolve marker script generation -------------------------------
-def test_resolve_marker_script_is_valid_python_with_data():
+def _luac(script: str, tmp_path) -> None:
+    """Syntax-check with luac when it is installed, else skip that assertion.
+
+    A Lua syntax error is invisible: Resolve lists the menu item and running it
+    does nothing at all. There is no other automated way to catch one, since the
+    interpreter lives inside Resolve.
+    """
+    import shutil, subprocess
+    luac = shutil.which("luac")
+    if not luac:
+        return
+    f = tmp_path / "s.lua"
+    f.write_text(script)
+    r = subprocess.run([luac, "-p", str(f)], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+
+
+def test_resolve_marker_script_is_valid_lua_with_data(tmp_path):
+    """Lua, not Python. Resolve hides .py from Workspace > Scripts unless it
+    finds a python.org framework build, so on an ordinary Mac the script was
+    written correctly and never appeared."""
     vm = {
         "/x/A.mov": [(0.5, "Sarah"), (1.0, "Energy peak")],
         "/x/B.mov": [(2.0, "Dad")],
     }
     script = _markers.resolve_marker_script(vm)
     assert script
-    compile(script, "Spotted Markers.py", "exec")   # must be runnable Python
+    _luac(script, tmp_path)
     for token in ("A.mov", "B.mov", "Sarah", "Dad", "Energy peak", "AddMarker", "Yellow", "Blue"):
         assert token in script
     assert _markers.resolve_marker_script({}) == ""   # nothing to mark → empty
+
+
+def test_resolve_script_survives_hostile_clip_names(tmp_path):
+    """Clip names come off the user's disk. One unescaped quote is a syntax
+    error, and a broken script is indistinguishable from a missing one."""
+    vm = {
+        '/x/Ellie\'s "best" clip.mov': [(0.5, 'Say "hi"')],
+        "/x/back\\slash.mov": [(1.0, "Dad")],
+    }
+    script = _markers.resolve_marker_script(vm)
+    assert script
+    _luac(script, tmp_path)
 
 
 def test_write_resolve_script_lands_a_file(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))         # isolate from the real ~/Library
     vm = {str(tmp_path / "clip.mov"): [(0.5, "Sarah")]}
     out = _markers.write_resolve_script(vm, tmp_path)
-    assert out is not None and out.exists() and out.name == "Spotted Markers.py"
+    assert out is not None and out.exists() and out.name == "Spotted Markers.lua"
     assert "Sarah" in out.read_text()
     assert _markers.write_resolve_script({}, tmp_path) is None
+
+
+def test_writing_the_lua_script_retires_the_old_python_one(tmp_path, monkeypatch):
+    """Builds before 0.0.71 left a Spotted Markers.py in Resolve's Utility
+    folder. Anyone with a framework Python would otherwise get two menu entries
+    of the same name, one of them holding markers from an older batch."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    util = (tmp_path / "Library/Application Support/Blackmagic Design"
+            / "DaVinci Resolve/Fusion/Scripts/Utility")
+    util.mkdir(parents=True)
+    legacy = util / "Spotted Markers.py"
+    legacy.write_text("# stale markers from an older batch")
+
+    out = _markers.write_resolve_script({str(tmp_path / "c.mov"): [(0.5, "Sarah")]}, tmp_path)
+    assert out == util / "Spotted Markers.lua"
+    assert not legacy.exists(), "the dead Python script must not linger beside the Lua one"
 
 
 # --- faceless folder no longer hard-errors ----------------------------------
