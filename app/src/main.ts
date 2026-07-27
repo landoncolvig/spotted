@@ -35,6 +35,7 @@ type SpottedEvent =
   | { event: "markers-verified"; file: string; event_count: number; in_file_present: boolean; sidecar_present: boolean; failed?: number; written?: number }
   | { event: "markers-verify-error"; message: string }
   | { event: "resolve-script"; path: string; clips: number }
+  | { event: "markers-summary"; scanned: number; timeline_clips: number; marked_clips: number; skipped_missing: number; skipped_no_markers: number }
   | { event: "resolve-timeline"; path: string; clips: number }
   | { event: "resolve-edl"; path: string; clips: number }
   | { event: "resolve-script-error"; message: string }
@@ -263,6 +264,10 @@ let lastResolveScript: string | null = null;
 let lastResolveTimeline: string | null = null;
 /** Companion EDL carrying the markers themselves. */
 let lastResolveEdl: string | null = null;
+/** How many scanned clips actually reached the DaVinci timeline, and why the
+ *  rest did not. A tester received a timeline holding 1 of her 170 clips with
+ *  nothing on screen to explain it, and assumed DaVinci had dropped them. */
+let lastMarkersSummary: Extract<SpottedEvent, { event: "markers-summary" }> | null = null;
 /** Resolved once at startup; person thumbnails live under it. */
 let homePath: string | null = null;
 /** Set when the user cancels, so the resulting sidecar rejection isn't
@@ -394,6 +399,9 @@ function handleSpottedEvent(evt: SpottedEvent) {
       break;
     case "resolve-script":
       lastResolveScript = evt.path;
+      break;
+    case "markers-summary":
+      lastMarkersSummary = evt;
       break;
     case "resolve-timeline":
       lastResolveTimeline = evt.path;
@@ -857,6 +865,18 @@ function renderVerification() {
   else if (lastResolveScript) resolveCells.push(lastResolveScript);
   if (lastResolveEdl) resolveCells.push(lastResolveEdl);
 
+  // How much of the batch the timeline actually covers. Silence here reads as
+  // "all of it", so a short timeline has to announce itself and say why.
+  const coverageCells: string[] = [];
+  const ms = lastMarkersSummary;
+  if (ms) {
+    coverageCells.push(`${ms.timeline_clips} of ${ms.scanned} clip(s)`);
+    coverageCells.push(`${ms.marked_clips} carrying markers`);
+    if (ms.skipped_missing > 0) {
+      coverageCells.push(`${ms.skipped_missing} no longer on disk`);
+    }
+  }
+
   const rows: Array<{ label: string; values: string[]; help: string }> = [
     {
       label: "Keys (DaVinci, Finder)",
@@ -877,6 +897,11 @@ function renderVerification() {
       label: "Markers (timeline)",
       values: markerCells,
       help: "Per-face timeline markers. In-file XMP for Premiere; sidecar .xmp next to the clip for DaVinci (enable 'Use Sidecar Files' in project settings).",
+    },
+    {
+      label: "Timeline covers",
+      values: coverageCells,
+      help: "Every clip in this batch goes on the DaVinci timeline, in filename order. Markers land on the ones with a named face or an energy peak. Clips Spotted has indexed but can no longer find on disk are left off, because Resolve would show them as Media Offline.",
     },
     {
       label: "DaVinci script",

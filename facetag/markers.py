@@ -656,7 +656,13 @@ def _timeline_layout(
     timeline position is identical in both files. If they disagreed, the EDL
     markers would land on the wrong clips.
     """
-    clips = [(p, ev) for p, ev in sorted(video_markers.items()) if ev]
+    # Every clip handed in gets a slot, including ones carrying no markers. The
+    # timeline is the batch, not just its highlights: a tester fed in 170 clips,
+    # got a one-clip timeline back because only that clip held a named face or
+    # an energy peak, and reasonably read it as Spotted losing her footage.
+    # Unmarked clips must occupy the layout anyway — the EDL is built from this
+    # same list, so a clip missing here shifts every later marker off its clip.
+    clips = sorted(video_markers.items())
     if not clips:
         return 1, 30, []
     num, den = _frame_duration(get_video_fps(Path(clips[0][0])))
@@ -716,6 +722,11 @@ def edl_for_markers(video_markers: dict[str, list[tuple[float, str]]]) -> str:
             )
             lines.append(f" |C:{color} |M:{_edl_safe(label)} |D:1")
             lines.append("")
+    if n == 0:
+        # The layout now includes unmarked clips, so entries alone no longer
+        # implies there is a marker to carry. A header-only EDL makes Resolve
+        # report a failed import.
+        return ""
     return "\n".join(lines)
 
 

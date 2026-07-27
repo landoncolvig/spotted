@@ -151,8 +151,17 @@ def test_fcpxml_is_well_formed_and_carries_markers(tmp_path):
     assert "<fcpxml" in xml and "asset-clip" in xml
     for token in ("Sarah", "Energy peak", "<marker"):
         assert token in xml
-    assert _markers.fcpxml_for_markers({}) == ""       # nothing to mark
-    assert _markers.fcpxml_for_markers({str(clip): []}) == ""
+    assert _markers.fcpxml_for_markers({}) == ""       # no clips at all
+
+    # A clip with no markers still belongs on the timeline: the caller hands in
+    # the whole batch and expects its footage back. Omitting unmarked clips
+    # turned a tester's 170-clip batch into a one-clip timeline.
+    only_unmarked = _markers.fcpxml_for_markers({str(clip): []})
+    assert "asset-clip" in only_unmarked
+    assert "<marker" not in only_unmarked
+    # The EDL carries markers and nothing else, so with none it stays empty
+    # rather than emitting a header Resolve reports as a failed import.
+    assert _markers.edl_for_markers({str(clip): []}) == ""
 
 
 def test_fcpxml_escapes_xml_and_snaps_to_frame_grid(tmp_path):
@@ -488,3 +497,70 @@ def test_tag_vocabulary_is_scoped_to_the_batch(tmp_path):
     conn.commit()
     assert _db.all_batch_tags(conn) == ["casino", "conference room"]
     assert _db.all_batch_tags(conn, str(new_dir)) == ["casino"]
+
+
+# --- DaVinci export location + stale cleanup -------------------------------
+# A tester imported a "Spotted Markers.fcpxml" she found several folders above
+# her footage and got a timeline full of clips she had never scanned. The
+# export had been written to the clips' common ancestor by an earlier,
+# wider run and was never cleaned up.
+
+def test_export_lands_in_the_scanned_folder_not_the_common_ancestor(tmp_path):
+    from facetag import cli
+
+    vegas = tmp_path / "Youtube" / "LasVegas"
+    older = tmp_path / "Youtube" / "Older"
+    vegas.mkdir(parents=True)
+    older.mkdir(parents=True)
+    markers = {str(vegas / "a.mp4"): [(1.0, "E")], str(older / "b.mp4"): [(1.0, "E")]}
+
+    # Without a scope we still fall back to the shared ancestor...
+    assert cli._export_dir(markers, None).name == "Youtube"
+    # ...but a scoped batch writes into the folder the user actually dropped.
+    assert cli._export_dir(markers, str(vegas)) == vegas
+
+
+def test_export_dir_never_resolves_to_a_filesystem_root():
+    from facetag import cli
+
+    # An external drive plus the internal one share only "/" — and on macOS
+    # commonpath returns that rather than raising.
+    assert cli._export_dir({"/Volumes/Ext/a.mp4": [], "/Users/x/b.mp4": []}, None) != Path("/")
+    assert cli._export_dir({"/Volumes/A/a.mp4": [], "/Volumes/B/b.mp4": []}, None) != Path("/Volumes")
+
+
+def test_stale_exports_are_removed_but_only_our_own_files(tmp_path):
+    from facetag import cli
+    from facetag import db as _db
+
+    conn = _db.connect(tmp_path / "i.db")
+    old_dir = tmp_path / "Youtube"
+    new_dir = tmp_path / "Youtube" / "LasVegas"
+    new_dir.mkdir(parents=True)
+
+    stale = old_dir / "Spotted Markers.fcpxml"
+    stale.write_text("from an older, wider run")
+    theirs = old_dir / "Spotted Markers.txt"       # not a name we ever write
+    theirs.write_text("a file the user made")
+    cli._record_exports(conn, [stale, theirs])
+
+    removed = cli._clear_stale_exports(conn, new_dir)
+
+    assert [Path(r).name for r in removed] == ["Spotted Markers.fcpxml"]
+    assert not stale.exists()
+    assert theirs.exists(), "only Spotted's own export names may be deleted"
+
+
+def test_current_export_is_not_deleted_before_being_rewritten(tmp_path):
+    from facetag import cli
+    from facetag import db as _db
+
+    conn = _db.connect(tmp_path / "i.db")
+    d = tmp_path / "LasVegas"
+    d.mkdir()
+    cur = d / "Spotted Markers.fcpxml"
+    cur.write_text("this run's output")
+    cli._record_exports(conn, [cur])
+
+    assert cli._clear_stale_exports(conn, d) == []
+    assert cur.exists()

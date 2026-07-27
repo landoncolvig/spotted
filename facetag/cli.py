@@ -132,6 +132,86 @@ def _resolve_scope(scope, conn=None, *, allow_all: bool = False) -> str | None:
         return str(scope)
 
 
+# The files the DaVinci hand-off writes. Only these names are ever deleted as
+# stale, and only when Spotted's own DB says it wrote them.
+EXPORT_NAMES = {"Spotted Markers.fcpxml", "Spotted Markers.edl", "Spotted Markers.py"}
+
+
+def _export_dir(video_markers: dict, root: str | None) -> Path:
+    """Folder the DaVinci timeline and EDL are written to.
+
+    The folder the batch was about, whenever we know it — that is the folder
+    the user dropped on Spotted, so the export lands where they are already
+    looking for it.
+
+    The old behaviour was the clips' common ancestor, which is the same folder
+    only when a batch sits in exactly one directory. A library spanning two
+    subfolders put the export in their shared parent, which can be several
+    levels above any actual footage.
+    """
+    import os
+
+    if root and os.path.isdir(root):
+        return Path(root)
+    paths = sorted(video_markers.keys())
+    first_dir = Path(os.path.dirname(paths[0]))
+    try:
+        common = os.path.commonpath(paths)
+    except ValueError:
+        # Mixed absolute/relative paths have no common ancestor.
+        return first_dir
+    d = Path(common if os.path.isdir(common) else os.path.dirname(common))
+    # A library spanning an external drive and the internal one shares only
+    # "/", and on macOS commonpath returns that instead of raising. Writing
+    # the timeline to the filesystem root is never right: it fails on a sealed
+    # volume, and on a writable one it litters the root with a file the user
+    # will never find. Any ancestor above the user's home is the same mistake
+    # in a smaller way.
+    if d == Path("/") or d in (Path.home().parent, Path("/Volumes")):
+        return first_dir
+    return d
+
+
+def _clear_stale_exports(conn, keep_dir: Path) -> list[str]:
+    """Delete the exports earlier runs wrote somewhere else.
+
+    Returns the paths removed. Deliberately narrow: a file is only touched if
+    Spotted recorded writing it AND its name is one of ours, so a user's own
+    file can never be caught by this.
+    """
+    try:
+        prev = json.loads(_db.get_setting(conn, "resolve_exports") or "[]")
+    except Exception:  # noqa: BLE001
+        return []
+    # The Resolve script lives at a fixed path in ~/Library and is rewritten in
+    # place every run, so it is never stale. Deleting and immediately recreating
+    # it would leave the user with nothing if that rewrite then failed.
+    script_dir = (
+        Path.home()
+        / "Library/Application Support/Blackmagic Design/DaVinci Resolve/Fusion/Scripts/Utility"
+    )
+    removed: list[str] = []
+    for entry in prev:
+        p = Path(entry)
+        if p.name not in EXPORT_NAMES or p.parent == keep_dir or p.parent == script_dir:
+            continue
+        try:
+            if p.is_file():
+                p.unlink()
+                removed.append(str(p))
+        except OSError:
+            pass  # read-only volume, or already gone
+    return removed
+
+
+def _record_exports(conn, paths: list) -> None:
+    """Remember where this run's exports went, so the next run can clean up."""
+    try:
+        _db.set_setting(conn, "resolve_exports", json.dumps([str(p) for p in paths]))
+    except Exception:  # noqa: BLE001 - bookkeeping must never fail the run
+        pass
+
+
 def _score_energy(conn, video_path, video_id: int, do_motion: bool):
     """Compute a clip's energy (audio + optional motion) and persist it.
 
@@ -1074,6 +1154,16 @@ def markers_write(
         console.print("[yellow]No markers to write (no named faces or energy peaks).[/yellow]")
         raise typer.Exit(0)
 
+    # Every scanned clip in this batch that is still on disk. The timeline is
+    # built from this, not from the marked subset, so the user gets back the
+    # footage they handed in. A clip the index remembers but which has since
+    # moved or been deleted is left out on purpose: Resolve renders those as
+    # Media Offline, which is what made an earlier build look broken.
+    in_scope_paths = sorted(
+        p for (p,) in conn.execute("SELECT path FROM videos").fetchall()
+        if _under_scope(p, root) and Path(p).exists()
+    )
+
     # Every name Spotted may claim. Markers on a clip whose name isn't in here
     # were put there by a human in Premiere, and write_markers preserves them.
     known_names = {
@@ -1142,14 +1232,48 @@ def markers_write(
                 _emit("markers-sidecar-error", name=short, message=str(e))
             prog.update(task, advance=1)
 
+    # Account for every clip that did not reach the timeline. A tester got a
+    # timeline holding 1 of her 170 clips and had no way to tell whether
+    # Spotted had built it wrong or DaVinci had dropped the rest; answering
+    # that took a round trip and a copy of her export. The run now says so.
+    scanned = sum(
+        1 for (p,) in conn.execute("SELECT path FROM videos").fetchall()
+        if _under_scope(p, root)
+    )
+    offline = scanned - len(in_scope_paths)
+    unmarked = len(in_scope_paths) - len(video_markers)
+    _emit(
+        "markers-summary",
+        scanned=scanned,
+        timeline_clips=len(in_scope_paths),
+        marked_clips=len(video_markers),
+        skipped_missing=offline,
+        skipped_no_markers=unmarked,
+    )
+    console.print(
+        f"Timeline: [bold]{len(in_scope_paths)}[/bold] of {scanned} scanned clip(s), "
+        f"[bold]{len(video_markers)}[/bold] carrying markers."
+    )
+    if offline > 0:
+        console.print(
+            f"  [yellow]{offline} clip(s) are in the index but no longer on disk, "
+            f"so they are left off the timeline.[/yellow]"
+        )
+
     # DaVinci Resolve marker script. DaVinci ignores the in-file XMP markers, so
     # this script (matching clips by filename and calling the Resolve API) is how
     # markers reach it. Written once for the whole batch.
-    if resolve and video_markers:
-        import os
+    if resolve and in_scope_paths:
         try:
-            common = os.path.commonpath(list(video_markers.keys()))
-            fallback_dir = Path(common if os.path.isdir(common) else os.path.dirname(common))
+            out_dir = _export_dir({p: [] for p in in_scope_paths}, root)
+            # Delete the exports previous runs left elsewhere before writing the
+            # new ones. Without this, a run whose clips spanned two folders put
+            # the timeline in their shared ancestor — several levels above the
+            # footage — and it stayed there forever. A tester found one of those
+            # months later, imported it, and got a timeline full of footage she
+            # had never scanned, which read as Spotted ignoring her folder.
+            for gone in _clear_stale_exports(conn, out_dir):
+                _emit("resolve-stale-removed", path=gone)
 
             # Primary path: an FCPXML timeline sitting next to the footage.
             # DaVinci imports it with File > Import > Timeline — no scripting,
@@ -1157,7 +1281,14 @@ def markers_write(
             # against a clean Resolve 21 install, where the Scripts menu
             # enumerated nothing from any documented location, which is what
             # made the script route unusable for real users.
-            xml_out = _markers.write_fcpxml(video_markers, fallback_dir)
+            # The timeline carries the whole batch: every scanned clip still on
+            # disk, with markers on the ones that earned them. Building it from
+            # video_markers alone silently dropped every unmarked clip, so a
+            # 170-clip batch came back as a 1-clip timeline.
+            timeline_clips: dict[str, list[tuple[float, str]]] = {
+                p: video_markers.get(p, []) for p in in_scope_paths
+            }
+            xml_out = _markers.write_fcpxml(timeline_clips, out_dir)
             if xml_out:
                 console.print(f"[cyan]DaVinci timeline → {xml_out}[/cyan]")
                 _emit("resolve-timeline", path=str(xml_out), clips=len(video_markers))
@@ -1167,17 +1298,19 @@ def markers_write(
             # does import markers via Timelines > Import > Timeline Markers
             # from EDL. Both files come from one shared layout so the EDL
             # timecodes line up with the imported timeline frame for frame.
-            edl_out = _markers.write_edl(video_markers, fallback_dir)
+            edl_out = _markers.write_edl(timeline_clips, out_dir)
             if edl_out:
                 console.print(f"[cyan]DaVinci markers → {edl_out}[/cyan]")
                 _emit("resolve-edl", path=str(edl_out), clips=len(video_markers))
 
             # Secondary: keep emitting the script for anyone whose Resolve does
             # pick scripts up. It costs one small file and needs no user setup.
-            out = _markers.write_resolve_script(video_markers, fallback_dir)
+            out = _markers.write_resolve_script(video_markers, out_dir)
             if out:
                 console.print(f"[cyan]DaVinci marker script → {out}[/cyan]")
                 _emit("resolve-script", path=str(out), clips=len(video_markers))
+
+            _record_exports(conn, [p for p in (xml_out, edl_out, out) if p])
         except Exception as e:  # noqa: BLE001 - never let the script step fail markers
             _emit("resolve-script-error", message=str(e))
 
