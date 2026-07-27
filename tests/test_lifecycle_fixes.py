@@ -805,5 +805,56 @@ def test_activity_suggest_survives_a_multi_file_batch(tmp_path):
     conn.close()
 
     res = CliRunner().invoke(_cli.app, ["activity-suggest", "--db", str(db_path)])
-    assert "AttributeError" not in res.output
-    assert "rstrip" not in res.output
+    assert res.exception is None or isinstance(res.exception, SystemExit), repr(res.exception)
+    assert res.exit_code == 0, res.output
+
+
+def test_every_pipeline_step_survives_a_multi_file_batch(tmp_path):
+    """The gap that let two crashes reach a tester in one day.
+
+    Each step was unit-tested on its own, but nothing ran them in the order the
+    app runs them, over a batch shaped the way a Finder multi-selection shapes
+    one. Both v0.0.70 regressions (NameError in tag-write, AttributeError in
+    activity-suggest) sat on that path and shipped twice.
+
+    The scope must EXCLUDE at least one indexed clip: the tag-write status line
+    that raised NameError only executes when scoping actually drops something,
+    so a batch matching its scope exactly walks straight past it.
+    """
+    db_path = tmp_path / "pipe.db"
+    conn = _db.connect(db_path)
+    handed_over, left_out = [], None
+    for i, name in enumerate(("a.mov", "b.mov", "c.mov")):
+        f = tmp_path / name
+        f.write_bytes(b"")
+        vid = _db.add_video(conn, str(f), 4.0)
+        _db.set_batch_tags(conn, vid, ["vegas"])
+        _db.set_energy(conn, vid, 0.9, "high", [1.0, 2.5])
+        if name == "c.mov":
+            left_out = str(f)
+        else:
+            handed_over.append(str(f))
+    _db.set_setting(conn, "last_scan_roots", json.dumps(handed_over))
+    _db.set_setting(conn, "last_scan_root", handed_over[0])
+    conn.commit()
+    conn.close()
+
+    runner = CliRunner()
+    for args in (
+        ["activity-suggest", "--db", str(db_path)],
+        ["tag-write", "--db", str(db_path), "--dry-run"],
+        ["markers-write", "--db", str(db_path), "--no-resolve", "--no-sidecar"],
+    ):
+        res = runner.invoke(_cli.app, args)
+        # CliRunner swallows the exception into res.exception and prints
+        # nothing, so asserting on res.output here would pass for a crash.
+        assert res.exception is None or isinstance(res.exception, SystemExit), (
+            f"{args[0]} raised {res.exception!r}"
+        )
+        assert res.exit_code == 0, f"{args[0]} exited {res.exit_code}:\n{res.output}"
+
+    # And the scoping those steps rely on is real, not vacuous.
+    conn = _db.connect(db_path)
+    roots = _cli._resolve_scope(None, conn)
+    assert len(roots) == 2
+    assert not _cli._under_scope(left_out, roots), "the third clip was never handed over"
