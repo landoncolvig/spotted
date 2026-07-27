@@ -564,3 +564,48 @@ def test_current_export_is_not_deleted_before_being_rewritten(tmp_path):
 
     assert cli._clear_stale_exports(conn, d) == []
     assert cur.exists()
+
+
+# --- index self-healing ----------------------------------------------------
+# A tester reorganised her footage after scanning it. The index kept pointing
+# at the old layout, so 169 of her 170 clips were counted as real right up to
+# the timeline, where the file-exists check finally dropped them.
+
+def test_forget_missing_videos_drops_only_absent_clips_under_the_root(tmp_path):
+    from facetag import db as _db
+
+    conn = _db.connect(tmp_path / "i.db")
+    root = tmp_path / "Trip"
+    (root / "CamA").mkdir(parents=True)
+    here = root / "CamA" / "present.mp4"
+    here.write_bytes(b"")
+    _db.add_video(conn, str(here), 1.0)
+    _db.add_video(conn, str(root / "CamA" / "moved.mp4"), 1.0)   # never existed
+    outside = tmp_path / "Elsewhere" / "other.mp4"                # absent, out of scope
+    _db.add_video(conn, str(outside), 1.0)
+
+    gone = _db.forget_missing_videos(conn, str(root))
+
+    assert gone == [str(root / "CamA" / "moved.mp4")]
+    remaining = {p for (p,) in conn.execute("SELECT path FROM videos").fetchall()}
+    assert str(here) in remaining, "a clip that is present must survive"
+    assert str(outside) in remaining, "clips outside the scanned root are not touched"
+
+
+def test_forgetting_a_video_takes_its_faces_with_it(tmp_path):
+    from facetag import db as _db
+
+    conn = _db.connect(tmp_path / "i.db")
+    root = tmp_path / "Trip"
+    root.mkdir()
+    vid = _db.add_video(conn, str(root / "ghost.mp4"), 1.0)
+    conn.execute(
+        "INSERT INTO faces(video_id, timestamp_sec, embedding) VALUES (?, ?, ?)",
+        (vid, 1.0, b"\x00" * 8),
+    )
+    conn.commit()
+
+    _db.forget_missing_videos(conn, str(root))
+
+    left = conn.execute("SELECT COUNT(*) FROM faces WHERE video_id = ?", (vid,)).fetchone()[0]
+    assert left == 0, "orphaned face rows would keep the ghost alive in every query"

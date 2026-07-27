@@ -249,10 +249,29 @@ def scan(
     # a path the UI held in memory, which is lost whenever the app restarts —
     # including on every auto-update — and they then silently fell back to the
     # whole library.
+    scan_root = str(Path(path).resolve())
     try:
-        _db.set_setting(conn, "last_scan_root", str(Path(path).resolve()))
+        _db.set_setting(conn, "last_scan_root", scan_root)
     except Exception:  # noqa: BLE001 - scoping is best-effort, never block a scan
         pass
+
+    # Forget clips this folder used to hold. walk_videos just succeeded here, so
+    # anything still indexed under it that is no longer on disk really has moved
+    # or been deleted — not a drive that failed to mount. Left in place, those
+    # rows are counted and tagged like real clips and only get discarded at the
+    # timeline, which is how a 170-clip batch became a one-clip timeline.
+    if Path(scan_root).is_dir():
+        try:
+            forgotten = _db.forget_missing_videos(conn, scan_root)
+            if forgotten:
+                console.print(
+                    f"[yellow]Forgot {len(forgotten)} indexed clip(s) no longer in "
+                    f"this folder.[/yellow]"
+                )
+                _emit("index-pruned", count=len(forgotten))
+        except Exception as e:  # noqa: BLE001 - never block a scan over cleanup
+            _emit("index-prune-error", message=str(e))
+
     detector = _detect.Detector(min_score=min_score)
 
     # Activity encoder is optional + degrades gracefully. If the .mlpackages
@@ -1349,11 +1368,8 @@ def markers_write(
             )
         except Exception as e:
             _emit("markers-verify-error", message=str(e))
-    if missing:
-        console.print(
-            f"[yellow]{len(missing)} clip(s) in the index are no longer on disk "
-            f"and were left out of the timeline.[/yellow]"
-        )
+    # The timeline summary above already accounts for clips that are no longer
+    # on disk; saying it twice made the run look like two separate problems.
     _emit("markers-complete", total=len(videos), failed=len(failed), missing=len(missing))
     if failed:
         console.print(

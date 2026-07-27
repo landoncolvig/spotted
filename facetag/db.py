@@ -343,6 +343,34 @@ def clear_video_faces(conn: sqlite3.Connection, video_id: int) -> None:
     conn.commit()
 
 
+def forget_missing_videos(conn: sqlite3.Connection, root: str) -> list[str]:
+    """Drop index rows for clips under `root` whose file is no longer there.
+
+    The index outlives the disk. Reorganising a folder after a scan leaves rows
+    pointing at the old layout, and those ghosts are indistinguishable from real
+    clips everywhere downstream: they inflate counts, they widen the tag
+    vocabulary, and they are discarded only at the very last step, where the
+    timeline checks whether the file is actually present. One tester's library
+    carried 169 of them, so a 170-clip batch produced a one-clip timeline.
+
+    Only ever called with a root that was just walked successfully, so an
+    unplugged drive — where every path beneath it looks missing — cannot
+    trigger a purge. Rows in `faces`, `frame_embeddings` and `auto_tags` follow
+    the video out via ON DELETE CASCADE.
+
+    Returns the paths forgotten.
+    """
+    prefix = root.rstrip("/") + "/"
+    gone = [
+        p for (p,) in conn.execute("SELECT path FROM videos").fetchall()
+        if (p == root or p.startswith(prefix)) and not Path(p).exists()
+    ]
+    if gone:
+        conn.executemany("DELETE FROM videos WHERE path = ?", [(p,) for p in gone])
+        conn.commit()
+    return gone
+
+
 def add_frame_embeddings_bulk(
     conn: sqlite3.Connection,
     video_id: int,
