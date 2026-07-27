@@ -762,3 +762,48 @@ def test_scope_label_names_a_batch_of_any_shape(tmp_path):
     assert _scope_label(["/Users/e/Video/a.MP4", "/Users/e/Video/b.MP4"]) == "2 clip(s) in Video"
     assert _scope_label(["/Users/e/OP3/a.MP4", "/Users/e/OP4/b.MP4"]) == "2 item(s)"
     assert _scope_label(None) == "everything"
+
+
+def test_batch_tag_vocabulary_accepts_a_list_of_roots(tmp_path):
+    """Second casualty of the same v0.0.70 refactor: all_batch_tags still did
+    `scope_root.rstrip("/")` on what became a list, so a multi-file batch blew
+    up with AttributeError at the activity-suggest step."""
+    conn = _db.connect(tmp_path / "v.db")
+    picked, other = [], None
+    for name, tag in (("a.mov", "vegas"), ("b.mov", "pool"), ("c.mov", "conference room")):
+        f = tmp_path / name
+        f.write_bytes(b"")
+        vid = _db.add_video(conn, str(f), 1.0)
+        _db.set_batch_tags(conn, vid, [tag])
+        if name != "c.mov":
+            picked.append(str(f))
+        else:
+            other = str(f)
+    conn.commit()
+
+    assert _db.all_batch_tags(conn, picked) == ["pool", "vegas"]
+    # The clip the user did not hand over keeps its vocabulary to itself.
+    assert "conference room" not in _db.all_batch_tags(conn, picked)
+    # A single string still works, for libraries scanned before 0.0.70.
+    assert _db.all_batch_tags(conn, other) == ["conference room"]
+
+
+def test_activity_suggest_survives_a_multi_file_batch(tmp_path):
+    """End of the same chain: the CLI step that reads the vocabulary must not
+    crash when the recorded batch is a list of files."""
+    db_path = tmp_path / "a.db"
+    conn = _db.connect(db_path)
+    roots = []
+    for name in ("a.mov", "b.mov"):
+        f = tmp_path / name
+        f.write_bytes(b"")
+        vid = _db.add_video(conn, str(f), 1.0)
+        _db.set_batch_tags(conn, vid, ["vegas"])
+        roots.append(str(f))
+    _db.set_setting(conn, "last_scan_roots", json.dumps(roots))
+    conn.commit()
+    conn.close()
+
+    res = CliRunner().invoke(_cli.app, ["activity-suggest", "--db", str(db_path)])
+    assert "AttributeError" not in res.output
+    assert "rstrip" not in res.output

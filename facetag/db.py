@@ -225,8 +225,13 @@ def _split_batch_tag_rows(rows) -> list[str]:
     return sorted(seen)
 
 
-def all_batch_tags(conn: sqlite3.Connection, scope_root: str | None = None) -> list[str]:
+def all_batch_tags(
+    conn: sqlite3.Connection, scope_root: str | list[str] | None = None
+) -> list[str]:
     """Distinct batch tags, optionally only for clips under `scope_root`.
+
+    `scope_root` may be one path or a list of them: a batch is whatever the
+    user dropped, and a Finder multi-selection is many paths.
 
     These are the tags the user typed on the welcome screen. The activity
     matcher uses them as its whole vocabulary: it looks for each of these
@@ -239,11 +244,17 @@ def all_batch_tags(conn: sqlite3.Connection, scope_root: str | None = None) -> l
     Vegas trip that way.
     """
     if scope_root:
+        roots = [scope_root] if isinstance(scope_root, str) else list(scope_root)
+        roots = [r.rstrip("/") for r in roots if r]
+        clause = " OR ".join(["(path = ? OR path LIKE ? || '/%')"] * len(roots))
+        params: list[str] = []
+        for r in roots:
+            params += [r, r]
         rows = conn.execute(
             "SELECT DISTINCT batch_tags FROM videos "
             "WHERE batch_tags IS NOT NULL AND batch_tags != '' "
-            "AND (path = ? OR path LIKE ? || '/%')",
-            (scope_root.rstrip("/"), scope_root.rstrip("/")),
+            f"AND ({clause})",
+            params,
         ).fetchall()
         if rows:
             return _split_batch_tag_rows(rows)
