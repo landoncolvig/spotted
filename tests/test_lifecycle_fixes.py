@@ -3,6 +3,7 @@ scan-complete flag, marker de-duplication, labeler XSS escaping, and the
 faceless-folder cluster exit code."""
 from __future__ import annotations
 
+import json
 import sqlite3
 from pathlib import Path
 
@@ -474,10 +475,17 @@ def test_scope_falls_back_to_the_recorded_batch(tmp_path):
     from facetag.cli import _resolve_scope
     conn = _db.connect(tmp_path / "s.db")
     assert _resolve_scope(None, conn) is None          # nothing recorded yet
+    # A library last scanned by a build that predates multi-path batches only
+    # has the single-root setting, and must still scope to it rather than
+    # silently widening to everything.
     _db.set_setting(conn, "last_scan_root", "/Users/x/May")
-    assert _resolve_scope(None, conn) == "/Users/x/May"
+    assert _resolve_scope(None, conn) == ["/Users/x/May"]
+    # A batch is every path the user handed over, not just the first. Scoping
+    # to paths[0] is what turned a 170-file drop into a one-clip timeline.
+    _db.set_setting(conn, "last_scan_roots", json.dumps(["/Users/x/a.mov", "/Users/x/b.mov"]))
+    assert _resolve_scope(None, conn) == ["/Users/x/a.mov", "/Users/x/b.mov"]
     # explicit scope still wins, and --all means the whole library on purpose
-    assert _resolve_scope(tmp_path, conn) == str(tmp_path.resolve())
+    assert _resolve_scope(tmp_path, conn) == [str(tmp_path.resolve())]
     assert _resolve_scope(None, conn, allow_all=True) is None
 
 
@@ -609,3 +617,65 @@ def test_forgetting_a_video_takes_its_faces_with_it(tmp_path):
 
     left = conn.execute("SELECT COUNT(*) FROM faces WHERE video_id = ?", (vid,)).fetchone()[0]
     assert left == 0, "orphaned face rows would keep the ghost alive in every query"
+
+
+def test_a_multi_file_drop_scopes_to_every_file_not_just_the_first(tmp_path):
+    """A tester selected 170 clips in Finder, dragged them onto Spotted, and got
+    back a timeline holding 1. macOS delivers every selected path on a
+    multi-selection drag; Spotted took paths[0] and recorded it as the batch, so
+    the scope check discarded the other 169 at the timeline step."""
+    from facetag.cli import _under_scope
+    picked = [f"/Users/e/Video/DJI_{i:04d}.MP4" for i in range(3)]
+    assert _under_scope(picked[0], picked)
+    assert _under_scope(picked[2], picked), "later files in the selection are in the batch"
+    assert not _under_scope("/Users/e/Video/NOT_PICKED.MP4", picked)
+    # Scoping to only the first path is precisely the old bug.
+    assert not _under_scope(picked[2], [picked[0]])
+
+
+def test_a_folder_root_still_covers_everything_inside_it(tmp_path):
+    """Multi-path scoping must not regress the ordinary case: drop one folder,
+    get every clip under it, including in subfolders."""
+    from facetag.cli import _under_scope
+    roots = ["/Users/e/LasVegas"]
+    assert _under_scope("/Users/e/LasVegas/OP3/Video/a.MP4", roots)
+    assert _under_scope("/Users/e/LasVegas", roots)
+    # A sibling folder sharing a name prefix is a different folder.
+    assert not _under_scope("/Users/e/LasVegas2/a.MP4", roots)
+
+
+def test_scan_walks_every_dropped_path_and_deduplicates(tmp_path):
+    """Two roots can overlap (a folder plus a clip inside it). Every clip must
+    be scanned once: twice is wasted minutes on a long batch."""
+    from facetag import extract as _extract
+    folder = tmp_path / "Video"
+    folder.mkdir()
+    clips = []
+    for name in ("a.mov", "b.mov", "c.mov"):
+        f = folder / name
+        f.write_bytes(b"")
+        clips.append(f)
+
+    seen: set[str] = set()
+    videos: list[Path] = []
+    for p in [folder, clips[0]]:            # overlapping roots, as scan() gets them
+        for v in _extract.walk_videos(p):
+            key = str(v.resolve())
+            if key not in seen:
+                seen.add(key)
+                videos.append(v)
+    assert [v.name for v in videos] == ["a.mov", "b.mov", "c.mov"]
+
+
+def test_export_lands_beside_the_clips_for_a_multi_file_batch(tmp_path):
+    """With no dropped folder to aim at, the export still has to land where the
+    footage is rather than at some ancestor the user never opens."""
+    from facetag.cli import _export_dir
+    folder = tmp_path / "OP3" / "Video"
+    folder.mkdir(parents=True)
+    picked = []
+    for name in ("a.mov", "b.mov"):
+        f = folder / name
+        f.write_bytes(b"")
+        picked.append(str(f))
+    assert _export_dir({p: [] for p in picked}, picked) == folder

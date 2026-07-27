@@ -83,7 +83,7 @@ def test_scan_backfills_embeddings_for_preclip_video(tmp_path, test_mov, monkeyp
     conn.close()
 
     cli.scan(
-        path=test_mov, db_path=db_path, sample_fps=2.0,
+        paths=[test_mov], db_path=db_path, sample_fps=2.0,
         rescan=False, min_score=0.5, tags="", activities=True,
     )
 
@@ -114,7 +114,7 @@ def test_scan_skips_video_that_already_has_embeddings(tmp_path, test_mov, monkey
     conn.close()
 
     cli.scan(
-        path=test_mov, db_path=db_path, sample_fps=2.0,
+        paths=[test_mov], db_path=db_path, sample_fps=2.0,
         rescan=False, min_score=0.5, tags="", activities=True,
     )
 
@@ -138,7 +138,7 @@ def test_scan_skips_when_activities_disabled(tmp_path, test_mov, monkeypatch):
     conn.close()
 
     cli.scan(
-        path=test_mov, db_path=db_path, sample_fps=2.0,
+        paths=[test_mov], db_path=db_path, sample_fps=2.0,
         rescan=False, min_score=0.5, tags="", activities=False,
     )
 

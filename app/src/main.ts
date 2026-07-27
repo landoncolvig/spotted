@@ -85,6 +85,11 @@ function labelFrameSrc(): string {
       : `http://127.0.0.1:${LABEL_PORT}/`;
   return base + (base.includes("?") ? "&" : "?") + `t=${Date.now()}`;
 }
+// Everything the user handed over this batch. A Finder multi-selection is a
+// list, so this is a list; `currentPath` is the single-root scope hint the
+// downstream --scope flag takes, and is null for a multi-path batch so those
+// steps fall back to the full root list the scan persisted in the DB.
+let currentPaths: string[] = [];
 let currentPath: string | null = null;
 // Whether the final tag-write replaces each clip's whole keyword set (start
 // fresh) vs merging. Captured from the tags-screen checkbox when a run begins,
@@ -179,10 +184,16 @@ function wireWelcome() {
 }
 
 async function pickFolder() {
-  const path = await open({ directory: true, multiple: false });
-  if (typeof path === "string") {
-    askForTags(path);
-  }
+  const picked = await open({ directory: true, multiple: true });
+  if (typeof picked === "string") askForTags([picked]);
+  else if (Array.isArray(picked) && picked.length > 0) askForTags(picked);
+}
+
+/** What to show when a batch is a pile of files rather than one folder. */
+function describeBatch(paths: string[]): string {
+  if (paths.length === 1) return paths[0];
+  const dir = paths[0].slice(0, paths[0].lastIndexOf("/")) || "/";
+  return `${paths.length} items in ${dir}`;
 }
 
 // Reasonable stop words to drop from auto-suggested tags.
@@ -211,10 +222,11 @@ function suggestTagsFromPath(path: string): string {
   return out.slice(0, 5).join(", ");
 }
 
-function askForTags(path: string) {
-  currentPath = path;
-  tagsPath.textContent = path;
-  tagsInput.value = suggestTagsFromPath(path);
+function askForTags(paths: string[]) {
+  currentPaths = paths;
+  currentPath = paths.length === 1 ? paths[0] : null;
+  tagsPath.textContent = describeBatch(paths);
+  tagsInput.value = suggestTagsFromPath(paths[0]);
   setState("tags");
   // Focus + select-all so the user can immediately edit or hit Enter
   setTimeout(() => {
@@ -456,10 +468,11 @@ async function ensureSidecarListener() {
   });
 }
 
-async function runBatch(path: string, tags: string[] = []) {
-  currentPath = path;
+async function runBatch(paths: string[], tags: string[] = []) {
+  currentPaths = paths;
+  currentPath = paths.length === 1 ? paths[0] : null;
   setState("working");
-  workingPath.textContent = path;
+  workingPath.textContent = describeBatch(paths);
   setProgressIndeterminate();
   workingLabel.textContent = "Spotting";
   workingDetail.textContent = "Looking for footage…";
@@ -472,7 +485,7 @@ async function runBatch(path: string, tags: string[] = []) {
   await ensureSidecarListener();
 
   try {
-    await invoke<number>("scan_folder", { path, tags });
+    await invoke<number>("scan_folder", { paths, tags });
     await invoke<number>("cluster_faces");
     workingLabel.textContent = "Naming people";
     workingDetail.textContent = "Opening labeler…";
@@ -481,7 +494,7 @@ async function runBatch(path: string, tags: string[] = []) {
     // Returns the labeler URL including its per-session token.
     labelUrl = await invoke<string>("start_label_server", {
       port: LABEL_PORT,
-      scopePaths: currentPath ? [currentPath] : null,
+      scopePaths: currentPaths.length > 0 ? currentPaths : null,
     });
     mountLabelScreen();
     setState("label");
@@ -940,9 +953,9 @@ btnAgain.addEventListener("click", () => {
 });
 
 btnReveal.addEventListener("click", async () => {
-  if (currentPath) {
+  if (currentPaths.length > 0) {
     try {
-      await invoke("reveal_in_finder", { path: currentPath });
+      await invoke("reveal_in_finder", { path: currentPaths[0] });
     } catch (e) {
       console.warn("reveal failed:", e);
     }
@@ -1383,7 +1396,7 @@ function wireDragDrop() {
       return;
     }
     const paths = e.payload?.paths ?? [];
-    if (paths.length > 0) askForTags(paths[0]);
+    if (paths.length > 0) askForTags(paths);
   });
 }
 
@@ -1584,14 +1597,14 @@ function flashToast(msg: string, isError = false) {
 
 function wireTagsScreen() {
   tagsStart.addEventListener("click", () => {
-    if (!currentPath) return;
+    if (currentPaths.length === 0) return;
     overwriteKeywords = tagsOverwrite.checked;
-    runBatch(currentPath, readTagsInput());
+    runBatch(currentPaths, readTagsInput());
   });
   tagsSkip.addEventListener("click", () => {
-    if (!currentPath) return;
+    if (currentPaths.length === 0) return;
     overwriteKeywords = tagsOverwrite.checked;
-    runBatch(currentPath, []);
+    runBatch(currentPaths, []);
   });
   tagsInput.addEventListener("keydown", (e) => {
     if (e.key === "Enter") {

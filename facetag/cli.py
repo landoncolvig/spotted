@@ -104,32 +104,47 @@ def _clip_thumb_datauri(path: str, cache: dict, *, width: int = 128) -> str | No
     return uri
 
 
-def _under_scope(path_str: str, root: str | None) -> bool:
-    """Is this clip inside the folder the current batch was about?"""
+def _under_scope(path_str: str, root: str | list[str] | None) -> bool:
+    """Is this clip inside what the current batch was about?
+
+    A batch is a list of roots, not one folder: dragging a multi-file selection
+    out of Finder hands over every selected file. Scoping to just the first one
+    is how a 170-clip drop came back as a one-clip timeline.
+    """
     if not root:
         return True
-    return path_str == root or path_str.startswith(root.rstrip("/") + "/")
+    roots = [root] if isinstance(root, str) else root
+    return any(
+        path_str == r or path_str.startswith(r.rstrip("/") + "/") for r in roots
+    )
 
 
-def _resolve_scope(scope, conn=None, *, allow_all: bool = False) -> str | None:
-    """Folder this run should be confined to.
+def _resolve_scope(scope, conn=None, *, allow_all: bool = False) -> list[str] | None:
+    """Paths this run should be confined to.
 
-    Explicit --scope wins. Otherwise fall back to the folder the last scan was
-    about, which the DB remembers, so a restart between scanning and writing
-    cannot silently widen the run to the entire library. `allow_all` is for
-    "Re-tag Library", where library-wide is what the user asked for.
+    Explicit --scope wins. Otherwise fall back to what the last scan was about,
+    which the DB remembers, so a restart between scanning and writing cannot
+    silently widen the run to the entire library. `allow_all` is for "Re-tag
+    Library", where library-wide is what the user asked for.
     """
     if scope is None:
         if allow_all or conn is None:
             return None
         try:
-            return _db.get_setting(conn, "last_scan_root")
+            raw = _db.get_setting(conn, "last_scan_roots")
+            if raw:
+                roots = [r for r in json.loads(raw) if r]
+                if roots:
+                    return roots
+            # Libraries scanned before multi-path batches shipped.
+            legacy = _db.get_setting(conn, "last_scan_root")
+            return [legacy] if legacy else None
         except Exception:  # noqa: BLE001
             return None
     try:
-        return str(Path(scope).resolve())
+        return [str(Path(scope).resolve())]
     except OSError:
-        return str(scope)
+        return [str(scope)]
 
 
 # The files the DaVinci hand-off writes. Only these names are ever deleted as
@@ -137,7 +152,7 @@ def _resolve_scope(scope, conn=None, *, allow_all: bool = False) -> str | None:
 EXPORT_NAMES = {"Spotted Markers.fcpxml", "Spotted Markers.edl", "Spotted Markers.py"}
 
 
-def _export_dir(video_markers: dict, root: str | None) -> Path:
+def _export_dir(video_markers: dict, root: str | list[str] | None) -> Path:
     """Folder the DaVinci timeline and EDL are written to.
 
     The folder the batch was about, whenever we know it — that is the folder
@@ -151,8 +166,13 @@ def _export_dir(video_markers: dict, root: str | None) -> Path:
     """
     import os
 
-    if root and os.path.isdir(root):
-        return Path(root)
+    # A batch of individually-selected files has no dropped folder to aim at,
+    # so only a single directory root short-circuits; otherwise fall through to
+    # the clips themselves, which for a Finder multi-select all sit together.
+    roots = [root] if isinstance(root, str) else (root or [])
+    dirs = [r for r in roots if os.path.isdir(r)]
+    if len(dirs) == 1 and len(roots) == 1:
+        return Path(dirs[0])
     paths = sorted(video_markers.keys())
     first_dir = Path(os.path.dirname(paths[0]))
     try:
@@ -226,7 +246,7 @@ def _score_energy(conn, video_path, video_id: int, do_motion: bool):
 
 @app.command()
 def scan(
-    path: Path = typer.Argument(..., exists=True, help="Video file or directory to scan."),
+    paths: list[Path] = typer.Argument(..., exists=True, help="Video files and/or directories to scan."),
     db_path: Path = typer.Option(DEFAULT_DB, "--db"),
     sample_fps: float = typer.Option(1.0, "--fps", help="Frames per second to sample for face detection."),
     rescan: bool = typer.Option(False, "--rescan", help="Re-scan videos already in the index."),
@@ -236,10 +256,22 @@ def scan(
     energy: bool = typer.Option(True, "--energy/--no-energy", help="Score each clip's 'energy' (excitement) from audio loudness + camera-compensated motion, tag it high/medium/low, and mark its peak moments. On by default."),
     energy_motion: bool = typer.Option(True, "--energy-motion/--no-energy-motion", help="Include the optical-flow motion pass in energy scoring. Disable for audio-only energy (faster, but blind to silent action)."),
 ):
-    """Walk a path, sample frames, detect faces, store embeddings."""
-    videos = _extract.walk_videos(path)
+    """Walk the given paths, sample frames, detect faces, store embeddings."""
+    # Dragging a multi-file selection out of Finder hands over every selected
+    # file, so a batch is a list. De-duplicated because two roots can overlap
+    # (a folder plus one of the clips inside it) and a clip scanned twice in one
+    # pass is wasted minutes on a long batch.
+    seen: set[str] = set()
+    videos: list[Path] = []
+    for p in paths:
+        for v in _extract.walk_videos(p):
+            key = str(v.resolve())
+            if key not in seen:
+                seen.add(key)
+                videos.append(v)
     if not videos:
-        console.print(f"[red]No videos found under {path}[/red]")
+        where = paths[0] if len(paths) == 1 else f"the {len(paths)} items you dropped"
+        console.print(f"[red]No videos found under {where}[/red]")
         raise typer.Exit(1)
 
     batch_tags = [t.strip().lower() for t in tags.split(",") if t.strip()] if tags else []
@@ -249,28 +281,34 @@ def scan(
     # a path the UI held in memory, which is lost whenever the app restarts —
     # including on every auto-update — and they then silently fell back to the
     # whole library.
-    scan_root = str(Path(path).resolve())
+    scan_roots = [str(Path(p).resolve()) for p in paths]
     try:
-        _db.set_setting(conn, "last_scan_root", scan_root)
+        _db.set_setting(conn, "last_scan_roots", json.dumps(scan_roots))
+        # Kept in step so a downgrade to a build that only reads the single-root
+        # setting still scopes to something inside this batch.
+        _db.set_setting(conn, "last_scan_root", scan_roots[0])
     except Exception:  # noqa: BLE001 - scoping is best-effort, never block a scan
         pass
 
-    # Forget clips this folder used to hold. walk_videos just succeeded here, so
-    # anything still indexed under it that is no longer on disk really has moved
-    # or been deleted — not a drive that failed to mount. Left in place, those
-    # rows are counted and tagged like real clips and only get discarded at the
-    # timeline, which is how a 170-clip batch became a one-clip timeline.
-    if Path(scan_root).is_dir():
-        try:
-            forgotten = _db.forget_missing_videos(conn, scan_root)
-            if forgotten:
-                console.print(
-                    f"[yellow]Forgot {len(forgotten)} indexed clip(s) no longer in "
-                    f"this folder.[/yellow]"
-                )
-                _emit("index-pruned", count=len(forgotten))
-        except Exception as e:  # noqa: BLE001 - never block a scan over cleanup
-            _emit("index-prune-error", message=str(e))
+    # Forget clips a scanned folder used to hold. walk_videos just succeeded on
+    # it, so anything still indexed under it that is no longer on disk really
+    # has moved or been deleted, not a drive that failed to mount. Left in
+    # place, those rows are counted and tagged like real clips and are only
+    # discarded at the timeline, where Resolve renders them as Media Offline.
+    # Only directory roots: a file root prunes nothing but itself.
+    try:
+        forgotten: list[str] = []
+        for r in scan_roots:
+            if Path(r).is_dir():
+                forgotten += _db.forget_missing_videos(conn, r)
+        if forgotten:
+            console.print(
+                f"[yellow]Forgot {len(forgotten)} indexed clip(s) no longer in "
+                f"this folder.[/yellow]"
+            )
+            _emit("index-pruned", count=len(forgotten))
+    except Exception as e:  # noqa: BLE001 - never block a scan over cleanup
+        _emit("index-prune-error", message=str(e))
 
     detector = _detect.Detector(min_score=min_score)
 
@@ -996,11 +1034,9 @@ def tag_write(
         # Writing is the expensive, risky half of a run: two exiftool calls and
         # two xattr writes per clip. Confining it to the batch keeps "add this
         # month's footage" fast and keeps untouched folders untouched.
-        root = scope
         before = len(mapping)
         mapping = {
-            p: names for p, names in mapping.items()
-            if p == root or p.startswith(root.rstrip("/") + "/")
+            p: names for p, names in mapping.items() if _under_scope(p, scope)
         }
         if before != len(mapping):
             console.print(

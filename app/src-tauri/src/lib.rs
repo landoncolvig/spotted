@@ -149,18 +149,28 @@ async fn run_sidecar(
 async fn scan_folder(
     app: AppHandle,
     window: Window,
-    path: String,
+    paths: Vec<String>,
     tags: Vec<String>,
 ) -> Result<i32, String> {
-    let mut args = vec!["scan".to_string(), path];
+    if paths.is_empty() {
+        return Err("Nothing to scan.".into());
+    }
+    // Dragging a Finder multi-selection onto Spotted delivers every selected
+    // file. Taking only the first is how a 170-clip drop scanned one clip.
+    let mut args = vec!["scan".to_string()];
     let had_tags = !tags.is_empty();
     if had_tags {
         args.push("--tags".to_string());
         args.push(tags.join(","));
     }
+    // Options first, then "--", so a clip whose name starts with a dash is
+    // never read as a flag.
+    args.push("--".to_string());
+    args.extend(paths.iter().cloned());
     let result = run_sidecar(app, window, args).await;
     let mut payload = HashMap::new();
     payload.insert("had_batch_tags".into(), had_tags.to_string());
+    payload.insert("paths".into(), paths.len().to_string());
     payload.insert(
         "status".into(),
         if result.is_ok() { "ok" } else { "error" }.into(),
