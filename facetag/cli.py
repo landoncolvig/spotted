@@ -119,6 +119,22 @@ def _under_scope(path_str: str, root: str | list[str] | None) -> bool:
     )
 
 
+def _scope_label(roots: list[str] | None) -> str:
+    """How to name the current batch in a one-line status.
+
+    A batch can be one folder or a pile of individually-selected files, so this
+    cannot just be `Path(root).name`.
+    """
+    if not roots:
+        return "everything"
+    if len(roots) == 1:
+        return Path(roots[0]).name or roots[0]
+    parents = {str(Path(r).parent) for r in roots}
+    if len(parents) == 1:
+        return f"{len(roots)} clip(s) in {Path(next(iter(parents))).name}"
+    return f"{len(roots)} item(s)"
+
+
 def _resolve_scope(scope, conn=None, *, allow_all: bool = False) -> list[str] | None:
     """Paths this run should be confined to.
 
@@ -1045,7 +1061,7 @@ def tag_write(
         }
         if before != len(mapping):
             console.print(
-                f"[dim]Scoped to {Path(root).name}: "
+                f"[dim]Scoped to {_scope_label(scope)}: "
                 f"{len(mapping)} of {before} clip(s).[/dim]"
             )
     if not mapping:

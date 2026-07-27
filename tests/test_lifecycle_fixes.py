@@ -727,3 +727,38 @@ def test_export_lands_beside_the_clips_for_a_multi_file_batch(tmp_path):
         f.write_bytes(b"")
         picked.append(str(f))
     assert _export_dir({p: [] for p in picked}, picked) == folder
+
+
+def test_tag_write_scope_line_does_not_crash(tmp_path):
+    """v0.0.70 shipped a NameError here. The status line still said
+    `Path(root).name` after the scope became a list and the local `root` was
+    removed, and it only runs when scoping actually drops a clip, so every test
+    and every local run walked straight past it. The tester's batch hit it and
+    the whole run died with "Couldn't finish"."""
+    db_path = tmp_path / "t.db"
+    conn = _db.connect(db_path)
+    inside, outside = tmp_path / "a.mov", tmp_path / "b.mov"
+    for f in (inside, outside):
+        f.write_bytes(b"")
+        vid = _db.add_video(conn, str(f), 3.0)
+        _db.set_energy(conn, vid, 0.9, "high", [1.0])
+    # Scope to one of the two, so `before != len(mapping)` and the line runs.
+    _db.set_setting(conn, "last_scan_roots", json.dumps([str(inside)]))
+    conn.commit()
+    conn.close()
+
+    res = CliRunner().invoke(_cli.app, ["tag-write", "--db", str(db_path), "--dry-run"])
+    assert res.exit_code == 0, res.output
+    assert "Scoped to" in res.output
+    assert "1 of 2 clip(s)" in res.output
+    assert "NameError" not in res.output
+
+
+def test_scope_label_names_a_batch_of_any_shape(tmp_path):
+    """One folder, a Finder multi-selection out of one folder, and a pile
+    spanning folders all have to render as something a human recognises."""
+    from facetag.cli import _scope_label
+    assert _scope_label(["/Users/e/LasVegas"]) == "LasVegas"
+    assert _scope_label(["/Users/e/Video/a.MP4", "/Users/e/Video/b.MP4"]) == "2 clip(s) in Video"
+    assert _scope_label(["/Users/e/OP3/a.MP4", "/Users/e/OP4/b.MP4"]) == "2 item(s)"
+    assert _scope_label(None) == "everything"
