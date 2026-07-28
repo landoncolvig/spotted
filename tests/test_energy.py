@@ -15,6 +15,7 @@ from facetag import db as _db
 from facetag import energy as _energy
 from facetag import markers as _markers
 from facetag import tag as _tag
+from facetag import cli as _cli
 
 
 # --- pure functions --------------------------------------------------------
@@ -73,6 +74,9 @@ def test_set_energy_and_keyword_flows_to_tag_write(tmp_path: Path):
     _db.set_energy(conn, vid, score=0.8, bucket="high", peaks=[3.0, 7.5])
 
     assert _db.video_has_energy(conn, vid) is True
+    assert _db.video_has_current_energy(
+        conn, vid, _energy.ENERGY_ALGO_VERSION
+    ) is False
     assert _db.videos_with_energy(conn) == {"/clips/party.mov": "high"}
     assert _db.energy_peaks_for_video(conn, vid) == [3.0, 7.5]
     assert _db.videos_with_energy_peaks(conn) == [(vid, "/clips/party.mov")]
@@ -81,6 +85,27 @@ def test_set_energy_and_keyword_flows_to_tag_write(tmp_path: Path):
     # its "<bucket> energy" keyword — that's the "by default" behavior.
     kw = _tag.videos_with_keywords(conn)
     assert kw["/clips/party.mov"] == ["high energy"]
+
+    _db.set_energy(
+        conn,
+        vid,
+        score=0.8,
+        bucket="high",
+        peaks=[7.5],
+        version=_energy.ENERGY_ALGO_VERSION,
+    )
+    assert _db.video_has_current_energy(
+        conn, vid, _energy.ENERGY_ALGO_VERSION
+    ) is True
+    assert _db.energy_peaks_for_video(conn, vid) == [7.5]
+
+
+def test_legacy_energy_rows_are_capped_at_export(tmp_path: Path):
+    conn = _db.connect(tmp_path / "index.db")
+    vid = _db.add_video(conn, "/clips/party.mov", 12.0)
+    _db.set_energy(conn, vid, score=0.8, bucket="high", peaks=[2.0, 5.0, 9.0])
+
+    assert _cli._energy_marker_events(conn, vid) == [(2.0, "Energy peak")]
 
 
 def test_energy_keyword_can_be_excluded(tmp_path: Path):

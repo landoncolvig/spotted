@@ -57,6 +57,11 @@ PEAK_MIN = 0.50            # a peak must reach at least this energy
 PEAK_MIN_GAP_SEC = 3       # don't place two markers closer than this
 PEAK_MAX = 1               # strongest qualifying peak per clip
 
+# Increment when stored energy output must be recomputed. Existing libraries
+# keep their energy rows between app updates, so changing PEAK_MAX alone leaves
+# the old multi-peak JSON in place forever unless the cache has a version.
+ENERGY_ALGO_VERSION = 2
+
 BUCKETS = ("low", "medium", "high")
 
 

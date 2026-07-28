@@ -261,8 +261,21 @@ def _score_energy(conn, video_path, video_id: int, do_motion: bool):
     Returns the EnergyResult so the caller can emit progress.
     """
     res = _energy.score_clip(video_path, motion=do_motion)
-    _db.set_energy(conn, video_id, res.score, res.bucket, res.peaks)
+    _db.set_energy(
+        conn,
+        video_id,
+        res.score,
+        res.bucket,
+        res.peaks,
+        version=_energy.ENERGY_ALGO_VERSION,
+    )
     return res
+
+
+def _energy_marker_events(conn, video_id: int) -> list[tuple[float, str]]:
+    """Return the bounded energy cues promised by the current app version."""
+    peaks = _db.energy_peaks_for_video(conn, video_id)[:_energy.PEAK_MAX]
+    return [(t, "Energy peak") for t in peaks]
 
 
 @app.command()
@@ -379,7 +392,13 @@ def scan(
                 except Exception as e:
                     console.print(f"[yellow]Embedding backfill failed for {v.name}: {e}[/yellow]")
                     _emit("video-skip", name=v.name, index=index, total=len(videos), reason="backfill-failed")
-            if energy and vid is not None and not _db.video_has_energy(conn, vid):
+            if (
+                energy
+                and vid is not None
+                and not _db.video_has_current_energy(
+                    conn, vid, _energy.ENERGY_ALGO_VERSION
+                )
+            ):
                 try:
                     res = _score_energy(conn, v, vid, energy_motion)
                     did_backfill = True
@@ -1271,7 +1290,11 @@ def markers_write(
             events = _markers.collapse_to_appearances(
                 _markers.face_events_for_video(conn, vid)
             )
-            events += [(t, "Energy peak") for t in _db.energy_peaks_for_video(conn, vid)]
+            # Old app versions may have persisted up to six peaks. The current
+            # scan refreshes those versioned rows, while this cap makes the
+            # export contract safe immediately even if a legacy row reaches
+            # markers-write without passing through scan first.
+            events += _energy_marker_events(conn, vid)
             if not Path(path_str).exists():
                 # The index outlives the disk. A clip that moved or was deleted
                 # cannot be marked, and putting it in the DaVinci timeline makes

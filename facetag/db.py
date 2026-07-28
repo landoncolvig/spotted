@@ -107,6 +107,11 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE videos ADD COLUMN energy_score REAL")
         conn.execute("ALTER TABLE videos ADD COLUMN energy_bucket TEXT")
         conn.execute("ALTER TABLE videos ADD COLUMN energy_peaks TEXT")
+    if "energy_version" not in cols:
+        # Energy results persist across app updates. A version lets scan refresh
+        # old rows when peak selection or scoring changes, instead of treating
+        # a pre-update result as current forever.
+        conn.execute("ALTER TABLE videos ADD COLUMN energy_version INTEGER")
     if "scan_complete" not in cols:
         # A reliable "this clip finished scanning" flag. is_scanned used to infer
         # it from "has >=1 face row", which mis-fires both ways: a clip that
@@ -170,11 +175,20 @@ def set_energy(
     score: float,
     bucket: str,
     peaks: list[float],
+    *,
+    version: int | None = None,
 ) -> None:
     """Store a clip's energy score, bucket, and peak timestamps (JSON)."""
     conn.execute(
-        "UPDATE videos SET energy_score = ?, energy_bucket = ?, energy_peaks = ? WHERE id = ?",
-        (float(score), bucket, json.dumps([round(float(p), 3) for p in peaks]), video_id),
+        "UPDATE videos SET energy_score = ?, energy_bucket = ?, energy_peaks = ?, "
+        "energy_version = ? WHERE id = ?",
+        (
+            float(score),
+            bucket,
+            json.dumps([round(float(p), 3) for p in peaks]),
+            version,
+            video_id,
+        ),
     )
     conn.commit()
 
@@ -184,6 +198,16 @@ def video_has_energy(conn: sqlite3.Connection, video_id: int) -> bool:
         "SELECT energy_bucket FROM videos WHERE id = ?", (video_id,)
     ).fetchone()
     return bool(row and row[0])
+
+
+def video_has_current_energy(
+    conn: sqlite3.Connection, video_id: int, version: int
+) -> bool:
+    row = conn.execute(
+        "SELECT energy_bucket, energy_version FROM videos WHERE id = ?",
+        (video_id,),
+    ).fetchone()
+    return bool(row and row[0] and row[1] == version)
 
 
 def videos_with_energy(conn: sqlite3.Connection) -> dict[str, str]:

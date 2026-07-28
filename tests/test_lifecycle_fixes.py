@@ -282,9 +282,9 @@ def test_layout_never_overlaps_on_the_frame_grid(tmp_path):
     vm = {str(c): [(0.1 * (i + 1), f"P{i}")] for i, c in enumerate(clips)}
     num, den, entries = _markers._timeline_layout(vm)
     spf = num / den
-    for entry, next_entry in zip(entries, entries[1:]):
-        end_frame = round((entry.offset + entry.duration) / spf)
-        next_frame = round(next_entry.offset / spf)
+    for (_p, off, dur, _e), (_p2, nxt, _d2, _e2) in zip(entries, entries[1:]):
+        end_frame = round((off + dur) / spf)
+        next_frame = round(nxt / spf)
         assert end_frame == next_frame, f"gap/overlap: {end_frame} vs {next_frame}"
 
 
@@ -516,60 +516,42 @@ def test_non_drop_timecode_is_unchanged(monkeypatch):
     assert abs(got - 3600.0) < 1e-6
 
 
-def test_timecoded_mp4_trims_b_frame_reorder_delay_from_xml(tmp_path, monkeypatch):
-    """A timecoded H.264 MP4 with two B-frames starts decoding two frames
-    before PTS zero. Resolve exposes those unavailable frames as a black gap
-    unless the FCPXML edit begins after the reorder delay."""
-    clip = tmp_path / "dji.mp4"
-    clip.write_bytes(b"")
+def test_timecoded_mp4s_keep_full_slots_in_the_timeline(tmp_path, monkeypatch):
+    """Shortening every edit by two frames moved each later clip two more
+    frames left: 0, -2, -4, -6, -8 in Ellie's five-clip batch. Preserve the
+    full source duration until a source-remapping fix is proven in Resolve."""
+    clips = [tmp_path / f"dji-{i}.mp4" for i in range(3)]
+    for clip in clips:
+        clip.write_bytes(b"")
     monkeypatch.setattr(_markers, "get_video_fps", lambda _p: 60000 / 1001)
     monkeypatch.setattr(_markers, "_video_duration", lambda _p, _fps: 10.01)
-    monkeypatch.setattr(
-        _markers, "start_timecode_sec",
-        lambda _p, num=1001, den=60000: 3600.0,
-    )
-    monkeypatch.setattr(_markers, "_video_reorder_delay_frames", lambda _p: 2)
-
-    xml = _markers.fcpxml_for_markers({str(clip): [(1.0, "Ellie")]})
-    num, den = 1001, 60000
+    vm = {str(clip): [] for clip in clips}
+    num, den, entries = _markers._timeline_layout(vm)
     spf = num / den
-
-    # The asset still describes the complete 600-frame source.
-    assert (
-        f'start="{_markers._fcp_time(3600.0, num, den)}" '
-        f'duration="{600 * num}/{den}s"'
-    ) in xml
-    # The timeline edit begins two frames in and contains the remaining 598.
-    assert (
-        f'start="{_markers._fcp_time(3600.0 + 2 * spf, num, den)}" '
-        f'duration="{598 * num}/{den}s"'
-    ) in xml
-    # Marker timestamps stay in the source coordinate system.
-    assert f'start="{_markers._fcp_time(3601.0, num, den)}"' in xml
+    assert [round(offset / spf) for _p, offset, _dur, _events in entries] == [
+        0, 600, 1200
+    ]
+    assert [round(dur / spf) for _p, _offset, dur, _events in entries] == [
+        600, 600, 600
+    ]
 
 
-def test_reorder_trim_is_not_applied_to_mov_or_zero_timecode(tmp_path, monkeypatch):
-    monkeypatch.setattr(_markers, "get_video_fps", lambda _p: 60.0)
+def test_each_clip_uses_its_own_embedded_start_timecode(tmp_path, monkeypatch):
+    clips = [tmp_path / "camera-a.mp4", tmp_path / "camera-b.mp4"]
+    for clip in clips:
+        clip.write_bytes(b"")
+    starts = {clips[0]: 3600.0, clips[1]: 7200.0}
+    monkeypatch.setattr(_markers, "get_video_fps", lambda _p: 30.0)
     monkeypatch.setattr(_markers, "_video_duration", lambda _p, _fps: 5.0)
-    monkeypatch.setattr(_markers, "_video_reorder_delay_frames", lambda _p: 2)
-
-    mov = tmp_path / "camera.mov"
-    mov.write_bytes(b"")
     monkeypatch.setattr(
-        _markers, "start_timecode_sec",
-        lambda _p, num=1, den=60: 3600.0,
+        _markers,
+        "start_timecode_sec",
+        lambda p, num=1, den=30: starts[p],
     )
-    mov_entry = _markers._timeline_layout({str(mov): []})[2][0]
-    assert mov_entry.source_trim == 0.0
 
-    mp4 = tmp_path / "phone.mp4"
-    mp4.write_bytes(b"")
-    monkeypatch.setattr(
-        _markers, "start_timecode_sec",
-        lambda _p, num=1, den=60: 0.0,
-    )
-    mp4_entry = _markers._timeline_layout({str(mp4): []})[2][0]
-    assert mp4_entry.source_trim == 0.0
+    xml = _markers.fcpxml_for_markers({str(clip): [] for clip in clips})
+    assert 'start="108000/30s"' in xml
+    assert 'start="216000/30s"' in xml
 
 
 def test_scope_falls_back_to_the_recorded_batch(tmp_path):

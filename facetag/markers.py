@@ -18,7 +18,6 @@ import json
 import shutil
 import sqlite3
 import subprocess
-from dataclasses import dataclass
 from pathlib import Path
 
 
@@ -699,40 +698,9 @@ def _video_duration_cv2(video_path: Path, fps: float) -> float:
     return 0.0
 
 
-def _video_reorder_delay_frames(video_path: Path) -> int:
-    """Encoded B-frame reorder depth reported by ffprobe.
-
-    Resolve conforms timecoded MP4 sources against their decode timeline. An
-    H.264 clip with two B-frames starts decoding two frames before its first
-    presentation timestamp, so an XML edit beginning at the presentation
-    timecode asks Resolve for two unavailable frames and produces a black gap.
-    """
-    raw = _ffprobe_field(
-        video_path,
-        ["-select_streams", "v:0", "-show_entries", "stream=has_b_frames"],
-    )
-    try:
-        # Defensive cap: ordinary codecs report a small integer. A malformed
-        # probe result must never trim a meaningful part of the user's clip.
-        return min(max(int(raw.splitlines()[0].strip()), 0), 16)
-    except (ValueError, IndexError):
-        return 0
-
-
-@dataclass(frozen=True)
-class _TimelineEntry:
-    path: Path
-    offset: float
-    duration: float
-    source_duration: float
-    events: list[tuple[float, str]]
-    source_start: float
-    source_trim: float
-
-
 def _timeline_layout(
     video_markers: dict[str, list[tuple[float, str]]]
-) -> tuple[int, int, list[_TimelineEntry]]:
+) -> tuple[int, int, list[tuple[Path, float, float, list[tuple[float, str]]]]]:
     """Lay the marked clips end to end and return (fd_num, fd_den, entries).
 
     Both the FCPXML and the EDL are built from this one layout, so a marker's
@@ -750,48 +718,20 @@ def _timeline_layout(
         return 1, 30, []
     num, den = _frame_duration(get_video_fps(Path(clips[0][0])))
     spf = num / den                      # seconds per frame on the timeline
-    entries: list[_TimelineEntry] = []
+    entries: list[tuple[Path, float, float, list[tuple[float, str]]]] = []
     frame_cursor = 0                     # integer frames, never floats
     for path_str, events in clips:
         p = Path(path_str)
-        source_fps = get_video_fps(p)
-        source_duration = _video_duration(p, source_fps)
-        if source_duration <= 0:
-            source_duration = max((t for t, _ in events), default=0.0) + 1.0
-        source_start = start_timecode_sec(p, num, den)
-
-        # DJI-style timecoded MP4s expose their H.264 B-frame reorder depth as
-        # black frames when Resolve conforms an FCPXML edit from the exact
-        # presentation timecode. Trim that decode delay from the edit range.
-        # MOV and zero-timecode media keep their full source range.
-        reorder_frames = (
-            _video_reorder_delay_frames(p)
-            if p.suffix.lower() in {".mp4", ".m4v"} and source_start > 0
-            else 0
-        )
-        trim_frames = (
-            int(round((reorder_frames / source_fps) / spf))
-            if source_fps > 0
-            else 0
-        )
-
+        dur = _video_duration(p, get_video_fps(p))
+        if dur <= 0:
+            dur = max((t for t, _ in events), default=0.0) + 1.0
         # Snap the duration to whole frames and advance the cursor by exactly
         # that many. Accumulating float seconds and rounding each offset
         # independently drifts, and Resolve then reports "Trimming item on V1
         # because it overlaps previous items" and mangles the edit.
-        source_duration_frames = max(1, int(round(source_duration / spf)))
-        trim_frames = min(trim_frames, source_duration_frames - 1)
-        duration_frames = source_duration_frames - trim_frames
-        entries.append(_TimelineEntry(
-            path=p,
-            offset=frame_cursor * spf,
-            duration=duration_frames * spf,
-            source_duration=source_duration_frames * spf,
-            events=sorted(events),
-            source_start=source_start,
-            source_trim=trim_frames * spf,
-        ))
-        frame_cursor += duration_frames
+        dur_frames = max(1, int(round(dur / spf)))
+        entries.append((p, frame_cursor * spf, dur_frames * spf, sorted(events)))
+        frame_cursor += dur_frames
     return num, den, entries
 
 
@@ -819,14 +759,11 @@ def edl_for_markers(video_markers: dict[str, list[tuple[float, str]]]) -> str:
         return ""
     lines = ["TITLE: Spotted Markers", "FCM: NON-DROP FRAME", ""]
     n = 0
-    for entry in entries:
-        for t, label in entry.events:
+    for _p, offset, dur, events in entries:
+        for t, label in events:
             # Keep the marker inside its own clip; a marker past the last frame
             # is dropped by Resolve without warning.
-            local_t = max(0.0, t - entry.source_trim)
-            at = entry.offset + min(
-                local_t, max(entry.duration - (num / den), 0.0)
-            )
+            at = offset + min(t, max(dur - (num / den), 0.0))
             n += 1
             tc_in = _timecode(at, num, den)
             tc_out = _timecode(at + (num / den), num, den)
@@ -889,15 +826,13 @@ def fcpxml_for_markers(video_markers: dict[str, list[tuple[float, str]]]) -> str
     ]
     spine: list[str] = []
 
-    for i, entry in enumerate(entries, start=1):
-        p = entry.path
-        tc = entry.source_start
+    for i, (p, offset, dur, events) in enumerate(entries, start=1):
+        tc = start_timecode_sec(p, num, den)
         asset_id = f"a{i}"
         name = _xml_escape(p.stem)
         resources.append(
             f'    <asset id="{asset_id}" name="{name}" '
-            f'start="{_fcp_time(tc, num, den)}" '
-            f'duration="{_fcp_time(entry.source_duration, num, den)}" '
+            f'start="{_fcp_time(tc, num, den)}" duration="{_fcp_time(dur, num, den)}" '
             f'hasVideo="1" hasAudio="1" format="r0">'
             f'<media-rep kind="original-media" src="{_file_url(p)}"/>'
             f'</asset>'
@@ -905,20 +840,19 @@ def fcpxml_for_markers(video_markers: dict[str, list[tuple[float, str]]]) -> str
 
         markers = "".join(
             f'\n        <marker start="'
-            f'{_fcp_time(tc + max(entry.source_trim, min(t, max(entry.source_duration - spf, 0.0))), num, den)}" '
+            f'{_fcp_time(tc + min(t, max(dur - spf, 0.0)), num, den)}" '
             f'duration="{num}/{den}s" value="{_xml_escape(label)}"/>'
-            for t, label in entry.events
+            for t, label in sorted(events)
         )
         spine.append(
             f'      <asset-clip ref="{asset_id}" name="{name}" '
-            f'offset="{_fcp_time(entry.offset, num, den)}" '
-            f'start="{_fcp_time(tc + entry.source_trim, num, den)}" '
-            f'duration="{_fcp_time(entry.duration, num, den)}" '
-            f'format="r0">{markers}\n'
+            f'offset="{_fcp_time(offset, num, den)}" '
+            f'start="{_fcp_time(tc, num, den)}" '
+            f'duration="{_fcp_time(dur, num, den)}" format="r0">{markers}\n'
             f'      </asset-clip>'
         )
 
-    total = sum(entry.duration for entry in entries)
+    total = sum(d for _p, _o, d, _e in entries)
     return (
         '<?xml version="1.0" encoding="UTF-8"?>\n'
         "<!DOCTYPE fcpxml>\n"
