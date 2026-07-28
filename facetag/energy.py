@@ -50,10 +50,12 @@ MOTION_CEIL = 36.0         # subject-motion residual (px/frame) -> 1 (sqrt-scale
 BUCKET_HIGH = 0.52
 BUCKET_LOW = 0.24
 
-# Peak-marker detection on the per-second series.
+# Peak-marker detection on the per-second series. Editors use these as quick
+# highlight cues, so keep only the strongest moment in each clip. A dense row of
+# yellow markers makes every moment look equally important.
 PEAK_MIN = 0.50            # a peak must reach at least this energy
 PEAK_MIN_GAP_SEC = 3       # don't place two markers closer than this
-PEAK_MAX = 6               # cap markers per clip
+PEAK_MAX = 1               # strongest qualifying peak per clip
 
 BUCKETS = ("low", "medium", "high")
 

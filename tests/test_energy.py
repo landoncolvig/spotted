@@ -49,11 +49,11 @@ def test_motion01_monotonic_and_clamped():
 
 
 def test_find_peaks_respects_min_gap_and_threshold():
-    # peaks at idx 1 (0.6) and 5 (0.7); idx 3 (0.55) is inside the gap of a
-    # higher neighbor and should be dropped.
+    # Peak 5 is the strongest qualifying moment. Editors asked for one useful
+    # yellow cue per clip instead of a row of near-equal highlights.
     series = np.array([0.1, 0.6, 0.2, 0.55, 0.2, 0.7, 0.1], dtype=np.float32)
     peaks = _energy._find_peaks(series)
-    assert peaks == [1.0, 5.0]
+    assert peaks == [5.0]
 
 
 def test_find_peaks_empty_when_all_below_min():
