@@ -503,6 +503,43 @@ def test_drop_frame_timecode_is_not_treated_as_non_drop(monkeypatch):
     assert 4.0 < (naive_frames * num / den) - got < 5.5
 
 
+def test_tmcd_timecode_beats_a_conflicting_format_tag(tmp_path, monkeypatch):
+    """Resolve's source Start TC is the MOV tmcd value, not a stale container
+    tag. Ellie's DJI_20250517135923_0044_D reports 19:22:57;28 in Resolve,
+    while the old export declared 19:22:57;14, exactly 14 frames early."""
+    from pathlib import Path as P
+
+    calls: list[str] = []
+
+    def probe(_p, args):
+        query = " ".join(args)
+        calls.append(query)
+        if "-select_streams d" in query:
+            return "19:22:57;28"             # canonical MOV tmcd track
+        if "-select_streams v:0" in query:
+            return "19:22:57;28"             # mirrored by this DJI source
+        if "format_tags=timecode" in query:
+            return "19:22:57;14"             # conflicting container tag
+        return ""
+
+    monkeypatch.setattr(_markers, "_ffprobe_field", probe)
+    num, den = 1001, 60000
+    got = _markers.start_timecode_sec(P("dji.mp4"), num, den)
+
+    expected_frames = 4_182_464             # 19:22:57;28 at 59.94 DF
+    assert round(got * den / num) == expected_frames
+    assert _markers._fcp_time(got, num, den) == "4186646464/60000s"
+    assert not any("format_tags=timecode" in query for query in calls)
+
+    clip = tmp_path / "dji.mp4"
+    clip.write_bytes(b"")
+    monkeypatch.setattr(_markers, "get_video_fps", lambda _p: 60000 / 1001)
+    monkeypatch.setattr(_markers, "_video_duration", lambda _p, _fps: 1.0)
+    xml = _markers.fcpxml_for_markers({str(clip): [(0.0, "Ellie")]})
+    assert '<asset id="a1" name="dji" start="4186646464/60000s"' in xml
+    assert '<asset-clip ref="a1" name="dji" offset="0/60000s" start="4186646464/60000s"' in xml
+
+
 def test_non_drop_timecode_is_unchanged(monkeypatch):
     from pathlib import Path as P
 

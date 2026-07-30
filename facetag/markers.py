@@ -622,9 +622,12 @@ def start_timecode_sec(video_path: Path, num: int = 1, den: int = 30) -> float:
     "Mismatch between specified target timecodes ... and located file
     timecodes" and leave every clip Media Offline.
 
-    Where the timecode lives depends on the container: .mp4 puts it in format
-    tags, .mov on the video stream and a tmcd data stream. Check all of them.
-    A ';' before the frames field means drop-frame.
+    QuickTime-family .mov/.mp4 files keep the canonical source timecode in a
+    ``tmcd`` data stream. Resolve links against that value. A container-level
+    timecode is only a fallback because DJI files can carry a conflicting
+    format tag that looks valid but is several frames early. The video-stream
+    tag is the next fallback for files that mirror the tmcd value there. A ';'
+    before the frames field means drop-frame.
 
     The frames field counts at the NOMINAL rate (60 for 59.94), so the value is
     converted to whole frames and then multiplied by the timeline's own frame
@@ -634,9 +637,12 @@ def start_timecode_sec(video_path: Path, num: int = 1, den: int = 30) -> float:
     """
     raw = ""
     for args in (
-        ["-show_entries", "format_tags=timecode"],
+        # ffprobe documents MOV timecode on its tmcd data stream. This must
+        # precede format metadata: Resolve's source start uses tmcd, and a
+        # stale format tag otherwise shifts the whole clip.
+        ["-select_streams", "d", "-show_entries", "stream_tags=timecode"],
         ["-select_streams", "v:0", "-show_entries", "stream_tags=timecode"],
-        ["-show_entries", "stream_tags=timecode"],      # tmcd/data tracks
+        ["-show_entries", "format_tags=timecode"],
     ):
         raw = _ffprobe_field(video_path, args)
         raw = next((ln.strip() for ln in raw.splitlines() if ln.strip()), "")
