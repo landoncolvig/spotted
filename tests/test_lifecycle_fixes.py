@@ -555,10 +555,10 @@ def test_drop_frame_timecode_is_not_treated_as_non_drop(monkeypatch):
     assert 4.0 < (naive_frames * num / den) - got < 5.5
 
 
-def test_tmcd_timecode_beats_a_conflicting_format_tag(tmp_path, monkeypatch):
-    """Resolve's source Start TC is the MOV tmcd value, not a stale container
-    tag. Ellie's DJI_20250517135923_0044_D reports 19:22:57;28 in Resolve,
-    while the old export declared 19:22:57;14, exactly 14 frames early."""
+def test_half_rate_tmcd_frame_field_maps_to_the_video_timeline(tmp_path, monkeypatch):
+    """DJI labels this 59.94 video with a 29.97 tmcd track. Its raw ``;14``
+    frame field therefore lands on video frame 28. Treating the field as if it
+    already counted at 59.94 declared the source 14 video frames early."""
     from pathlib import Path as P
 
     calls: list[str] = []
@@ -566,19 +566,23 @@ def test_tmcd_timecode_beats_a_conflicting_format_tag(tmp_path, monkeypatch):
     def probe(_p, args):
         query = " ".join(args)
         calls.append(query)
-        if "-select_streams d" in query:
-            return "19:22:57;28"             # canonical MOV tmcd track
-        if "-select_streams v:0" in query:
-            return "19:22:57;28"             # mirrored by this DJI source
+        if "-select_streams d" in query and "stream=avg_frame_rate" in query:
+            return "30000/1001"              # tmcd labels half-rate frames
+        if "-select_streams d" in query and "stream_tags=timecode" in query:
+            return "19:22:57;14"
+        if "-select_streams v:0" in query and "stream=r_frame_rate" in query:
+            return "60000/1001"              # source video and XML timeline
+        if "-select_streams v:0" in query and "stream_tags=timecode" in query:
+            return "19:22:57;14"
         if "format_tags=timecode" in query:
-            return "19:22:57;14"             # conflicting container tag
+            return "19:22:57;14"
         return ""
 
     monkeypatch.setattr(_markers, "_ffprobe_field", probe)
     num, den = 1001, 60000
     got = _markers.start_timecode_sec(P("dji.mp4"), num, den)
 
-    expected_frames = 4_182_464             # 19:22:57;28 at 59.94 DF
+    expected_frames = 4_182_464             # 19:22:57;14 @ 29.97 -> ;28 @ 59.94
     assert round(got * den / num) == expected_frames
     assert _markers._fcp_time(got, num, den) == "4186646464/60000s"
     assert not any("format_tags=timecode" in query for query in calls)

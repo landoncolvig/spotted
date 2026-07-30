@@ -43,6 +43,21 @@ def _ffprobe_field(video_path: Path, args: list[str]) -> str:
         return ""
 
 
+def _ffprobe_rate(raw: str) -> float:
+    """First positive ffprobe rational in ``raw``, or 0 when absent."""
+    for line in raw.splitlines():
+        if "/" not in line:
+            continue
+        try:
+            n, d = line.strip().split("/", 1)
+            rate = float(n) / float(d)
+        except (ValueError, ZeroDivisionError):
+            continue
+        if rate > 0:
+            return rate
+    return 0.0
+
+
 def get_video_fps(video_path: Path) -> float:
     """Frame rate from the file. ffprobe first: OpenCV silently reports a wrong
     rate (or none) for 10-bit HEVC and HDR footage, and a wrong rate corrupts
@@ -50,13 +65,9 @@ def get_video_fps(video_path: Path) -> float:
     raw = _ffprobe_field(
         video_path, ["-select_streams", "v:0", "-show_entries", "stream=r_frame_rate"]
     )
-    if "/" in raw:
-        try:
-            n, d = raw.split("/")
-            if float(d) > 0 and float(n) > 0:
-                return float(n) / float(d)
-        except (ValueError, ZeroDivisionError):
-            pass
+    rate = _ffprobe_rate(raw)
+    if rate > 0:
+        return rate
     try:
         import cv2
 
@@ -623,33 +634,52 @@ def start_timecode_sec(video_path: Path, num: int = 1, den: int = 30) -> float:
     timecodes" and leave every clip Media Offline.
 
     QuickTime-family .mov/.mp4 files keep the canonical source timecode in a
-    ``tmcd`` data stream. Resolve links against that value. A container-level
-    timecode is only a fallback because DJI files can carry a conflicting
-    format tag that looks valid but is several frames early. The video-stream
-    tag is the next fallback for files that mirror the tmcd value there. A ';'
-    before the frames field means drop-frame.
+    ``tmcd`` data stream. The frame field belongs to that track's own rate,
+    which can differ from the video rate. DJI can label 59.94 video with a
+    29.97 tmcd track, so raw ``;14`` maps to video frame 28. Reading ``;14`` as
+    a 59.94 field declares the source 14 frames early. A container-level
+    timecode is only a fallback, with the video-stream tag checked between the
+    two. A ';' before the frames field means drop-frame.
 
-    The frames field counts at the NOMINAL rate (60 for 59.94), so the value is
-    converted to whole frames and then multiplied by the timeline's own frame
-    duration. Computing it as `frames / fps` with a guessed fps puts the clip
-    fractions of a second off, which Resolve rejects just as hard as being an
-    hour off. Returns 0.0 for footage with no timecode (phone video).
+    Convert the label to seconds on its source timecode rate. FCPXML generation
+    then snaps that physical time to the timeline's frame grid. Returns 0.0 for
+    footage with no timecode (phone video).
     """
-    raw = ""
-    for args in (
-        # ffprobe documents MOV timecode on its tmcd data stream. This must
-        # precede format metadata: Resolve's source start uses tmcd, and a
-        # stale format tag otherwise shifts the whole clip.
+    raw = _ffprobe_field(
+        video_path,
         ["-select_streams", "d", "-show_entries", "stream_tags=timecode"],
-        ["-select_streams", "v:0", "-show_entries", "stream_tags=timecode"],
-        ["-show_entries", "format_tags=timecode"],
-    ):
-        raw = _ffprobe_field(video_path, args)
-        raw = next((ln.strip() for ln in raw.splitlines() if ln.strip()), "")
-        if raw:
-            break
+    )
+    raw = next((ln.strip() for ln in raw.splitlines() if ln.strip()), "")
+    source_rate = 0.0
+    if raw:
+        source_rate = _ffprobe_rate(
+            _ffprobe_field(
+                video_path,
+                ["-select_streams", "d", "-show_entries", "stream=avg_frame_rate"],
+            )
+        )
+        if source_rate <= 0:
+            source_rate = _ffprobe_rate(
+                _ffprobe_field(
+                    video_path,
+                    ["-select_streams", "d", "-show_entries", "stream=r_frame_rate"],
+                )
+            )
+    else:
+        for args in (
+            ["-select_streams", "v:0", "-show_entries", "stream_tags=timecode"],
+            ["-show_entries", "format_tags=timecode"],
+        ):
+            raw = _ffprobe_field(video_path, args)
+            raw = next((ln.strip() for ln in raw.splitlines() if ln.strip()), "")
+            if raw:
+                break
     if not raw:
         return 0.0
+    if source_rate <= 0:
+        source_rate = get_video_fps(video_path)
+    if source_rate <= 0:
+        source_rate = den / num
 
     # A ';' before the frames field means DROP-FRAME. It is a labelling scheme,
     # not a different clock: NTSC timecode skips frame NUMBERS so the label
@@ -666,14 +696,14 @@ def start_timecode_sec(video_path: Path, num: int = 1, den: int = 30) -> float:
     except ValueError:
         return 0.0
 
-    nominal = max(1, int(round(den / num)))          # 60 for 1001/60000
+    nominal = max(1, int(round(source_rate)))
     frames = ((h * 60 + m) * 60 + sec) * nominal + fr
     if drop_frame:
         # 2 frames a minute at 29.97, 4 at 59.94, except every tenth minute.
         per_min = round(nominal * 0.066666)
         total_min = h * 60 + m
         frames -= per_min * (total_min - total_min // 10)
-    return frames * (num / den)
+    return frames / source_rate
 
 
 def _video_duration(video_path: Path, fps: float) -> float:
