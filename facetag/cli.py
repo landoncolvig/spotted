@@ -1363,6 +1363,7 @@ def markers_write(
     # this script (matching clips by filename and calling the Resolve API) is how
     # markers reach it. Written once for the whole batch.
     if resolve and in_scope_paths:
+        out_dir: Path | None = None
         try:
             out_dir = _export_dir({p: [] for p in in_scope_paths}, root)
             # Delete the exports previous runs left elsewhere before writing the
@@ -1410,8 +1411,12 @@ def markers_write(
                 _emit("resolve-script", path=str(out), clips=len(video_markers))
 
             _record_exports(conn, [p for p in (xml_out, edl_out, out) if p])
-        except Exception as e:  # noqa: BLE001 - never let the script step fail markers
-            _emit("resolve-script-error", message=str(e))
+        except Exception as e:  # noqa: BLE001 - surfaced through the sidecar exit
+            where = f" in {out_dir}" if out_dir is not None else ""
+            message = f"Couldn't write DaVinci exports{where}: {e}"
+            console.print(f"[red]{message}[/red]")
+            _emit("resolve-script-error", message=message)
+            raise typer.Exit(4) from e
 
     if failed:
         console.print(f"[red]{len(failed)} failure(s) writing in-file markers:[/red]")

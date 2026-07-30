@@ -795,17 +795,18 @@ def _edl_safe(name: str) -> str:
 def write_edl(
     video_markers: dict[str, list[tuple[float, str]]], out_dir: Path
 ) -> Path | None:
-    """Write "Spotted Markers.edl" next to the footage."""
+    """Write "Spotted Markers.edl" next to the footage.
+
+    Filesystem errors deliberately propagate. Returning ``None`` means there
+    were no markers to export; it must never also mean "the write failed".
+    """
     edl = edl_for_markers(video_markers)
     if not edl:
         return None
-    try:
-        out_dir.mkdir(parents=True, exist_ok=True)
-        out = out_dir / "Spotted Markers.edl"
-        out.write_text(edl)
-        return out
-    except Exception:  # noqa: BLE001 - never fail the marker run over this
-        return None
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out = out_dir / "Spotted Markers.edl"
+    out.write_text(edl)
+    return out
 
 
 def fcpxml_for_markers(video_markers: dict[str, list[tuple[float, str]]]) -> str:
@@ -897,14 +898,12 @@ def write_fcpxml(
     video_markers: dict[str, list[tuple[float, str]]], out_dir: Path
 ) -> Path | None:
     """Write "Spotted Markers.fcpxml" next to the footage. Returns the path, or
-    None if there was nothing to write."""
+    None if there was nothing to write. Filesystem errors propagate so the UI
+    cannot report a successful export that does not exist."""
     xml = fcpxml_for_markers(video_markers)
     if not xml:
         return None
-    try:
-        out_dir.mkdir(parents=True, exist_ok=True)
-        out = out_dir / "Spotted Markers.fcpxml"
-        out.write_text(xml)
-        return out
-    except Exception:  # noqa: BLE001 - never let the export fail the marker run
-        return None
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out = out_dir / "Spotted Markers.fcpxml"
+    out.write_text(xml)
+    return out

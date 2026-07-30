@@ -7,6 +7,7 @@ import json
 import sqlite3
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 from facetag import cli as _cli
@@ -229,9 +230,12 @@ def test_fcpxml_escapes_xml_and_snaps_to_frame_grid(tmp_path):
 def test_write_fcpxml_lands_next_to_footage(tmp_path):
     clip = tmp_path / "c.mov"
     clip.write_bytes(b"")
+    stale = tmp_path / "Spotted Markers.fcpxml"
+    stale.write_text("stale export")
     out = _markers.write_fcpxml({str(clip): [(0.5, "Sarah")]}, tmp_path)
     assert out is not None and out.exists()
     assert out.name == "Spotted Markers.fcpxml"
+    assert "stale export" not in out.read_text()
     assert _markers.write_fcpxml({}, tmp_path) is None
 
 
@@ -263,9 +267,57 @@ def test_edl_marker_names_cannot_break_the_pipe_format(tmp_path):
 
 def test_write_edl_lands_next_to_footage(tmp_path):
     clip = tmp_path / "d.mov"; clip.write_bytes(b"")
+    stale = tmp_path / "Spotted Markers.edl"
+    stale.write_text("stale export")
     out = _markers.write_edl({str(clip): [(0.5, "Sarah")]}, tmp_path)
     assert out is not None and out.exists() and out.name == "Spotted Markers.edl"
+    assert "stale export" not in out.read_text()
     assert _markers.write_edl({}, tmp_path) is None
+
+
+@pytest.mark.parametrize("writer", [_markers.write_fcpxml, _markers.write_edl])
+def test_export_write_failures_are_not_reported_as_empty(
+    tmp_path, monkeypatch, writer
+):
+    clip = tmp_path / "locked.mov"
+    clip.write_bytes(b"")
+    original_write_text = Path.write_text
+
+    def fail_export(path, *args, **kwargs):
+        if path.name in {"Spotted Markers.fcpxml", "Spotted Markers.edl"}:
+            raise PermissionError("read-only export folder")
+        return original_write_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", fail_export)
+    with pytest.raises(PermissionError, match="read-only export folder"):
+        writer({str(clip): [(0.5, "Sarah")]}, tmp_path)
+
+
+def test_markers_write_exits_when_the_primary_export_fails(
+    tmp_path, monkeypatch
+):
+    db_path = tmp_path / "index.db"
+    clip = tmp_path / "clip.mov"
+    clip.write_bytes(b"")
+    conn = _db.connect(db_path)
+    video_id = _db.add_video(conn, str(clip), 4.0)
+    _db.set_energy(conn, video_id, 0.9, "high", [1.0])
+    _db.set_setting(conn, "last_scan_root", str(tmp_path))
+    conn.commit()
+    conn.close()
+
+    def fail_fcpxml(_timeline_clips, _out_dir):
+        raise PermissionError("read-only export folder")
+
+    monkeypatch.setattr(_markers, "write_fcpxml", fail_fcpxml)
+    result = CliRunner().invoke(
+        _cli.app,
+        ["markers-write", "--db", str(db_path), "--no-sidecar"],
+    )
+
+    assert result.exit_code == 4
+    assert "Couldn't write DaVinci exports" in result.output
+    assert "read-only export folder" in result.output
 
 
 # --- clips must not overlap, and timecode must be honoured -------------------

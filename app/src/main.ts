@@ -745,40 +745,57 @@ function renderReview(matched: MatchedTag[]) {
 
 async function runWrite(excludeTags: string[], allClips = false) {
   cancelled = false;
-  // These are module-level and were never reset, so a run whose verification
-  // never arrived would display the PREVIOUS run's "Verified on beach_01.mov"
-  // as proof that this run landed.
+  // Clear both the state and the rendered panel. Resetting only the globals
+  // left the previous run's green paths visible when this run failed before
+  // renderVerification() was called.
   lastVerification = null;
   lastMarkersVerification = null;
   lastResolveScript = null;
   lastResolveTimeline = null;
   lastResolveEdl = null;
   lastMarkerError = null;
+  lastMarkersSummary = null;
+  document.getElementById("done-verify")?.replaceChildren();
   setState("working");
   setProgressIndeterminate();
   workingLabel.textContent = "Writing keywords";
   workingDetail.textContent = "Running exiftool, per clip…";
-  try {
-    await invoke<number>("tag_videos", {
-      excludeTags,
-      overwrite: overwriteKeywords,
-      scope: currentPath ?? null,
-      allClips,
-    });
 
-    // Markers are a bonus — Premiere/DaVinci-only feature. Failures here
-    // should not break the flow because keywords already succeeded.
+  // A source clip can reject in-file metadata while the batch-level DaVinci
+  // exports remain perfectly writable. Keep the phases independent so one
+  // locked/iCloud clip cannot suppress the FCPXML and EDL for the whole batch.
+  let tagWriteError: string | null = null;
+  try {
+    try {
+      await invoke<number>("tag_videos", {
+        excludeTags,
+        overwrite: overwriteKeywords,
+        scope: currentPath ?? null,
+        allClips,
+      });
+    } catch (e) {
+      if (cancelled) {
+        cancelled = false;
+        setState("idle");
+        flashToast("Cancelled.");
+        return;
+      }
+      tagWriteError = String(e);
+    }
+
     workingLabel.textContent = "Writing timeline markers";
     workingDetail.textContent = "For Premiere & DaVinci scrubber…";
     try {
       lastMarkerError = null;
       await invoke<number>("write_markers", { scope: currentPath ?? null, allClips });
     } catch (e) {
-      // Non-fatal: keywords already succeeded, so the run still counts. But do
-      // NOT swallow this. It used to be a bare console.warn, which meant a
-      // marker step that died left the done screen showing "Markers: empty"
-      // with no reason — indistinguishable from "no markers to write", and
-      // impossible for a user to report back. Surface it on the done screen.
+      if (cancelled) {
+        cancelled = false;
+        setState("idle");
+        flashToast("Cancelled.");
+        return;
+      }
+      // Marker failures stay visible even when keyword writing succeeded.
       lastMarkerError = String(e);
       console.warn("marker write failed (non-fatal):", e);
     }
@@ -786,8 +803,24 @@ async function runWrite(excludeTags: string[], allClips = false) {
     setProgress(100);
     const stats = await fetchLibraryStats();
     setState("done");
-    renderDone(stats);
-    notifyIfBackground("Spotted finished", summarizeDone(stats));
+    if (tagWriteError) {
+      showError(tagWriteError);
+      if (lastResolveTimeline || lastResolveEdl) {
+        doneTitle.textContent = "Finished with issues";
+        doneSub.textContent =
+          `${friendlyError(tagWriteError)} The DaVinci files were still created below.`;
+      }
+      renderVerification();
+      notifyIfBackground(
+        "Spotted finished with issues",
+        lastResolveTimeline || lastResolveEdl
+          ? "DaVinci files were created, but some clip metadata could not be written."
+          : "Some clip metadata and timeline files could not be written.",
+      );
+    } else {
+      renderDone(stats);
+      notifyIfBackground("Spotted finished", summarizeDone(stats));
+    }
   } catch (err) {
     if (cancelled) {
       cancelled = false;
@@ -850,14 +883,7 @@ function renderVerification() {
   }
   panel.replaceChildren();
 
-  if (!lastVerification) return;
   const v = lastVerification;
-
-  const header = document.createElement("div");
-  header.className = "done-verify__header";
-  header.textContent = `Verified on ${v.file}`;
-  panel.appendChild(header);
-
   const markers = lastMarkersVerification;
   const markerCells: string[] = [];
   if (markers) {
@@ -890,22 +916,43 @@ function renderVerification() {
     }
   }
 
-  const rows: Array<{ label: string; values: string[]; help: string }> = [
-    {
+  const hasEvidence = Boolean(
+    v ||
+    markers ||
+    lastMarkerError ||
+    resolveCells.length ||
+    coverageCells.length
+  );
+  if (!hasEvidence) return;
+
+  const header = document.createElement("div");
+  header.className = "done-verify__header";
+  header.textContent = v
+    ? `Verified on ${v.file}`
+    : (lastResolveTimeline || lastResolveEdl)
+      ? "DaVinci files created"
+      : "Current marker results";
+  panel.appendChild(header);
+
+  const rows: Array<{ label: string; values: string[]; help: string }> = [];
+  if (v) {
+    rows.push({
       label: "Keys (DaVinci, Finder)",
       values: v.keys,
       help: "Read by DaVinci Resolve's Keywords column and macOS Spotlight search.",
-    },
-    {
+    });
+    rows.push({
       label: "XMP (Premiere)",
       values: v.xmp,
       help: "Read by Adobe Premiere Pro's Keywords column.",
-    },
-    {
+    });
+    rows.push({
       label: "Spotlight Comment",
       values: v.comment ? [v.comment] : [],
       help: "Shown in Get Info → Comments. iCloud-synced files may strip this; Keys above keeps search working anyway.",
-    },
+    });
+  }
+  rows.push(
     {
       label: "Markers (timeline)",
       values: markerCells,
@@ -917,16 +964,16 @@ function renderVerification() {
       help: "Every clip in this batch goes on the DaVinci timeline, in filename order. Markers land on the ones with a named face or an energy peak. Clips Spotted has indexed but can no longer find on disk are left off, because Resolve would show them as Media Offline.",
     },
     {
-      label: "DaVinci script",
+      label: "DaVinci files",
       values: resolveCells,
-      help: "The 'Spotted Markers' script for DaVinci Resolve. Run it from Workspace > Scripts, no restart needed. It lives in ~/Library, which Spotlight does not search.",
+      help: "Import the FCPXML with File > Import > Timeline, then import the EDL with Timelines > Import > Timeline Markers.",
     },
     {
       label: "Your tags (matched)",
       values: lastActivityResult?.sample?.tags ?? [],
       help: "The tags you entered, matched per clip with Apple's MobileCLIP and confirmed by you on the review screen. Each lands only on the clips it was found in, the same way a face name does.",
     },
-  ];
+  );
 
   for (const row of rows) {
     const div = document.createElement("div");
