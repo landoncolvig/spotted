@@ -1,9 +1,10 @@
 use serde::Serialize;
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, Window};
-use tauri_plugin_shell::process::CommandEvent;
+use tauri_plugin_shell::process::{Command, CommandEvent};
 use tauri_plugin_shell::ShellExt;
 use tauri_plugin_updater::UpdaterExt;
 
@@ -47,6 +48,60 @@ struct UpdaterMessage {
     message: String,
 }
 
+/// Give every frozen sidecar process a writable extraction root owned by
+/// Spotted. PyInstaller's one-file bootloader unpacks hundreds of megabytes
+/// before Python starts. Inheriting macOS's per-login TMPDIR made that startup
+/// depend on an external directory that can disappear or become unwritable
+/// while Spotted is open.
+fn prepare_sidecar_temp_dir(cache_root: &Path) -> Result<PathBuf, String> {
+    let temp_dir = cache_root.join("sidecar-tmp");
+    std::fs::create_dir_all(&temp_dir).map_err(|e| {
+        format!(
+            "couldn't prepare Spotted's local working folder {}: {e}",
+            temp_dir.display()
+        )
+    })?;
+
+    // create_dir_all succeeds when the directory already exists, so prove the
+    // current user can create and remove files before starting PyInstaller.
+    let probe = temp_dir.join(format!(
+        ".write-probe-{}",
+        uuid::Uuid::new_v4().simple()
+    ));
+    std::fs::write(&probe, b"spotted").map_err(|e| {
+        format!(
+            "Spotted's local working folder isn't writable {}: {e}",
+            temp_dir.display()
+        )
+    })?;
+    std::fs::remove_file(&probe).map_err(|e| {
+        format!(
+            "Spotted's local working folder can't remove temporary files {}: {e}",
+            temp_dir.display()
+        )
+    })?;
+    Ok(temp_dir)
+}
+
+/// Build the one approved sidecar command. All launch sites go through this
+/// helper so none can accidentally inherit a broken system temporary path.
+fn sidecar_command(app: &AppHandle) -> Result<Command, String> {
+    let cache_root = app
+        .path()
+        .app_cache_dir()
+        .map_err(|e| format!("couldn't resolve Spotted's local cache: {e}"))?;
+    let temp_dir = prepare_sidecar_temp_dir(&cache_root)?;
+    let sidecar = app
+        .shell()
+        .sidecar("spotted-sidecar")
+        .map_err(|e| format!("sidecar lookup: {e}"))?;
+
+    Ok(sidecar
+        .env("TMPDIR", &temp_dir)
+        .env("TEMP", &temp_dir)
+        .env("TMP", &temp_dir))
+}
+
 /// Spawn the sidecar, stream its output as `sidecar://line` events on the
 /// window, await the child to exit, return its exit code.
 async fn run_sidecar(
@@ -54,10 +109,7 @@ async fn run_sidecar(
     window: Window,
     args: Vec<String>,
 ) -> Result<i32, String> {
-    let sidecar = app
-        .shell()
-        .sidecar("spotted-sidecar")
-        .map_err(|e| format!("sidecar lookup: {e}"))?;
+    let sidecar = sidecar_command(&app)?;
 
     let (mut rx, _child) = sidecar
         .args(args)
@@ -239,10 +291,7 @@ async fn suggest_activities(
     // activity-complete payload from the invoke result, not from a racy
     // side-channel event. Still emits sidecar://line for live progress, and
     // still registers the PID so a long match can be cancelled.
-    let sidecar = app
-        .shell()
-        .sidecar("spotted-sidecar")
-        .map_err(|e| format!("sidecar lookup: {e}"))?;
+    let sidecar = sidecar_command(&app)?;
     let (mut rx, child) = sidecar
         .args({
             let mut a = vec!["activity-suggest".to_string()];
@@ -462,10 +511,7 @@ async fn start_label_server(
 ) -> Result<String, String> {
     use std::sync::{Arc, Mutex};
 
-    let sidecar = app
-        .shell()
-        .sidecar("spotted-sidecar")
-        .map_err(|e| format!("sidecar lookup: {e}"))?;
+    let sidecar = sidecar_command(&app)?;
 
     // Tear down a label server left running from a previous batch so it frees
     // the port. Otherwise the new server can't bind, and the readiness poll
@@ -614,10 +660,7 @@ async fn generate_person_thumbs(app: AppHandle, window: Window) -> Result<i32, S
 
 #[tauri::command]
 async fn fetch_library_detail(app: AppHandle, window: Window) -> Result<String, String> {
-    let sidecar = app
-        .shell()
-        .sidecar("spotted-sidecar")
-        .map_err(|e| format!("sidecar lookup: {e}"))?;
+    let sidecar = sidecar_command(&app)?;
     let (mut rx, _child) = sidecar
         .args(["status".to_string(), "--detail".to_string()])
         .spawn()
@@ -660,10 +703,7 @@ async fn delete_person(app: AppHandle, window: Window, name: String) -> Result<i
 async fn fetch_status(app: AppHandle, window: Window) -> Result<String, String> {
     // Capture the structured event from `facetag status`. We collect all
     // stdout, then return the raw lines for the frontend to parse.
-    let sidecar = app
-        .shell()
-        .sidecar("spotted-sidecar")
-        .map_err(|e| format!("sidecar lookup: {e}"))?;
+    let sidecar = sidecar_command(&app)?;
 
     let (mut rx, _child) = sidecar
         .args(["status".to_string()])
@@ -1078,4 +1118,60 @@ pub fn run() {
                 }
             }
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::prepare_sidecar_temp_dir;
+    use std::fs;
+
+    fn scratch_root() -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "spotted-sidecar-temp-test-{}",
+            uuid::Uuid::new_v4().simple()
+        ))
+    }
+
+    #[test]
+    fn prepares_a_writable_app_owned_sidecar_temp_directory() {
+        let root = scratch_root();
+        let prepared = prepare_sidecar_temp_dir(&root).expect("temp directory should be usable");
+
+        assert_eq!(prepared, root.join("sidecar-tmp"));
+        assert!(prepared.is_dir());
+        assert!(
+            fs::read_dir(&prepared)
+                .expect("prepared directory should be readable")
+                .next()
+                .is_none(),
+            "write probe must be removed before the sidecar starts"
+        );
+
+        fs::remove_dir_all(&root).expect("scratch directory should be removable");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_an_unwritable_app_cache_before_starting_the_sidecar() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = scratch_root();
+        fs::create_dir_all(&root).expect("scratch root should be created");
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o500))
+            .expect("scratch root should become read-only");
+
+        let result = prepare_sidecar_temp_dir(&root);
+
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700))
+            .expect("scratch root permissions should be restored");
+        fs::remove_dir_all(&root).expect("scratch directory should be removable");
+
+        assert!(result.is_err(), "unwritable cache must fail before spawn");
+        assert!(
+            result
+                .expect_err("unwritable cache should return an explanation")
+                .contains("local working folder"),
+            "the error should identify Spotted's working folder"
+        );
+    }
 }

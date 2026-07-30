@@ -549,6 +549,13 @@ function friendlyError(raw: string): string {
   if (r.includes("address already in use")) {
     return "The labeling page port is busy. Quit and reopen Spotted, then try again.";
   }
+  if (
+    r.includes("could not create temporary directory") ||
+    r.includes("local working folder") ||
+    r.includes("local cache")
+  ) {
+    return "Spotted couldn't prepare its local working folder. Quit and reopen Spotted, then try again. If it still happens, check that your Mac has free disk space and send this screen.";
+  }
   // Fallback: show the raw error but trimmed to last reasonable chunk
   return raw;
 }
