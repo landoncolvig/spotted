@@ -13,7 +13,14 @@ from typing import Iterator
 
 import numpy as np
 
-VIDEO_EXTS = {".mp4", ".mov", ".m4v", ".mkv", ".avi", ".webm", ".flv", ".wmv", ".mpg", ".mpeg"}
+# Everything ffmpeg can read, which is everything Spotted can scan, mark and
+# put on a DaVinci timeline. AVCHD (.mts/.m2ts) is what Sony and Panasonic
+# camcorders write; without it a folder of them reports "no videos found",
+# which reads as the app being broken rather than the format being unlisted.
+VIDEO_EXTS = {
+    ".mp4", ".mov", ".m4v", ".mkv", ".avi", ".webm", ".flv", ".wmv",
+    ".mpg", ".mpeg", ".mts", ".m2ts", ".mxf", ".ts", ".3gp", ".mqv",
+}
 
 
 def is_video(path: Path) -> bool:

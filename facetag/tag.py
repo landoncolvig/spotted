@@ -22,12 +22,24 @@ class ExiftoolMissing(RuntimeError):
 # worth scanning (faces land in the index and the app can still find them), but
 # a write attempt returns a raw "Writing of MKV files is not yet supported"
 # that reads as a crash. Detect them up front and report them as skipped.
-UNWRITABLE_EXTS = {".mkv", ".avi", ".webm", ".flv", ".wmv", ".mpg", ".mpeg"}
+# An ALLOWLIST, not a denylist. Of the video containers, `exiftool -listwf`
+# reports only these as writable; everything else fails per clip. A denylist
+# meant every newly-supported format defaulted to "try it", so adding AVCHD
+# for a Sony shooter would have turned "no videos found" into a wall of
+# per-clip exiftool errors on footage that was otherwise handled correctly.
+# Unknown formats now default to "scan it, put it on the timeline, don't try
+# to write inside it", which is the safe direction.
+WRITABLE_EXTS = {".mp4", ".mov", ".m4v", ".3gp", ".3g2", ".mqv", ".lrv"}
 
 
 def can_write_metadata(video_path: Path) -> bool:
-    """False for containers exiftool refuses to write."""
-    return video_path.suffix.lower() not in UNWRITABLE_EXTS
+    """Can exiftool write keywords and markers INTO this container?
+
+    False does not mean the clip is unusable. The FCPXML timeline and the EDL
+    are separate files, so an .mkv or .mts still gets scanned, named, marked
+    and laid out; it just cannot carry the keywords inside itself.
+    """
+    return video_path.suffix.lower() in WRITABLE_EXTS
 
 
 def _exiftool_path() -> str:

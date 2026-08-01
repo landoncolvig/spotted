@@ -690,6 +690,65 @@ def test_a_clip_slot_never_cuts_the_last_frame(tmp_path, monkeypatch):
         assert dur - real < spf, f"{p.name}: slot overruns the media by a frame or more"
 
 
+def test_unwritable_containers_are_skipped_not_failed(tmp_path):
+    """exiftool can only write into mp4/mov/m4v. A .mkv or .mts clip still
+    belongs on the timeline with its markers in the EDL, which is how DaVinci
+    reads them anyway, so a container that cannot hold in-file markers is a
+    skip. markers-write had no writability check at all, so those clips came
+    back as per-clip exiftool failures on footage that was otherwise fine."""
+    db_path = tmp_path / "index.db"
+    conn = _db.connect(db_path)
+    for name in ("a.mkv", "b.mts", "c.mp4"):
+        f = tmp_path / name
+        f.write_bytes(b"")
+        vid = _db.add_video(conn, str(f), 2.0)
+        _db.mark_scan_complete(conn, vid)
+        _db.set_energy(conn, vid, 0.9, "high", [0.5])
+    _db.set_setting(conn, "last_scan_roots", json.dumps([str(tmp_path)]))
+    conn.commit()
+    conn.close()
+
+    res = CliRunner().invoke(
+        _cli.app, ["markers-write", "--db", str(db_path), "--no-sidecar"]
+    )
+    assert res.exit_code == 0, res.output
+    events = [
+        json.loads(l[len("__SPOTTED__ "):])
+        for l in res.output.splitlines() if l.startswith("__SPOTTED__ ")
+    ]
+    by = {e["event"]: e for e in events}
+
+    assert by["markers-unwritable"]["count"] == 2
+    assert {e["name"] for e in events if e["event"] == "markers-skip"} == {"a.mkv", "b.mts"}
+    # The contract is that an unwritable CONTAINER is never reported as a
+    # failure. (c.mp4 is a zero-byte fixture, so exiftool fails on it for a
+    # real reason; that is the fixture, not the behaviour under test.)
+    errored = {e["name"] for e in events if e["event"] == "markers-error"}
+    assert not (errored & {"a.mkv", "b.mts"}), f"unwritable format reported as failure: {errored}"
+    # And every clip still reaches the timeline regardless of container.
+    assert by["markers-summary"]["timeline_clips"] == 3
+    assert (tmp_path / "Spotted Markers.fcpxml").exists()
+    assert (tmp_path / "Spotted Markers.edl").exists()
+
+
+def test_writability_is_an_allowlist_so_new_formats_default_to_safe(tmp_path):
+    """A denylist meant every newly-supported container defaulted to "try it",
+    so adding AVCHD for a Sony shooter would have turned "no videos found"
+    into a wall of exiftool errors."""
+    from facetag import extract as _extract
+    from facetag import tag as _tag
+
+    assert _tag.can_write_metadata(Path("x.mp4")) is True
+    assert _tag.can_write_metadata(Path("x.mov")) is True
+    for ext in (".mkv", ".mts", ".m2ts", ".mxf", ".avi", ".webm", ".sonyfuture"):
+        assert _tag.can_write_metadata(Path(f"x{ext}")) is False, ext
+    # Sony/Panasonic camcorder footage must at least be seen and scanned.
+    for ext in (".mts", ".m2ts", ".mxf"):
+        f = tmp_path / f"clip{ext}"
+        f.write_bytes(b"")
+        assert _extract.is_video(f) is True, ext
+
+
 def test_timeline_takes_the_majority_frame_rate_and_size(tmp_path, monkeypatch):
     """One phone clip in a folder of drone footage must not decide the rate or
     the frame size for the other hundred. A clip whose rate is not a clean

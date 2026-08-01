@@ -1279,6 +1279,7 @@ def markers_write(
     failed: list[tuple[str, str]] = []
     sidecar_failed: list[tuple[str, str]] = []
     missing: list[str] = []
+    unwritable: list[str] = []  # containers that cannot hold in-file markers
     last_written: tuple[Path, int] | None = None  # for the verification readback
     video_markers: dict[str, list[tuple[float, str]]] = {}  # for the Resolve script
 
@@ -1314,16 +1315,25 @@ def markers_write(
             if events:
                 video_markers[path_str] = events
             _emit("markers-video", name=short, count=len(events), index=idx, total=len(videos))
-            try:
-                _markers.write_markers(Path(path_str), events, known_names=known_names)
-                last_written = (Path(path_str), len(events))
-            except _markers.ExiftoolMissing as e:
-                console.print(f"\n[red]{e}[/red]")
-                _emit("error", stage="markers-write", message=str(e))
-                raise typer.Exit(2)
-            except Exception as e:
-                failed.append((short, str(e)))
-                _emit("markers-error", name=short, message=str(e))
+            # In-file markers need a container exiftool can write. The clip
+            # still goes on the timeline and still gets its markers in the EDL,
+            # which is how DaVinci reads them anyway, so this is a skip and not
+            # a failure. Reporting it as a failure buried a working run under a
+            # wall of red on footage that came out fine.
+            if not _tag.can_write_metadata(Path(path_str)):
+                unwritable.append(short)
+                _emit("markers-skip", name=short, reason="format can't store markers")
+            else:
+                try:
+                    _markers.write_markers(Path(path_str), events, known_names=known_names)
+                    last_written = (Path(path_str), len(events))
+                except _markers.ExiftoolMissing as e:
+                    console.print(f"\n[red]{e}[/red]")
+                    _emit("error", stage="markers-write", message=str(e))
+                    raise typer.Exit(2)
+                except Exception as e:
+                    failed.append((short, str(e)))
+                    _emit("markers-error", name=short, message=str(e))
             # Sidecar XMP. Opt-in (--sidecar) as a DaVinci fallback; otherwise
             # we clean up any sidecar Spotted left before, so tagged folders
             # don't accumulate a .xmp beside every clip. In-file markers above
@@ -1425,6 +1435,13 @@ def markers_write(
             _emit("resolve-script-error", message=message)
             raise typer.Exit(4) from e
 
+    if unwritable:
+        console.print(
+            f"[dim]{len(unwritable)} clip(s) are in a format that can't store markers "
+            f"inside the file. They are on the timeline and in the EDL, which is "
+            f"how DaVinci reads markers anyway.[/dim]"
+        )
+        _emit("markers-unwritable", count=len(unwritable), names=unwritable[:5])
     if failed:
         console.print(f"[red]{len(failed)} failure(s) writing in-file markers:[/red]")
         for n, err in failed:

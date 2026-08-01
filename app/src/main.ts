@@ -36,6 +36,10 @@ type SpottedEvent =
   | { event: "markers-verify-error"; message: string }
   | { event: "resolve-script"; path: string; clips: number }
   | { event: "markers-summary"; scanned: number; timeline_clips: number; marked_clips: number; skipped_missing: number; skipped_no_markers: number }
+  // Containers exiftool can't write into (.mkv, .mts, .avi...). Not a failure:
+  // the clip is on the timeline and its markers ride in the EDL, which is how
+  // DaVinci reads them anyway. Only in-file embedding is unavailable.
+  | { event: "markers-unwritable"; count: number; names: string[] }
   | { event: "resolve-timeline"; path: string; clips: number }
   | { event: "resolve-edl"; path: string; clips: number }
   | { event: "resolve-script-error"; message: string }
@@ -286,6 +290,8 @@ let lastResolveEdl: string | null = null;
  *  rest did not. A tester received a timeline holding 1 of her 170 clips with
  *  nothing on screen to explain it, and assumed DaVinci had dropped them. */
 let lastMarkersSummary: Extract<SpottedEvent, { event: "markers-summary" }> | null = null;
+// How many clips are in a container that can't hold in-file markers.
+let lastUnwritable = 0;
 /** Resolved once at startup; person thumbnails live under it. */
 let homePath: string | null = null;
 /** Set when the user cancels, so the resulting sidecar rejection isn't
@@ -437,6 +443,9 @@ function handleSpottedEvent(evt: SpottedEvent) {
       break;
     case "markers-summary":
       lastMarkersSummary = evt;
+      break;
+    case "markers-unwritable":
+      lastUnwritable = evt.count;
       break;
     case "resolve-timeline":
       lastResolveTimeline = evt.path;
@@ -785,6 +794,7 @@ async function runWrite(excludeTags: string[], allClips = false) {
   lastResolveEdl = null;
   lastMarkerError = null;
   lastMarkersSummary = null;
+  lastUnwritable = 0;
   document.getElementById("done-verify")?.replaceChildren();
   setState("working");
   setProgressIndeterminate();
@@ -946,6 +956,12 @@ function renderVerification() {
     // A partial failure is not the same as "nothing landed" — say how many
     // clips were skipped rather than letting the row read as empty.
     if (markers.failed) markerCells.push(`${markers.failed} clip(s) failed`);
+  }
+  // Formats exiftool can't write into. Named plainly and kept out of the
+  // failure count, because those clips ARE on the timeline with their markers
+  // in the EDL. Calling it a failure made a working run look broken.
+  if (lastUnwritable > 0) {
+    markerCells.push(`${lastUnwritable} in EDL only (format can't embed)`);
   }
   if (!markerCells.length && lastMarkerError) {
     markerCells.push(`failed: ${lastMarkerError.slice(0, 120)}`);
