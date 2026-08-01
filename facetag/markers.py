@@ -14,6 +14,7 @@ shipping needs human verification in the actual editor.
 """
 from __future__ import annotations
 
+import collections
 import json
 import math
 import shutil
@@ -714,6 +715,46 @@ def start_timecode_sec(video_path: Path, num: int = 1, den: int = 30) -> float:
     return frames / source_rate
 
 
+def get_video_size(video_path: Path) -> tuple[int, int]:
+    """Picture size, already rotated the way a player would show it.
+
+    The timeline declares one frame size, and hardcoding 1920x1080 meant a 4K
+    batch imported as HD and a phone's portrait clip imported into a landscape
+    timeline, pillarboxed. Phones write portrait video as a landscape stream
+    plus a 90 degree rotation, so the raw width and height have to be swapped
+    when that flag is set or the fix reads backwards on exactly the footage
+    that needs it. Falls back to 1920x1080 when the file will not say.
+    """
+    def _int_field(entry: str) -> int:
+        # _ffprobe_field prints values with no key (nk=1), so ask for one at a
+        # time; a combined width,height query comes back as two bare numbers
+        # with nothing to say which is which.
+        raw = _ffprobe_field(
+            video_path, ["-select_streams", "v:0", "-show_entries", entry]
+        )
+        for line in raw.splitlines():
+            line = line.strip().lstrip("-")
+            if line.isdigit():
+                return int(line)
+        return 0
+
+    w, h = _int_field("stream=width"), _int_field("stream=height")
+    if w <= 0 or h <= 0:
+        return 1920, 1080
+
+    for entry in ("stream_side_data=rotation", "stream_tags=rotate"):
+        raw = _ffprobe_field(
+            video_path, ["-select_streams", "v:0", "-show_entries", entry]
+        )
+        for line in raw.splitlines():
+            try:
+                if abs(int(float(line.strip()))) % 180 == 90:
+                    return h, w
+            except ValueError:
+                continue
+    return w, h
+
+
 def _video_duration(video_path: Path, fps: float) -> float:
     """How long the PICTURE runs, which is not how long the file runs.
 
@@ -798,7 +839,17 @@ def _timeline_layout(
     clips = sorted(video_markers.items())
     if not clips:
         return 1, 30, []
-    num, den = _frame_duration(get_video_fps(Path(clips[0][0])))
+    # Run the timeline at whichever rate most of the batch was shot at, not
+    # whatever the alphabetically-first clip happens to be. A clip whose rate
+    # is not a clean multiple of the timeline's cannot land on whole frames
+    # (384 frames of 30.00fps is 767.23 frames of a 59.94 timeline), so it has
+    # to be padded to keep its last frame. Choosing by majority leaves that
+    # padding on the fewest clips. One phone clip in a folder of drone footage
+    # should not decide the rate for the other hundred.
+    rates = collections.Counter(
+        _frame_duration(get_video_fps(Path(p))) for p, _e in clips
+    )
+    num, den = rates.most_common(1)[0][0]
     spf = num / den                      # seconds per frame on the timeline
     entries: list[tuple[Path, float, float, list[tuple[float, str]]]] = []
     frame_cursor = 0                     # integer frames, never floats
@@ -937,9 +988,16 @@ def fcpxml_for_markers(video_markers: dict[str, list[tuple[float, str]]]) -> str
         return ""
     spf = num / den
 
+    # One frame size for the sequence, taken from whichever size most of the
+    # batch actually is. Most-common rather than first-clip: a single portrait
+    # phone clip dropped in among a folder of landscape footage should not turn
+    # the whole timeline sideways.
+    sizes = collections.Counter(get_video_size(p) for p, _o, _d, _e in entries)
+    (seq_w, seq_h), _n = sizes.most_common(1)[0]
+
     resources: list[str] = [
         f'    <format id="r0" name="FFVideoFormat" frameDuration="{num}/{den}s" '
-        f'width="1920" height="1080" colorSpace="1-1-1 (Rec. 709)"/>'
+        f'width="{seq_w}" height="{seq_h}" colorSpace="1-1-1 (Rec. 709)"/>'
     ]
     spine: list[str] = []
 

@@ -690,6 +690,39 @@ def test_a_clip_slot_never_cuts_the_last_frame(tmp_path, monkeypatch):
         assert dur - real < spf, f"{p.name}: slot overruns the media by a frame or more"
 
 
+def test_timeline_takes_the_majority_frame_rate_and_size(tmp_path, monkeypatch):
+    """One phone clip in a folder of drone footage must not decide the rate or
+    the frame size for the other hundred. A clip whose rate is not a clean
+    multiple of the timeline's has to be padded to keep its last frame, so the
+    majority rate leaves that padding on the fewest clips. Frame size matters
+    the same way: a portrait clip should not turn the timeline sideways."""
+    shapes = {}
+    vm = {}
+    for i in range(5):
+        f = tmp_path / f"c{i}.mov"
+        f.write_bytes(b"")
+        # four landscape 59.94 clips, one portrait 30fps phone clip
+        shapes[str(f)] = (60000 / 1001, (1920, 1080)) if i else (30.0, (1080, 1920))
+        vm[str(f)] = [(0.5, "Ellie")]
+
+    monkeypatch.setattr(_markers, "get_video_fps", lambda p: shapes[str(p)][0])
+    monkeypatch.setattr(_markers, "get_video_size", lambda p: shapes[str(p)][1])
+    monkeypatch.setattr(_markers, "_video_duration", lambda _p, _f: 2.0)
+
+    num, den, _entries = _markers._timeline_layout(vm)
+    assert (num, den) == (1001, 60000), "minority phone clip captured the rate"
+
+    xml = _markers.fcpxml_for_markers(vm)
+    assert 'width="1920" height="1080"' in xml, "minority clip turned the timeline"
+
+    # Flip the majority and both must follow it.
+    for k in list(shapes):
+        shapes[k] = (30.0, (1080, 1920))
+    num, den, _e = _markers._timeline_layout(vm)
+    assert (num, den) == (1, 30)
+    assert 'width="1080" height="1920"' in _markers.fcpxml_for_markers(vm)
+
+
 def test_duration_measures_the_picture_not_the_container(monkeypatch):
     """Camera audio does not end on a video frame boundary: AAC packets are
     1024 samples (21.3ms at 48kHz) against 16.7ms for a 59.94 frame, so the
