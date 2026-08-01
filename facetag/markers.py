@@ -15,10 +15,18 @@ shipping needs human verification in the actual editor.
 from __future__ import annotations
 
 import json
+import math
 import shutil
 import sqlite3
 import subprocess
 from pathlib import Path
+
+# How much of a timeline frame a clip has to overrun by before it earns another
+# one. ffprobe reports duration to six decimal places, so a clip that divides
+# evenly can still measure a few hundred-thousandths of a frame long; without
+# this it would be given a frame it does not have. Real shortfalls are tenths
+# of a frame, hundreds of times bigger than the noise this absorbs.
+_FRAME_EPSILON = 0.001
 
 
 class ExiftoolMissing(RuntimeError):
@@ -765,7 +773,17 @@ def _timeline_layout(
         # that many. Accumulating float seconds and rounding each offset
         # independently drifts, and Resolve then reports "Trimming item on V1
         # because it overlaps previous items" and mangles the edit.
-        dur_frames = max(1, int(round(dur / spf)))
+        #
+        # Round UP, not to nearest. A batch can mix frame rates, and a clip
+        # whose rate is not a clean multiple of the timeline's does not land on
+        # whole frames: 384 frames of 30.00fps footage is 767.23 frames of a
+        # 59.94 timeline. Rounding to nearest gave that clip a 767-frame slot
+        # and cut the tail, which a tester saw as "a clip every once in a while
+        # that's missing the last frame" (only the ones landing in the lower
+        # half of a frame, hence every once in a while). The slot must cover
+        # the whole clip. The asset element below is built from this same
+        # duration, so the clip can never outrun what its own asset declares.
+        dur_frames = max(1, math.ceil(dur / spf - _FRAME_EPSILON))
         entries.append((p, frame_cursor * spf, dur_frames * spf, sorted(events)))
         frame_cursor += dur_frames
     return num, den, entries

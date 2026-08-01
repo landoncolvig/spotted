@@ -654,6 +654,55 @@ def test_every_clip_lands_on_its_own_frame_regardless_of_the_frames_field(
     assert abs(off_by) < 1e-6, f"{frames_field=} lands {off_by:+.2f} frames out"
 
 
+def test_a_clip_slot_never_cuts_the_last_frame(tmp_path, monkeypatch):
+    """A batch can mix frame rates. 384 frames of 30.00fps footage is 767.23
+    frames of a 59.94 timeline; rounding to nearest handed that clip a
+    767-frame slot and cut its tail. The tester saw "a clip every once in a
+    while that's missing the last frame" — only the ones whose length landed
+    in the lower half of a frame, which is why it looked intermittent."""
+    spf = 1001 / 60000
+    cases = {                       # source frames @30.00fps -> exact 59.94 frames
+        "a.mov": (384, 767.233),    # rounds DOWN: the reported bug
+        "b.mov": (300, 599.401),    # rounds DOWN
+        "c.mov": (250, 499.500),    # rounds up already
+        "d.mov": (600, 1198.801),   # rounds up already
+    }
+    durations = {}
+    vm = {}
+    for name, (src_frames, _) in cases.items():
+        f = tmp_path / name
+        f.write_bytes(b"")
+        durations[str(f)] = src_frames / 30.0
+        vm[str(f)] = [(0.5, "Ellie")]
+
+    monkeypatch.setattr(_markers, "get_video_fps", lambda _p: 60000 / 1001)
+    monkeypatch.setattr(
+        _markers, "_video_duration", lambda p, _fps: durations[str(p)]
+    )
+    _num, _den, entries = _markers._timeline_layout(vm)
+
+    for p, _off, dur, _e in entries:
+        real = durations[str(p)]
+        assert dur >= real - 1e-9, (
+            f"{p.name}: {(real - dur)/spf:.3f} frames of media left off the slot"
+        )
+        # And never more than a whole frame of padding past the media.
+        assert dur - real < spf, f"{p.name}: slot overruns the media by a frame or more"
+
+
+def test_evenly_divisible_clips_are_not_given_a_phantom_frame(tmp_path, monkeypatch):
+    """Rounding up must not hand a frame to a clip that already fits. ffprobe
+    reports duration to six decimals, so an exact clip can measure a hair long."""
+    clip = tmp_path / "exact.mov"
+    clip.write_bytes(b"")
+    spf = 1001 / 60000
+    monkeypatch.setattr(_markers, "get_video_fps", lambda _p: 60000 / 1001)
+    for measured in (767 * spf, 767 * spf + 1e-7, 767 * spf - 1e-7):
+        monkeypatch.setattr(_markers, "_video_duration", lambda _p, _f, m=measured: m)
+        _n, _d, entries = _markers._timeline_layout({str(clip): [(0.1, "E")]})
+        assert round(entries[0][2] / spf) == 767, f"{measured!r} drifted off 767"
+
+
 def test_non_drop_timecode_is_unchanged(monkeypatch):
     from pathlib import Path as P
 
