@@ -46,6 +46,11 @@ type SpottedEvent =
   | { event: "activity-fallback"; reason: string; tags: string[]; clips: number }
   | { event: "activities-disabled"; reason: string }
   | { event: "library-stats"; videos: number; faces: number; clusters: number; named: number; people: { name: string; cluster_id?: number; clips: number; faces: number }[] }
+  // Same payload as library-stats, but counting only the clips this run was
+  // handed. Kept as a separate event so it can never reach the Library view.
+  // `known: false` means the database could not say what the batch was, so
+  // these are library totals and must not be presented as the batch.
+  | { event: "batch-stats"; known?: boolean; videos: number; faces: number; clusters: number; named: number; people: { name: string; cluster_id?: number; clips: number; faces: number }[] }
   | { event: "library-person"; name: string; clips: { path: string; name: string; times: number[] }[] }
   | { event: "library-clip-index"; clips: { path: string; name: string; keywords: string[] }[] }
   | { event: "library-detail-complete" }
@@ -264,6 +269,7 @@ function parseSpotted(line: string): SpottedEvent | null {
 }
 
 let lastStats: SpottedEvent | null = null;
+let lastBatchStats: SpottedEvent | null = null;
 let lastVerification: Extract<SpottedEvent, { event: "tag-verified" }> | null = null;
 let lastMarkersVerification: Extract<SpottedEvent, { event: "markers-verified" }> | null = null;
 /** Why the marker step failed, if it did. Shown on the done screen so a broken
@@ -297,6 +303,18 @@ async function fetchLibraryStats(): Promise<SpottedEvent | null> {
   // Give the event a tick to land.
   await new Promise((r) => setTimeout(r, 100));
   return lastStats;
+}
+
+/** Counts for the clips this run was handed, for the finish line. The library
+ *  totals are a different question and answering it there read as a bug: a
+ *  user who dropped one clip was told Spotted had tagged 169. */
+async function fetchBatchStats(): Promise<SpottedEvent | null> {
+  lastBatchStats = null;
+  try {
+    await invoke<string>("fetch_status", { batch: true });
+  } catch {}
+  await new Promise((r) => setTimeout(r, 100));
+  return lastBatchStats;
 }
 
 // Cross-phase state for the current batch. Reset at runBatch entry, read by
@@ -405,6 +423,11 @@ function handleSpottedEvent(evt: SpottedEvent) {
     case "library-stats":
       lastStats = evt;
       handleLibraryEvent(evt);
+      break;
+    case "batch-stats":
+      // Deliberately not forwarded to the Library view. These are one drop's
+      // numbers, and the sidebar would render them as the whole library.
+      lastBatchStats = evt;
       break;
     case "tag-verified":
       lastVerification = evt;
@@ -808,7 +831,12 @@ async function runWrite(excludeTags: string[], allClips = false) {
     }
 
     setProgress(100);
-    const stats = await fetchLibraryStats();
+    // The batch, not the library. Re-tag Library is the one run that really is
+    // about the whole index; scoping it to the last drop would headline "1
+    // clip" over a coverage row reading "169 of 169".
+    const stats = allClips
+      ? await fetchLibraryStats()
+      : ((await fetchBatchStats()) ?? (await fetchLibraryStats()));
     setState("done");
     if (tagWriteError) {
       showError(tagWriteError);
@@ -839,8 +867,20 @@ async function runWrite(excludeTags: string[], allClips = false) {
   }
 }
 
+/** library-stats and batch-stats carry the same payload; the finish line takes
+ *  whichever it was given and does not care which query produced it. */
+function isStats(
+  s: SpottedEvent | null,
+): s is Extract<SpottedEvent, { event: "library-stats" | "batch-stats" }> {
+  if (!s) return false;
+  if (s.event === "library-stats") return true;
+  // Batch counts the engine could not confine to this run are library totals
+  // wearing the batch's name. Say nothing rather than say them.
+  return s.event === "batch-stats" && s.known !== false;
+}
+
 function summarizeDone(stats: SpottedEvent | null): string {
-  if (!stats || stats.event !== "library-stats" || stats.people.length === 0) {
+  if (!isStats(stats) || stats.people.length === 0) {
     return "Tags written. Open Spotted to see what changed.";
   }
   const top = stats.people.slice(0, 3).map((p) => p.name).join(", ");
@@ -868,7 +908,14 @@ async function notifyIfBackground(title: string, body: string) {
 
 function renderDone(stats: SpottedEvent | null) {
   clearError();
-  if (!stats || stats.event !== "library-stats" || stats.people.length === 0) {
+  if (isStats(stats) && stats.people.length === 0) {
+    // Nobody Spotted knows turned up in this batch. Say so, with the clip
+    // count, rather than falling through to advice that reads like a result.
+    const n = stats.videos;
+    doneSub.textContent =
+      `${n} clip${n === 1 ? "" : "s"} processed. No named faces in ${n === 1 ? "it" : "them"}. ` +
+      `Open the folder in Premiere or DaVinci to see the keywords and timeline.`;
+  } else if (!isStats(stats)) {
     doneSub.textContent = "Open the folder in Premiere or DaVinci — search by name.";
   } else {
     const top = stats.people.slice(0, 6);
@@ -941,7 +988,11 @@ function renderVerification() {
       : "Current marker results";
   panel.appendChild(header);
 
-  const rows: Array<{ label: string; values: string[]; help: string }> = [];
+  // "empty" next to a warning sign reads as "this step failed". Most of the
+  // time it means the step ran and found nothing to do, which is a different
+  // sentence — a tester read a clean run as the app doing nothing at all.
+  // `note` says which one it was; rows carrying one render as a plain fact.
+  const rows: Array<{ label: string; values: string[]; help: string; note?: string }> = [];
   if (v) {
     rows.push({
       label: "Keys (DaVinci, Finder)",
@@ -963,6 +1014,13 @@ function renderVerification() {
     {
       label: "Markers (timeline)",
       values: markerCells,
+      // Only when nothing was there to mark. A batch whose named clips have
+      // moved off disk also lands on marked_clips === 0, and calling that
+      // "no named face in this batch" contradicts the coverage row below it,
+      // which is busy saying those clips are missing.
+      note: ms && ms.marked_clips === 0 && ms.skipped_missing === 0 && !lastMarkerError
+        ? "no named face or energy peak in this batch"
+        : undefined,
       help: "Per-face timeline markers. In-file XMP for Premiere; sidecar .xmp next to the clip for DaVinci (enable 'Use Sidecar Files' in project settings).",
     },
     {
@@ -978,22 +1036,28 @@ function renderVerification() {
     {
       label: "Your tags (matched)",
       values: lastActivityResult?.sample?.tags ?? [],
+      note: lastActivityResult && !lastActivityResult.sample?.tags?.length
+        ? "none of your tags matched this batch"
+        : undefined,
       help: "The tags you entered, matched per clip with Apple's MobileCLIP and confirmed by you on the review screen. Each lands only on the clips it was found in, the same way a face name does.",
     },
   );
 
   for (const row of rows) {
+    const filled = row.values.length > 0;
+    const explained = !filled && Boolean(row.note);
     const div = document.createElement("div");
-    div.className = "done-verify__row " + (row.values.length > 0 ? "is-ok" : "is-empty");
+    div.className =
+      "done-verify__row " + (filled ? "is-ok" : explained ? "is-none" : "is-empty");
     const dot = document.createElement("span");
     dot.className = "done-verify__dot";
-    dot.textContent = row.values.length > 0 ? "✓" : "⚠";
+    dot.textContent = filled ? "✓" : explained ? "–" : "⚠";
     const label = document.createElement("span");
     label.className = "done-verify__label";
     label.textContent = row.label;
     const value = document.createElement("span");
     value.className = "done-verify__value";
-    value.textContent = row.values.length > 0 ? row.values.join(", ") : "empty";
+    value.textContent = filled ? row.values.join(", ") : (row.note ?? "empty");
     value.title = row.help;
     div.append(dot, label, value);
     panel.appendChild(div);

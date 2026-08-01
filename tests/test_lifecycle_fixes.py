@@ -940,6 +940,137 @@ def test_activity_suggest_survives_a_multi_file_batch(tmp_path):
     assert res.exit_code == 0, res.output
 
 
+def test_timeline_is_written_when_no_clip_carries_a_marker(tmp_path):
+    """A tester dropped one aerial clip with no faces in it and no energy peak.
+
+    markers-write bailed before the export block, so no FCPXML and no EDL were
+    written at all and the Done screen showed four empty rows with no error to
+    explain them. She read that as the app silently doing nothing, which is
+    exactly what it did. The batch she handed over still has to come back as a
+    timeline; markers are what ride on top of it, not the reason to build it.
+    """
+    db_path = tmp_path / "index.db"
+    clip = tmp_path / "DJI_0029.mov"
+    clip.write_bytes(b"")
+    conn = _db.connect(db_path)
+    vid = _db.add_video(conn, str(clip), 4.0)
+    _db.mark_scan_complete(conn, vid)
+    # No named face, and an energy bucket without a single peak — the shape of
+    # a clip that scores medium overall but never spikes.
+    _db.set_energy(conn, vid, 0.4, "medium", [])
+    _db.set_setting(conn, "last_scan_roots", json.dumps([str(clip)]))
+    conn.commit()
+    conn.close()
+
+    res = CliRunner().invoke(
+        _cli.app, ["markers-write", "--db", str(db_path), "--no-sidecar"]
+    )
+    assert res.exception is None or isinstance(res.exception, SystemExit), repr(res.exception)
+    assert res.exit_code == 0, res.output
+
+    assert (tmp_path / "Spotted Markers.fcpxml").exists(), (
+        "the batch came back without a timeline:\n" + res.output
+    )
+    events = [
+        json.loads(line[len("__SPOTTED__ "):])
+        for line in res.output.splitlines()
+        if line.startswith("__SPOTTED__ ")
+    ]
+    kinds = {e["event"] for e in events}
+    assert "resolve-timeline" in kinds, f"no timeline event, got {kinds}"
+    # The Done screen's coverage row reads as "empty" without this, which is
+    # what made a working run look like a failed one.
+    summary = next(e for e in events if e["event"] == "markers-summary")
+    assert summary["timeline_clips"] == 1
+    assert summary["marked_clips"] == 0
+
+
+def test_status_counts_the_batch_not_the_library(tmp_path):
+    """The finish line told a tester "tagged 95 people across 169 clips" after
+    she dropped a single clip. It was reading library totals. --batch answers
+    the question the Done screen is actually asking, and must come back under
+    a different event name so the Library view never renders one drop as the
+    user's whole library."""
+    db_path = tmp_path / "index.db"
+    conn = _db.connect(db_path)
+    dropped, other = None, None
+    for i, name in enumerate(("dropped.mov", "old_a.mov", "old_b.mov")):
+        f = tmp_path / name
+        f.write_bytes(b"")
+        vid = _db.add_video(conn, str(f), 4.0)
+        _db.mark_scan_complete(conn, vid)
+        # Everyone in the library has a face; only Rowan is in the batch.
+        cluster = 0 if name == "dropped.mov" else i
+        conn.execute(
+            "INSERT INTO faces(video_id, timestamp_sec, embedding, cluster_id) "
+            "VALUES(?, 0.0, X'00', ?)",
+            (vid, cluster),
+        )
+        conn.execute(
+            "INSERT OR IGNORE INTO people(cluster_id, name) VALUES(?, ?)",
+            (cluster, {0: "Rowan", 1: "Jorja", 2: "Maggie"}[cluster]),
+        )
+        if name == "dropped.mov":
+            dropped = str(f)
+        else:
+            other = str(f)
+    _db.set_setting(conn, "last_scan_roots", json.dumps([dropped]))
+    conn.commit()
+    conn.close()
+
+    def events(args):
+        res = CliRunner().invoke(_cli.app, args)
+        assert res.exit_code == 0, res.output
+        return [
+            json.loads(l[len("__SPOTTED__ "):])
+            for l in res.output.splitlines() if l.startswith("__SPOTTED__ ")
+        ]
+
+    batch = next(
+        e for e in events(["status", "--db", str(db_path), "--batch"])
+        if e["event"] in {"batch-stats", "library-stats"}
+    )
+    assert batch["event"] == "batch-stats", "a scoped count must not pose as library-stats"
+    assert batch["videos"] == 1, f"counted the library, not the drop: {batch}"
+    assert [p["name"] for p in batch["people"]] == ["Rowan"]
+    assert batch["named"] == 1
+
+    # Unscoped is still the whole index, which is what the Library view reads.
+    lib = next(
+        e for e in events(["status", "--db", str(db_path)])
+        if e["event"] in {"batch-stats", "library-stats"}
+    )
+    assert lib["event"] == "library-stats"
+    assert lib["videos"] == 3 and lib["named"] == 3
+    assert other is not None
+
+
+def test_batch_stats_admits_when_it_does_not_know_the_batch(tmp_path):
+    """Without a recorded batch, --batch can only report library totals. It
+    must label them as such: silently relabelling the library as the batch is
+    the bug --batch exists to prevent, and it would revert invisibly."""
+    db_path = tmp_path / "index.db"
+    conn = _db.connect(db_path)
+    for name in ("a.mov", "b.mov"):
+        f = tmp_path / name
+        f.write_bytes(b"")
+        _db.mark_scan_complete(conn, _db.add_video(conn, str(f), 4.0))
+    # No last_scan_roots / last_scan_root at all.
+    conn.commit()
+    conn.close()
+
+    res = CliRunner().invoke(_cli.app, ["status", "--db", str(db_path), "--batch"])
+    assert res.exit_code == 0, res.output
+    stats = next(
+        json.loads(l[len("__SPOTTED__ "):])
+        for l in res.output.splitlines()
+        if l.startswith("__SPOTTED__ ") and "stats" in l
+    )
+    assert stats["event"] == "batch-stats"
+    assert stats["known"] is False, "library totals posing as the batch"
+    assert stats["videos"] == 2
+
+
 def test_every_pipeline_step_survives_a_multi_file_batch(tmp_path):
     """The gap that let two crashes reach a tester in one day.
 

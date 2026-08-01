@@ -700,13 +700,28 @@ async fn delete_person(app: AppHandle, window: Window, name: String) -> Result<i
 }
 
 #[tauri::command]
-async fn fetch_status(app: AppHandle, window: Window) -> Result<String, String> {
+async fn fetch_status(
+    app: AppHandle,
+    window: Window,
+    batch: Option<bool>,
+) -> Result<String, String> {
     // Capture the structured event from `facetag status`. We collect all
     // stdout, then return the raw lines for the frontend to parse.
     let sidecar = sidecar_command(&app)?;
 
+    let mut args = vec!["status".to_string()];
+    // --batch reports only the clips the last scan was handed, and comes back
+    // as batch-stats. Without it this reports the whole index, which is what
+    // the Library view asks for. The two must not be confused: the finish line
+    // once told a user her single-clip drop had tagged 169 clips. The batch
+    // comes from the database, not from a path the UI is holding, because the
+    // updater restarts the app mid-run and that wipes anything held in memory.
+    if batch.unwrap_or(false) {
+        args.push("--batch".to_string());
+    }
+
     let (mut rx, _child) = sidecar
-        .args(["status".to_string()])
+        .args(args)
         .spawn()
         .map_err(|e| format!("sidecar spawn: {e}"))?;
 

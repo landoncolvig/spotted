@@ -1245,9 +1245,6 @@ def markers_write(
         if _under_scope(path_str, root):
             by_id.setdefault(vid, path_str)
     videos = sorted(by_id.items())
-    if not videos:
-        console.print("[yellow]No markers to write (no named faces or energy peaks).[/yellow]")
-        raise typer.Exit(0)
 
     # Every scanned clip in this batch that is still on disk. The timeline is
     # built from this, not from the marked subset, so the user gets back the
@@ -1258,6 +1255,16 @@ def markers_write(
         p for (p,) in conn.execute("SELECT path FROM videos").fetchall()
         if _under_scope(p, root) and Path(p).exists()
     )
+
+    # A batch where nothing earned a marker still gets its timeline. Bailing
+    # here is what sent a tester a Done screen with four empty rows and no
+    # error after she dropped a single aerial clip with no faces in it: no
+    # FCPXML, no EDL, nothing on disk, and no way to tell that from a crash.
+    # Markers ride on the timeline; they are not the reason to build one.
+    if not videos:
+        console.print("[yellow]No markers to write (no named faces or energy peaks).[/yellow]")
+        if not in_scope_paths:
+            raise typer.Exit(0)
 
     # Every name Spotted may claim. Markers on a clip whose name isn't in here
     # were put there by a human in Premiere, and write_markers preserves them.
@@ -1486,15 +1493,58 @@ def person_thumbs(
 def status(
     db_path: Path = typer.Option(DEFAULT_DB, "--db"),
     detail: bool = typer.Option(False, "--detail", help="Include per-person clip lists (heavier query, used by Library view)."),
+    scope: Path = typer.Option(None, "--scope", help="Count only clips under this path, and emit the result as batch-stats instead of library-stats. This is what the Done screen reports after a run."),
+    batch: bool = typer.Option(False, "--batch", help="Same as --scope, but takes the batch the last scan was about straight from the database."),
 ):
-    """Show index summary (videos, faces, clusters, per-person clip counts)."""
+    """Show index summary (videos, faces, clusters, per-person clip counts).
+
+    Unscoped this describes the whole index, which is what the Library view
+    wants. `--scope`/`--batch` describes one drop instead: a user who handed
+    over a single clip was told Spotted had tagged 169, because the finish
+    line was reading library totals and calling them the batch.
+    """
     conn = _db.connect(db_path)
-    n_videos = conn.execute("SELECT COUNT(*) FROM videos").fetchone()[0]
-    n_faces = conn.execute("SELECT COUNT(*) FROM faces").fetchone()[0]
-    n_clusters = conn.execute(
-        "SELECT COUNT(DISTINCT cluster_id) FROM faces WHERE cluster_id IS NOT NULL AND cluster_id >= 0"
+    asked_for_batch = scope is not None or batch
+    root = _resolve_scope(scope, conn) if asked_for_batch else None
+    # Asked which clips this run was about, and the database cannot say. Every
+    # scan records it, so this needs a DB from a build that predates the
+    # setting or one restored without it. Answer with library totals but say
+    # they are not the batch, because quietly relabelling them as the batch is
+    # the exact bug --batch exists to prevent.
+    scope_known = root is not None
+
+    # Path scoping is a Python-side test (a batch can be a pile of individual
+    # files, not one folder), so narrow to ids first and let SQL count those.
+    # They go in a temp table rather than an inline IN list, which keeps the
+    # query a fixed size no matter how many clips someone drags in at once.
+    scoped_ids: list[int] | None = None
+    if root is not None:
+        scoped_ids = [
+            vid for vid, p in conn.execute("SELECT id, path FROM videos").fetchall()
+            if _under_scope(p, root)
+        ]
+        conn.execute("CREATE TEMP TABLE batch_scope(video_id INTEGER PRIMARY KEY)")
+        conn.executemany(
+            "INSERT INTO batch_scope(video_id) VALUES(?)", [(i,) for i in scoped_ids]
+        )
+
+    def _in_scope(column: str) -> str:
+        """SQL fragment confining a query to the batch."""
+        if scoped_ids is None:
+            return ""
+        return f" AND {column} IN (SELECT video_id FROM batch_scope)"
+
+    if scoped_ids is None:
+        n_videos = conn.execute("SELECT COUNT(*) FROM videos").fetchone()[0]
+    else:
+        n_videos = len(scoped_ids)
+    n_faces = conn.execute(
+        "SELECT COUNT(*) FROM faces WHERE 1" + _in_scope("video_id")
     ).fetchone()[0]
-    n_named = conn.execute("SELECT COUNT(*) FROM people").fetchone()[0]
+    n_clusters = conn.execute(
+        "SELECT COUNT(DISTINCT cluster_id) FROM faces "
+        "WHERE cluster_id IS NOT NULL AND cluster_id >= 0" + _in_scope("video_id")
+    ).fetchone()[0]
 
     per_person_rows = conn.execute(
         "SELECT p.name, "
@@ -1503,10 +1553,16 @@ def status(
         "       COUNT(f.id) AS faces "
         "FROM people p "
         "JOIN faces f ON f.cluster_id = p.cluster_id "
-        "WHERE p.name IS NOT NULL AND p.name != '' "
-        "GROUP BY p.name "
+        "WHERE p.name IS NOT NULL AND p.name != ''" + _in_scope("f.video_id") +
+        " GROUP BY p.name "
         "ORDER BY clips DESC, p.name ASC"
     ).fetchall()
+    # Named people the whole library knows about vs. the ones who actually turn
+    # up in this batch. The finish line is about the batch.
+    n_named = (
+        conn.execute("SELECT COUNT(*) FROM people").fetchone()[0]
+        if scoped_ids is None else len(per_person_rows)
+    )
     people = [
         {"name": n, "cluster_id": int(cid), "clips": c, "faces": fc}
         for n, cid, c, fc in per_person_rows
@@ -1524,14 +1580,32 @@ def status(
             pt.add_row(p["name"], str(p["clips"]), str(p["faces"]))
         console.print(pt)
 
-    _emit(
-        "library-stats",
-        videos=n_videos,
-        faces=n_faces,
-        clusters=n_clusters,
-        named=n_named,
-        people=people,
-    )
+    # A scoped run must NOT emit library-stats: the Library view's sidebar and
+    # footer listen for that event, and handing them one batch's numbers would
+    # shrink the user's whole library on screen.
+    if asked_for_batch:
+        if not scope_known:
+            console.print(
+                "[yellow]No recorded batch to scope to; reporting library totals.[/yellow]"
+            )
+        _emit(
+            "batch-stats",
+            known=scope_known,
+            videos=n_videos,
+            faces=n_faces,
+            clusters=n_clusters,
+            named=n_named,
+            people=people,
+        )
+    else:
+        _emit(
+            "library-stats",
+            videos=n_videos,
+            faces=n_faces,
+            clusters=n_clusters,
+            named=n_named,
+            people=people,
+        )
 
     if detail:
         # Per-person clip list with timestamps. One event per person so

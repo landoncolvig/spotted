@@ -944,6 +944,8 @@ body {
 }
 .done-verify__row.is-ok .done-verify__dot { color: var(--success); }
 .done-verify__row.is-empty .done-verify__dot { color: var(--warning); }
+/* Ran, found nothing to do. A fact about the footage, not a problem. */
+.done-verify__row.is-none .done-verify__dot { color: var(--text-faint); }
 .done-verify__label {
   color: var(--text-dim);
   font-size: 11px;
@@ -956,7 +958,8 @@ body {
   word-break: break-word;
   max-width: 240px;
 }
-.done-verify__row.is-empty .done-verify__value {
+.done-verify__row.is-empty .done-verify__value,
+.done-verify__row.is-none .done-verify__value {
   color: var(--text-faint);
   font-style: italic;
 }
