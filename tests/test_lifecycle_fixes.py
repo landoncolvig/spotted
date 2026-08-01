@@ -596,6 +596,40 @@ def test_half_rate_tmcd_frame_field_maps_to_the_video_timeline(tmp_path, monkeyp
     assert '<asset-clip ref="a1" name="dji" offset="0/60000s" start="4186646464/60000s"' in xml
 
 
+@pytest.mark.parametrize("frames_field", [0, 2, 4, 8, 12, 14, 15, 29])
+def test_every_clip_lands_on_its_own_frame_regardless_of_the_frames_field(
+    monkeypatch, frames_field
+):
+    """Why the tester saw "off 8, 2, 15, 12, 4, and other random numbers".
+
+    Reading a 29.97 tmcd field at the 59.94 video rate cancels out in the
+    hours/minutes/seconds and in the drop-frame correction, so the whole error
+    is the timecode's frames field: each clip was off by its own ``;ff``, a
+    different number in 0..29 every time. One clip lining up proves nothing on
+    its own, so pin the whole range.
+    """
+    from pathlib import Path as P
+
+    def probe(_p, args):
+        query = " ".join(args)
+        if "-select_streams d" in query and "stream=avg_frame_rate" in query:
+            return "30000/1001"
+        if "-select_streams d" in query and "stream_tags=timecode" in query:
+            return f"01:17:36;{frames_field:02d}"
+        return "60000/1001"
+
+    monkeypatch.setattr(_markers, "_ffprobe_field", probe)
+    got = _markers.start_timecode_sec(P("dji.mp4"), 1001, 60000)
+
+    total_min = 1 * 60 + 17
+    dropped = round(30 * 0.066666) * (total_min - total_min // 10)
+    correct = (
+        (((1 * 60 + 17) * 60 + 36) * 30 + frames_field - dropped) / (30000 / 1001)
+    )
+    off_by = (got - correct) * 60000 / 1001
+    assert abs(off_by) < 1e-6, f"{frames_field=} lands {off_by:+.2f} frames out"
+
+
 def test_non_drop_timecode_is_unchanged(monkeypatch):
     from pathlib import Path as P
 
