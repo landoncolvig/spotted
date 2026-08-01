@@ -567,7 +567,7 @@ def write_resolve_script(
         try:
             d.mkdir(parents=True, exist_ok=True)
             out = d / "Spotted Markers.lua"
-            out.write_text(script)
+            _write_fresh(out, script)
             # Retire the Python script Spotted used to write here. Left behind
             # it is dead weight for everyone (Resolve will not list it without a
             # framework Python) and a duplicate menu entry, holding stale
@@ -822,6 +822,30 @@ def _edl_safe(name: str) -> str:
     return name.replace("|", "-").replace("\n", " ").strip()
 
 
+def _write_fresh(out: Path, text: str) -> None:
+    """Write an export so Finder shows it as new.
+
+    Overwriting in place reuses the inode, and macOS keeps the original
+    ``st_birthtime``. Finder's Date Created column and Get Info both then read
+    the date of the FIRST export ever written to that folder, no matter how
+    many times the file has been replaced since. A tester who had already been
+    burned twice by genuinely stale exports checked that date, saw yesterday,
+    and reported a correct run as "the fcpxml didn't update". She was reading
+    the file exactly the way anyone would.
+
+    Removing it first means both dates say what actually happened. Missing
+    files and unlink races are fine; a real permission problem still surfaces
+    on the write below, which callers rely on to detect a failed export.
+    """
+    try:
+        out.unlink()
+    except FileNotFoundError:
+        pass
+    except OSError:
+        pass
+    out.write_text(text)
+
+
 def write_edl(
     video_markers: dict[str, list[tuple[float, str]]], out_dir: Path
 ) -> Path | None:
@@ -835,7 +859,7 @@ def write_edl(
         return None
     out_dir.mkdir(parents=True, exist_ok=True)
     out = out_dir / "Spotted Markers.edl"
-    out.write_text(edl)
+    _write_fresh(out, edl)
     return out
 
 
@@ -935,5 +959,5 @@ def write_fcpxml(
         return None
     out_dir.mkdir(parents=True, exist_ok=True)
     out = out_dir / "Spotted Markers.fcpxml"
-    out.write_text(xml)
+    _write_fresh(out, xml)
     return out

@@ -276,6 +276,30 @@ def test_write_edl_lands_next_to_footage(tmp_path):
 
 
 @pytest.mark.parametrize("writer", [_markers.write_fcpxml, _markers.write_edl])
+def test_replaced_exports_look_new_in_finder(tmp_path, writer):
+    """Overwriting in place reuses the inode and macOS keeps the original
+    birthtime, so Finder's Date Created still shows the first export ever
+    written to that folder. A tester read that date, saw yesterday, and
+    reported a correct run as "the fcpxml didn't update"."""
+    import os
+    import time
+
+    clip = tmp_path / "a.mov"
+    clip.write_bytes(b"")
+    first = writer({str(clip): [(0.5, "Ellie")]}, tmp_path)
+    assert first is not None
+    born_before = os.stat(first).st_birthtime
+    time.sleep(1.1)
+
+    second = writer({str(clip): [(0.5, "Rowan")]}, tmp_path)
+    assert second == first
+    st = os.stat(second)
+    assert st.st_birthtime > born_before, "Date Created still shows the old export"
+    assert abs(st.st_birthtime - st.st_mtime) < 1.0, "Created and Modified disagree"
+    assert "Rowan" in second.read_text()
+
+
+@pytest.mark.parametrize("writer", [_markers.write_fcpxml, _markers.write_edl])
 def test_export_write_failures_are_not_reported_as_empty(
     tmp_path, monkeypatch, writer
 ):
