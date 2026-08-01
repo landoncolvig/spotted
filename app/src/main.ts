@@ -40,6 +40,10 @@ type SpottedEvent =
   // the clip is on the timeline and its markers ride in the EDL, which is how
   // DaVinci reads them anyway. Only in-file embedding is unavailable.
   | { event: "markers-unwritable"; count: number; names: string[] }
+  // Camera raw (.r3d, .braw...). Only the manufacturer's SDK can decode the
+  // picture, so there is no frame to find a face in. Carries its own
+  // explanation because the generic "no videos found" reads as a bug.
+  | { event: "scan-camera-raw"; formats: string[]; message: string }
   | { event: "resolve-timeline"; path: string; clips: number }
   | { event: "resolve-edl"; path: string; clips: number }
   | { event: "resolve-script-error"; message: string }
@@ -292,6 +296,8 @@ let lastResolveEdl: string | null = null;
 let lastMarkersSummary: Extract<SpottedEvent, { event: "markers-summary" }> | null = null;
 // How many clips are in a container that can't hold in-file markers.
 let lastUnwritable = 0;
+// Explanation the sidecar sent for camera-raw footage, preferred over its exit text.
+let lastCameraRaw: string | null = null;
 /** Resolved once at startup; person thumbnails live under it. */
 let homePath: string | null = null;
 /** Set when the user cancels, so the resulting sidecar rejection isn't
@@ -447,6 +453,11 @@ function handleSpottedEvent(evt: SpottedEvent) {
     case "markers-unwritable":
       lastUnwritable = evt.count;
       break;
+    case "scan-camera-raw":
+      // The sidecar exits non-zero right after this, and the raw exit text is
+      // not something to show anyone. Keep the explanation it sent instead.
+      lastCameraRaw = evt.message;
+      break;
     case "resolve-timeline":
       lastResolveTimeline = evt.path;
       break;
@@ -555,6 +566,9 @@ function clearError() {
 
 /** Map common sidecar failure modes to plain-English explanations. */
 function friendlyError(raw: string): string {
+  // Camera raw explains itself. The sidecar sends the reason and the way
+  // through before it exits, and that beats anything derived from exit text.
+  if (lastCameraRaw) return lastCameraRaw;
   const r = raw.toLowerCase();
   if (r.includes("no videos found")) {
     return "That folder doesn't have any videos in it (or none in a format I recognize: .mov, .mp4, .m4v, .mkv, .avi).";
@@ -795,6 +809,7 @@ async function runWrite(excludeTags: string[], allClips = false) {
   lastMarkerError = null;
   lastMarkersSummary = null;
   lastUnwritable = 0;
+  lastCameraRaw = null;
   document.getElementById("done-verify")?.replaceChildren();
   setState("working");
   setProgressIndeterminate();

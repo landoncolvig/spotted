@@ -305,6 +305,23 @@ def scan(
                 videos.append(v)
     if not videos:
         where = paths[0] if len(paths) == 1 else f"the {len(paths)} items you dropped"
+        # Camera raw gets its own answer. A RED or Blackmagic shooter dropping
+        # a folder of originals is not making a mistake, and "no videos found"
+        # tells them nothing about why or what to do instead.
+        raw = _extract.camera_raw_in(paths)
+        if raw:
+            names = ", ".join(raw)
+            message = (
+                f"Spotted found {names} files under {where}, but it can't read them. "
+                "Camera raw can only be decoded by the manufacturer's own software, "
+                "so there is no picture for Spotted to find faces in. Point it at "
+                "your proxies or transcodes instead. Markers land by timecode, "
+                "which proxies share with the originals, so a timeline built from "
+                "proxies still lines up after you relink."
+            )
+            console.print(f"[yellow]{message}[/yellow]")
+            _emit("scan-camera-raw", formats=raw, message=message)
+            raise typer.Exit(1)
         console.print(f"[red]No videos found under {where}[/red]")
         raise typer.Exit(1)
 

@@ -22,9 +22,32 @@ VIDEO_EXTS = {
     ".mpg", ".mpeg", ".mts", ".m2ts", ".mxf", ".ts", ".3gp", ".mqv",
 }
 
+# Camera raw formats whose picture only a vendor SDK can decode. ffmpeg can
+# demux an .r3d but has no REDCODE decoder, so no frame ever comes out, and
+# there is nothing to detect a face in. Listing them here is not support: it
+# is so a folder of them gets an answer that explains itself and names the
+# way through, instead of a bare "no videos found" that reads as a bug.
+CAMERA_RAW_EXTS = {".r3d", ".braw", ".ari", ".arri", ".crm", ".cine"}
+
 
 def is_video(path: Path) -> bool:
     return path.is_file() and path.suffix.lower() in VIDEO_EXTS
+
+
+def camera_raw_in(paths: list[Path]) -> list[str]:
+    """Raw formats found under these paths, as sorted extensions.
+
+    Used to turn "no videos found" into something actionable when someone
+    points Spotted at a folder of RED or Blackmagic originals.
+    """
+    found: set[str] = set()
+    for root in paths:
+        candidates = [root] if root.is_file() else root.rglob("*")
+        for p in candidates:
+            suffix = p.suffix.lower()
+            if suffix in CAMERA_RAW_EXTS:
+                found.add(suffix)
+    return sorted(found)
 
 
 def walk_videos(root: Path) -> list[Path]:
