@@ -690,6 +690,58 @@ def test_a_clip_slot_never_cuts_the_last_frame(tmp_path, monkeypatch):
         assert dur - real < spf, f"{p.name}: slot overruns the media by a frame or more"
 
 
+def test_duration_measures_the_picture_not_the_container(monkeypatch):
+    """Camera audio does not end on a video frame boundary: AAC packets are
+    1024 samples (21.3ms at 48kHz) against 16.7ms for a 59.94 frame, so the
+    container outlives the last frame by a fraction. Reading format=duration
+    and rounding up turned every one of those fractions into a whole frame of
+    nothing, which the tester saw as "most of the clips have an empty frame"."""
+    from pathlib import Path as P
+
+    def probe(_p, args):
+        query = " ".join(args)
+        if "stream=nb_frames" in query:
+            return "768"
+        if "avg_frame_rate" in query:
+            return "60000/1001"
+        if "stream=duration" in query:
+            return "12.812800"
+        if "format=duration" in query:
+            return "12.818005"      # audio tail, 5ms past the last frame
+        return ""
+
+    monkeypatch.setattr(_markers, "_ffprobe_field", probe)
+    dur = _markers._video_duration(P("dji.MP4"), 60000 / 1001)
+    spf = 1001 / 60000
+    assert abs(dur / spf - 768) < 1e-6, f"{dur/spf} frames, expected exactly 768"
+    # and the slot it produces holds no empty frame
+    import math
+    assert math.ceil(dur / spf - _markers._FRAME_EPSILON) == 768
+
+
+def test_duration_falls_back_when_the_frame_count_is_unavailable(monkeypatch):
+    """Some containers report nb_frames as N/A. The stream's own duration is
+    still better than the container's, which includes the audio tail."""
+    from pathlib import Path as P
+
+    def probe(_p, args):
+        query = " ".join(args)
+        if "stream=nb_frames" in query:
+            return "N/A"
+        if "avg_frame_rate" in query:
+            return "0/0"
+        if "r_frame_rate" in query:
+            return "60000/1001"
+        if "stream=duration" in query:
+            return "12.812800"
+        if "format=duration" in query:
+            return "12.818005"
+        return ""
+
+    monkeypatch.setattr(_markers, "_ffprobe_field", probe)
+    assert _markers._video_duration(P("x.MP4"), 60000 / 1001) == 12.8128
+
+
 def test_evenly_divisible_clips_are_not_given_a_phantom_frame(tmp_path, monkeypatch):
     """Rounding up must not hand a frame to a clip that already fits. ffprobe
     reports duration to six decimals, so an exact clip can measure a hair long."""

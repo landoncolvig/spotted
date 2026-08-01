@@ -715,13 +715,51 @@ def start_timecode_sec(video_path: Path, num: int = 1, den: int = 30) -> float:
 
 
 def _video_duration(video_path: Path, fps: float) -> float:
-    """Clip length in seconds, ffprobe first for the same reason as fps."""
-    raw = _ffprobe_field(video_path, ["-show_entries", "format=duration"])
-    try:
-        if raw and float(raw) > 0:
-            return float(raw)
-    except ValueError:
-        pass
+    """How long the PICTURE runs, which is not how long the file runs.
+
+    ``format=duration`` is the container, meaning the longest stream in it.
+    Camera audio almost never ends on a video frame boundary: AAC packets are
+    1024 samples, 21.3ms at 48kHz, against 16.7ms for a 59.94 frame. So the
+    container routinely outlives the last frame by a few milliseconds, a
+    fraction of a frame. Rounding to nearest hid that. Rounding up to protect
+    the last frame turned every one of those fractions into a whole frame of
+    nothing, which a tester saw as "most of the clips have an empty frame".
+
+    Count the video stream's own frames instead. A clip is then exactly as many
+    frames as it has, and only genuine frame-rate mismatches need rounding at
+    all. Falls back through the video stream's duration, then the container,
+    then OpenCV, so a file that will not report a frame count still gets a
+    length.
+    """
+    nb_raw = _ffprobe_field(
+        video_path, ["-select_streams", "v:0", "-show_entries", "stream=nb_frames"]
+    )
+    rate = _ffprobe_rate(
+        _ffprobe_field(
+            video_path,
+            ["-select_streams", "v:0", "-show_entries", "stream=avg_frame_rate"],
+        )
+    ) or _ffprobe_rate(
+        _ffprobe_field(
+            video_path,
+            ["-select_streams", "v:0", "-show_entries", "stream=r_frame_rate"],
+        )
+    )
+    nb = next((ln.strip() for ln in nb_raw.splitlines() if ln.strip()), "")
+    if nb.isdigit() and int(nb) > 0 and rate > 0:
+        return int(nb) / rate
+
+    for args in (
+        ["-select_streams", "v:0", "-show_entries", "stream=duration"],
+        ["-show_entries", "format=duration"],
+    ):
+        raw = _ffprobe_field(video_path, args)
+        raw = next((ln.strip() for ln in raw.splitlines() if ln.strip()), "")
+        try:
+            if raw and float(raw) > 0:
+                return float(raw)
+        except ValueError:
+            pass
     return _video_duration_cv2(video_path, fps)
 
 
