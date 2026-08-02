@@ -690,6 +690,79 @@ def test_a_clip_slot_never_cuts_the_last_frame(tmp_path, monkeypatch):
         assert dur - real < spf, f"{p.name}: slot overruns the media by a frame or more"
 
 
+def test_rotated_portrait_frames_keep_their_shape(monkeypatch):
+    """Phones record portrait as a LANDSCAPE stream plus a 90 degree flag, and
+    ffmpeg applies it on decode. Reporting the raw stream size made iter_frames
+    scale a 1080x1920 frame into a 960x540 box, squashing every face to a third
+    of its width. Detection on phone footage degraded and looked like a model
+    problem rather than a geometry one."""
+    from facetag import extract as _extract
+
+    payload = {
+        "streams": [{
+            "width": 1920, "height": 1080,
+            "side_data_list": [{"side_data_type": "Display Matrix", "rotation": 90}],
+        }],
+        "format": {"duration": "3.0"},
+    }
+    monkeypatch.setattr(_extract.shutil, "which", lambda _c: "/usr/bin/ffprobe")
+    monkeypatch.setattr(
+        _extract.subprocess, "check_output",
+        lambda *_a, **_k: json.dumps(payload).encode(),
+    )
+    assert _extract.probe(Path("IMG_0001.MOV")) == (3.0, 1080, 1920)
+
+    # 180 is not a quarter turn and must not swap.
+    payload["streams"][0]["side_data_list"] = [{"rotation": 180}]
+    assert _extract.probe(Path("x.MOV"))[1:] == (1920, 1080)
+    # Older files carry the angle as a tag instead of side data.
+    payload["streams"][0]["side_data_list"] = []
+    payload["streams"][0]["tags"] = {"rotate": "270"}
+    assert _extract.probe(Path("x.MOV"))[1:] == (1080, 1920)
+
+
+@pytest.mark.parametrize(
+    "sources,expected_fps",
+    [
+        # NTSC rates must be the exact rationals a real file reports
+        # (30000/1001), not the rounded labels, or the fixture itself drifts.
+        ([30.0, 30.0, 60.0], 60.0),                          # phone: 30 into 60
+        ([30000 / 1001, 60000 / 1001, 60000 / 1001], 59.94),  # NTSC pair
+        ([25.0, 50.0], 50.0),                                # PAL pair
+        ([60000 / 1001] * 4, 59.94),                         # single-rate batch
+        ([30.0, 30.0, 60000 / 1001], 30.0),                  # no common grid
+    ],
+)
+def test_timeline_rate_avoids_padding_when_a_common_grid_exists(sources, expected_fps, monkeypatch):
+    """A clip lands on whole timeline frames only when the timeline's rate is a
+    whole multiple of its own. Picking the majority rate left 30fps clips at
+    1.998 frames each in a 59.94 timeline, and the remainder became a frame
+    with no picture in it: "quite a few clips with a dead frame at the end"."""
+    # Through _timeline_layout, not _timeline_rate directly: testing the
+    # helper in isolation still passes if the layout stops calling it.
+    fps_by_path = {}
+    vm = {}
+    for i, f in enumerate(sources):
+        p = f"/b/clip{i:02d}.mov"
+        fps_by_path[p] = f
+        vm[p] = [(0.1, "Ellie")]
+    monkeypatch.setattr(_markers, "get_video_fps", lambda p: fps_by_path[str(p)])
+    monkeypatch.setattr(
+        _markers, "_video_duration",
+        lambda p, _f: round(2.0 * fps_by_path[str(p)]) / fps_by_path[str(p)],
+    )
+    num, den, _entries = _markers._timeline_layout(vm)
+    assert abs(den / num - expected_fps) < 0.01, f"{den/num} != {expected_fps}"
+
+    # And where a common grid exists, nothing needs padding at all.
+    if expected_fps != 30.0 or set(sources) == {30.0}:
+        spf = num / den
+        for f in sources:
+            frames = round(2.0 * f)
+            exact = (frames / f) / spf
+            assert abs(exact - round(exact)) < 1e-6, f"{f}fps lands on {exact} frames"
+
+
 def test_unwritable_containers_are_skipped_not_failed(tmp_path):
     """exiftool can only write into mp4/mov/m4v. A .mkv or .mts clip still
     belongs on the timeline with its markers in the EDL, which is how DaVinci

@@ -57,13 +57,24 @@ def walk_videos(root: Path) -> list[Path]:
 
 
 def probe(video_path: Path) -> tuple[float, int, int]:
-    """Return (duration_sec, width, height). Raises if ffprobe fails."""
+    """Return (duration_sec, width, height) as the frame will actually decode.
+
+    Phones record portrait video as a LANDSCAPE stream plus a 90 degree
+    rotation flag. ffmpeg applies that flag on decode, so the frame that comes
+    out is portrait while `stream=width,height` still reports landscape.
+    Reporting the raw numbers made iter_frames scale a 1080x1920 frame into a
+    960x540 box, squashing every face to a third of its proper width. Face
+    detection on rotated phone footage degraded badly and looked like a model
+    problem rather than a geometry one.
+    """
     if not shutil.which("ffprobe"):
         raise RuntimeError("ffprobe not on PATH; install ffmpeg via brew")
     cmd = [
         "ffprobe", "-v", "error",
         "-select_streams", "v:0",
-        "-show_entries", "stream=width,height:format=duration",
+        "-show_entries",
+        "stream=width,height:stream_side_data=rotation:stream_tags=rotate"
+        ":format=duration",
         "-of", "json",
         str(video_path),
     ]
@@ -71,7 +82,30 @@ def probe(video_path: Path) -> tuple[float, int, int]:
     data = json.loads(out)
     stream = data["streams"][0]
     duration = float(data["format"]["duration"])
-    return duration, int(stream["width"]), int(stream["height"])
+    w, h = int(stream["width"]), int(stream["height"])
+    if _rotation_swaps_axes(stream):
+        w, h = h, w
+    return duration, w, h
+
+
+def _rotation_swaps_axes(stream: dict) -> bool:
+    """Does this stream's rotation flag turn landscape into portrait?
+
+    The angle lives in a Display Matrix side_data on modern files and in a
+    `rotate` tag on older ones, so check both. Only quarter turns swap the
+    axes; 180 leaves them alone.
+    """
+    angles = [sd.get("rotation") for sd in stream.get("side_data_list", [])]
+    angles.append(stream.get("tags", {}).get("rotate"))
+    for angle in angles:
+        if angle is None:
+            continue
+        try:
+            if abs(int(float(angle))) % 180 == 90:
+                return True
+        except (TypeError, ValueError):
+            continue
+    return False
 
 
 def _noop_marker():  # pragma: no cover - placeholder so the attr always exists

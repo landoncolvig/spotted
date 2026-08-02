@@ -622,6 +622,34 @@ def _frame_duration(fps: float) -> tuple[int, int]:
     return best[1], best[2]
 
 
+def _timeline_rate(rates: collections.Counter) -> tuple[int, int]:
+    """One frame rate for a timeline holding clips shot at several.
+
+    A clip lands on whole timeline frames only when the timeline's rate is a
+    whole multiple of the clip's. 30fps footage in a 60fps timeline is exactly
+    two frames per frame; in a 30fps timeline a 59.94 clip is 1.998, and the
+    leftover gets padded into a frame with no picture in it. A tester mixing
+    phone footage saw that as "quite a few clips with a dead frame at the end".
+
+    So prefer a rate every other rate divides into evenly, fastest first. That
+    covers the mixes people actually shoot: 30 with 60, 25 with 50, 29.97 with
+    59.94. When no such rate exists (30.00 alongside 59.94 has none), fall back
+    to the majority, which at least leaves the padding on the fewest clips.
+    """
+    def fps_of(fd: tuple[int, int]) -> float:
+        return fd[1] / fd[0]
+
+    for candidate in sorted(rates, key=fps_of, reverse=True):
+        target = fps_of(candidate)
+        if all(
+            abs(target / fps_of(fd) - round(target / fps_of(fd))) < 1e-6
+            and round(target / fps_of(fd)) >= 1
+            for fd in rates
+        ):
+            return candidate
+    return rates.most_common(1)[0][0]
+
+
 def _fcp_time(seconds: float, num: int, den: int) -> str:
     """Seconds as an FCPXML rational snapped to the frame grid.
 
@@ -725,34 +753,15 @@ def get_video_size(video_path: Path) -> tuple[int, int]:
     when that flag is set or the fix reads backwards on exactly the footage
     that needs it. Falls back to 1920x1080 when the file will not say.
     """
-    def _int_field(entry: str) -> int:
-        # _ffprobe_field prints values with no key (nk=1), so ask for one at a
-        # time; a combined width,height query comes back as two bare numbers
-        # with nothing to say which is which.
-        raw = _ffprobe_field(
-            video_path, ["-select_streams", "v:0", "-show_entries", entry]
-        )
-        for line in raw.splitlines():
-            line = line.strip().lstrip("-")
-            if line.isdigit():
-                return int(line)
-        return 0
+    # One implementation of the rotation rule, in extract, so a fix to it
+    # reaches both the frames we detect faces in and the timeline we declare.
+    from . import extract as _extract
 
-    w, h = _int_field("stream=width"), _int_field("stream=height")
-    if w <= 0 or h <= 0:
+    try:
+        _dur, w, h = _extract.probe(video_path)
+    except Exception:  # noqa: BLE001 - a clip that will not probe still needs a size
         return 1920, 1080
-
-    for entry in ("stream_side_data=rotation", "stream_tags=rotate"):
-        raw = _ffprobe_field(
-            video_path, ["-select_streams", "v:0", "-show_entries", entry]
-        )
-        for line in raw.splitlines():
-            try:
-                if abs(int(float(line.strip()))) % 180 == 90:
-                    return h, w
-            except ValueError:
-                continue
-    return w, h
+    return (w, h) if w > 0 and h > 0 else (1920, 1080)
 
 
 def _video_duration(video_path: Path, fps: float) -> float:
@@ -849,7 +858,7 @@ def _timeline_layout(
     rates = collections.Counter(
         _frame_duration(get_video_fps(Path(p))) for p, _e in clips
     )
-    num, den = rates.most_common(1)[0][0]
+    num, den = _timeline_rate(rates)
     spf = num / den                      # seconds per frame on the timeline
     entries: list[tuple[Path, float, float, list[tuple[float, str]]]] = []
     frame_cursor = 0                     # integer frames, never floats
