@@ -62,7 +62,14 @@ jobs:
         run: |
           python3 -m venv .venv
           .venv/bin/pip install --upgrade pip
-          .venv/bin/pip install -e . pyinstaller
+          .venv/bin/pip install -e ".[dev]" pyinstaller
+
+      # The test workflow only runs on branch pushes. A release is triggered by
+      # a TAG push, which never fired it, so the suite was not standing between
+      # a regression and everyone's auto-update. Run it here, before anything
+      # is built or published, and fail the release if it is red.
+      - name: Run the test suite (release gate)
+        run: .venv/bin/pytest tests/ -q
 
       - name: Build sidecar binary
         run: |

@@ -1473,5 +1473,68 @@ def test_health_answers_without_touching_the_database(tmp_path):
     assert b"ok" in ok.data
 
     # Still guarded: readiness must not become an unauthenticated endpoint.
-    assert client.get("/health").status_code == 403
-    assert client.get("/health?k=wrong").status_code == 403
+    # Use FRESH clients. The one above authenticated with the token and now
+    # holds the session cookie, which is correct — a browser that has been let
+    # in stays in. The guarantee is about callers who were never let in.
+    assert app.test_client().get("/health").status_code == 403
+    assert app.test_client().get("/health?k=wrong").status_code == 403
+
+
+def test_every_subresource_the_labeler_page_references_is_reachable(tmp_path):
+    """A tester reached the naming step and every face was a broken image.
+
+    The page is opened with the token in its URL, but the face crops inside it
+    are plain <img src="/thumb/N.jpg"> with no query string, so the guard
+    rejected every one of them. The page looked fine; its contents did not.
+
+    Fetch the page the way the app does, then fetch everything it references
+    the way a browser would, from the same cookie jar. Nothing it points at
+    may come back as forbidden.
+    """
+    import re
+
+    from facetag import web as _web
+
+    db_path = tmp_path / "index.db"
+    conn = _db.connect(db_path)
+    clip = tmp_path / "a.mov"
+    clip.write_bytes(b"")
+    vid = _db.add_video(conn, str(clip), 2.0)
+    for i in range(4):
+        conn.execute(
+            "INSERT INTO faces(video_id,timestamp_sec,embedding,cluster_id) "
+            "VALUES(?,?,X'00',7)", (vid, float(i)),
+        )
+    conn.commit()
+    conn.close()
+
+    thumbs = tmp_path / "thumbs"
+    thumbs.mkdir()
+    # Pre-seed the cached crop so the route serves bytes instead of trying to
+    # decode a fixture video. This test is about reachability, not cropping.
+    jpeg = bytes.fromhex("ffd8ffdb0043000806") + b"\x00" * 32 + bytes.fromhex("ffd9")
+    (thumbs / "cluster_0007.jpg").write_bytes(jpeg)
+
+    app = _web.create_app(db_path, thumbs)
+    _web._install_guard(app, "tok")
+    client = app.test_client()
+
+    page = client.get("/?k=tok&view=all")
+    assert page.status_code == 200
+    html = page.get_data(as_text=True)
+
+    refs = set(re.findall(r'<(?:img|script)[^>]+src="([^"]+)"', html))
+    refs |= set(re.findall(r'<link[^>]+href="([^"]+)"', html))
+    refs = {r for r in refs if r.startswith("/")}
+    assert refs, "page referenced no sub-resources; the check would be vacuous"
+
+    for ref in sorted(refs):
+        got = client.get(ref)
+        assert got.status_code != 403, (
+            f"{ref} is forbidden to the very page that references it; "
+            "the labeler will render this as a broken image"
+        )
+        assert got.status_code == 200, f"{ref} -> {got.status_code}"
+
+    # And the guard must still hold for anyone without the token.
+    assert app.test_client().get("/thumb/7.jpg").status_code == 403

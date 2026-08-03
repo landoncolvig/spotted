@@ -46,7 +46,7 @@ def _install_guard(app, token: str) -> None:
     read or modify all of it. The token is generated per launch and handed to
     the app; nothing else can guess it.
     """
-    from flask import request, abort
+    from flask import request, abort, g
 
     @app.before_request
     def _guard():  # noqa: ANN202 - flask hook
@@ -55,13 +55,37 @@ def _install_guard(app, token: str) -> None:
             abort(403)
         # Cross-site requests never carry the token, so this also closes CSRF
         # on the POST routes.
+        from_query = request.args.get("k")
         supplied = (
-            request.args.get("k")
+            from_query
             or request.headers.get("X-Spotted-Token")
             or (request.cookies.get("spotted_token") or "")
         )
         if not token or supplied != token:
             abort(403)
+        g.token_from_query = bool(from_query)
+
+    @app.after_request
+    def _issue_cookie(response):  # noqa: ANN202 - flask hook
+        """Hand the browser the token so its sub-requests carry it.
+
+        Only the page the app opens has the token in its URL. The face crops
+        inside it are plain <img src="/thumb/N.jpg"> with no query string, so
+        every one of them was rejected and the whole grid rendered as broken
+        image icons: a tester reached the naming step and could not see a
+        single face. Same for the save POSTs.
+
+        Setting it once on the authorised page load fixes every sub-request
+        without putting the token in dozens of URLs. Host-only on loopback,
+        HttpOnly so page scripts cannot read it, SameSite=Strict so it is
+        never sent cross-site, which is what the guard exists to stop.
+        """
+        if getattr(g, "token_from_query", False):
+            response.set_cookie(
+                "spotted_token", token,
+                httponly=True, samesite="Strict", secure=False, path="/",
+            )
+        return response
 
 
 def create_app(
