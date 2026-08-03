@@ -1450,3 +1450,28 @@ def test_every_pipeline_step_survives_a_multi_file_batch(tmp_path):
     roots = _cli._resolve_scope(None, conn)
     assert len(roots) == 2
     assert not _cli._under_scope(left_out, roots), "the third clip was never handed over"
+
+
+# --- labeler readiness (the "failed to start" that wasn't) -------------------
+def test_health_answers_without_touching_the_database(tmp_path):
+    """The app polls the labeler to know when it is up. It used to poll `/`,
+    which summarises every cluster and renders a card per person; past ~200
+    clips that outran the poll's per-request timeout, so a user whose labeler
+    was serving perfectly well was told it had failed to start.
+
+    /health must therefore answer without reading the database at all: point
+    it at a path that is not even a database and it still has to return ok.
+    """
+    from facetag import web as _web
+
+    app = _web.create_app(tmp_path / "does-not-exist.db", tmp_path / "thumbs")
+    _web._install_guard(app, "tok")
+    client = app.test_client()
+
+    ok = client.get("/health?k=tok")
+    assert ok.status_code == 200, ok.data
+    assert b"ok" in ok.data
+
+    # Still guarded: readiness must not become an unauthenticated endpoint.
+    assert client.get("/health").status_code == 403
+    assert client.get("/health?k=wrong").status_code == 403

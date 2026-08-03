@@ -619,16 +619,25 @@ async fn start_label_server(
     // Poll until Flask actually responds on the port. Flask's cold start
     // inside the PyInstaller-extracted environment can take 2-5 seconds
     // on a slower Mac, so the old 900ms fixed sleep wasn't enough.
+    //
+    // Ask /health, not /. The index route summarises every cluster in the
+    // library and renders a card per person; past ~200 clips that took longer
+    // than the per-request timeout, every probe failed, and a user whose
+    // labeler was running fine was told it had failed to start. /health does
+    // no database work, so this measures the server, not the library.
     let url = format!("http://127.0.0.1:{port}/?k={token}");
-    let timeout = Duration::from_secs(20);
+    let health_url = format!("http://127.0.0.1:{port}/health?k={token}");
+    let timeout = Duration::from_secs(60);
     let start = std::time::Instant::now();
     let client = reqwest::Client::builder()
-        .timeout(Duration::from_millis(500))
+        // Generous per request: this bounds one probe, and a probe that is
+        // merely slow must not be read as a server that is down.
+        .timeout(Duration::from_secs(5))
         .build()
         .map_err(|e| format!("http client: {e}"))?;
 
     while start.elapsed() < timeout {
-        match client.get(&url).send().await {
+        match client.get(&health_url).send().await {
             Ok(resp) if resp.status().is_success() => {
                 return Ok(url);
             }

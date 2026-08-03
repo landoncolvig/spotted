@@ -93,6 +93,20 @@ def create_app(
             return base + ("/" if os.path.isdir(sp[0]) else "")
         return f"{len(sp)} paths"
 
+    @app.route("/health")
+    def health() -> str:
+        """Cheap liveness check for the app's startup poll.
+
+        The index route runs a cluster summary over the whole library and
+        renders a card per person. On a 200-clip library that takes longer
+        than the poll's per-request timeout, so the app concluded the server
+        had failed and showed "Labeling server failed to start" while Flask
+        sat there serving perfectly well. Answer readiness without touching
+        the database, so the check measures the server being up rather than
+        the size of someone's library.
+        """
+        return "ok"
+
     @app.route("/")
     def index() -> str:
         # Two orthogonal filters drive what cards render:
