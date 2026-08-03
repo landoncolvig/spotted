@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import base64
+import collections
 import json
 import subprocess
 import sys
@@ -1268,10 +1269,29 @@ def markers_write(
     # footage they handed in. A clip the index remembers but which has since
     # moved or been deleted is left out on purpose: Resolve renders those as
     # Media Offline, which is what made an earlier build look broken.
-    in_scope_paths = sorted(
+    # One entry per FILE, not per indexed path. `videos.path` is unique as a
+    # string, but two strings can name one file: macOS volumes are usually
+    # case-insensitive, so IMG_0001.MOV and IMG_0001.mov are the same clip with
+    # two rows, and a symlinked or re-mounted root can do the same. Both rows
+    # pass the exists() check and the clip lands on the timeline twice, side by
+    # side, because sorting puts the spellings next to each other. Identity is
+    # the (device, inode) pair, which is what "the same file" actually means.
+    _seen_files: set[tuple[int, int]] = set()
+    in_scope_paths = []
+    for p in sorted(
         p for (p,) in conn.execute("SELECT path FROM videos").fetchall()
         if _under_scope(p, root) and Path(p).exists()
-    )
+    ):
+        try:
+            st = Path(p).stat()
+            key = (st.st_dev, st.st_ino)
+        except OSError:
+            key = (-1, hash(p))  # unstattable: keep it rather than silently drop
+        if key in _seen_files:
+            _emit("timeline-duplicate-skipped", path=p)
+            continue
+        _seen_files.add(key)
+        in_scope_paths.append(p)
 
     # A batch where nothing earned a marker still gets its timeline. Bailing
     # here is what sent a tester a Done screen with four empty rows and no
@@ -1375,6 +1395,20 @@ def markers_write(
     )
     offline = scanned - len(in_scope_paths)
     unmarked = len(in_scope_paths) - len(video_markers)
+    # What the batch was actually shot at, and what the timeline settled on.
+    # A dead frame at the end of a clip always traces back to a rate that does
+    # not divide into the timeline's, and answering "which clips and why" used
+    # to mean asking the user to go read frame rates off her own footage.
+    rate_mix: dict[str, int] = {}
+    timeline_fps = None
+    if in_scope_paths:
+        counts = collections.Counter(
+            _markers._frame_duration(_markers.get_video_fps(Path(p)))
+            for p in in_scope_paths
+        )
+        rate_mix = {f"{den / num:g}": n for (num, den), n in counts.items()}
+        t_num, t_den = _markers._timeline_rate(counts)
+        timeline_fps = round(t_den / t_num, 3)
     _emit(
         "markers-summary",
         scanned=scanned,
@@ -1382,7 +1416,12 @@ def markers_write(
         marked_clips=len(video_markers),
         skipped_missing=offline,
         skipped_no_markers=unmarked,
+        timeline_fps=timeline_fps,
+        source_rates=rate_mix,
     )
+    if len(rate_mix) > 1:
+        mix = ", ".join(f"{n}x {fps}fps" for fps, n in sorted(rate_mix.items()))
+        console.print(f"[dim]Mixed frame rates ({mix}); timeline at {timeline_fps}fps.[/dim]")
     console.print(
         f"Timeline: [bold]{len(in_scope_paths)}[/bold] of {scanned} scanned clip(s), "
         f"[bold]{len(video_markers)}[/bold] carrying markers."

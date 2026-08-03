@@ -35,7 +35,7 @@ type SpottedEvent =
   | { event: "markers-verified"; file: string; event_count: number; in_file_present: boolean; sidecar_present: boolean; failed?: number; written?: number }
   | { event: "markers-verify-error"; message: string }
   | { event: "resolve-script"; path: string; clips: number }
-  | { event: "markers-summary"; scanned: number; timeline_clips: number; marked_clips: number; skipped_missing: number; skipped_no_markers: number }
+  | { event: "markers-summary"; scanned: number; timeline_clips: number; marked_clips: number; skipped_missing: number; skipped_no_markers: number; timeline_fps?: number | null; source_rates?: Record<string, number> }
   // Containers exiftool can't write into (.mkv, .mts, .avi...). Not a failure:
   // the clip is on the timeline and its markers ride in the EDL, which is how
   // DaVinci reads them anyway. Only in-file embedding is unavailable.
@@ -998,6 +998,13 @@ function renderVerification() {
     coverageCells.push(`${ms.marked_clips} carrying markers`);
     if (ms.skipped_missing > 0) {
       coverageCells.push(`${ms.skipped_missing} no longer on disk`);
+    }
+    // A batch shot at more than one frame rate is worth naming. It is the
+    // only thing that can leave a clip padded, and saying so here beats
+    // asking someone to go read frame rates off their own footage.
+    const rates = Object.keys(ms.source_rates ?? {});
+    if (rates.length > 1 && ms.timeline_fps) {
+      coverageCells.push(`${rates.length} frame rates, timeline at ${ms.timeline_fps}fps`);
     }
   }
 

@@ -731,6 +731,12 @@ def test_rotated_portrait_frames_keep_their_shape(monkeypatch):
         ([25.0, 50.0], 50.0),                                # PAL pair
         ([60000 / 1001] * 4, 59.94),                         # single-rate batch
         ([30.0, 30.0, 60000 / 1001], 30.0),                  # no common grid
+        # A mix can share a grid that none of its own rates provide. 24, 30 and
+        # 60 have nothing in common with each other but all divide into 120,
+        # which is what a real phone batch turned out to be.
+        ([24.0, 24.0, 24.0, 30.0, 60.0], 120.0),
+        ([24.0, 24.0, 30.0], 120.0),
+        ([24000 / 1001, 30000 / 1001, 60000 / 1001], 119.88),  # NTSC equivalent
     ],
 )
 def test_timeline_rate_avoids_padding_when_a_common_grid_exists(sources, expected_fps, monkeypatch):

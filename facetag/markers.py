@@ -15,6 +15,7 @@ shipping needs human verification in the actual editor.
 from __future__ import annotations
 
 import collections
+import functools
 import json
 import math
 import shutil
@@ -67,7 +68,18 @@ def _ffprobe_rate(raw: str) -> float:
     return 0.0
 
 
+@functools.lru_cache(maxsize=4096)
+def _fps_cached(path_str: str) -> float:
+    return _get_video_fps_uncached(Path(path_str))
+
+
 def get_video_fps(video_path: Path) -> float:
+    """Frame rate, memoised. Every clip's rate is asked for more than once per
+    run (layout, then reporting), and each miss is a subprocess."""
+    return _fps_cached(str(video_path))
+
+
+def _get_video_fps_uncached(video_path: Path) -> float:
     """Frame rate from the file. ffprobe first: OpenCV silently reports a wrong
     rate (or none) for 10-bit HEVC and HDR footage, and a wrong rate corrupts
     the timecode conversion below. Falls back to 29.97 if undetectable."""
@@ -613,6 +625,11 @@ _FRAME_DURATIONS: list[tuple[float, int, int]] = [
     (50.0, 1, 50),
     (59.94, 1001, 60000),
     (60.0, 1, 60),
+    # Phones and action cameras shoot these, and they are also the only rates
+    # a mixed 24/30/60 batch can share a frame grid on. Without them such a
+    # clip was snapped to the nearest listed rate, which was simply wrong.
+    (119.88, 1001, 120000),
+    (120.0, 1, 120),
 ]
 
 
@@ -639,14 +656,28 @@ def _timeline_rate(rates: collections.Counter) -> tuple[int, int]:
     def fps_of(fd: tuple[int, int]) -> float:
         return fd[1] / fd[0]
 
-    for candidate in sorted(rates, key=fps_of, reverse=True):
-        target = fps_of(candidate)
-        if all(
+    def divides_everything(target: float) -> bool:
+        return all(
             abs(target / fps_of(fd) - round(target / fps_of(fd))) < 1e-6
             and round(target / fps_of(fd)) >= 1
             for fd in rates
-        ):
+        )
+
+    # First choice: a rate the batch already contains. 30 with 60 becomes 60,
+    # and nothing is resampled that did not have to be.
+    for candidate in sorted(rates, key=fps_of, reverse=True):
+        if divides_everything(fps_of(candidate)):
             return candidate
+
+    # Otherwise a rate outside the batch may still fit all of them. A mix of
+    # 24, 30 and 60 shares no grid among itself, but all three divide into 120.
+    # Smallest first, so the timeline is no faster than it has to be.
+    for fps, num, den in sorted(_FRAME_DURATIONS, key=lambda f: f[0]):
+        if divides_everything(den / num):
+            return num, den
+
+    # Genuinely incompatible families (24 alongside 29.97) have no common grid
+    # at any sane rate. Majority at least leaves the padding on the fewest clips.
     return rates.most_common(1)[0][0]
 
 
@@ -1004,6 +1035,17 @@ def fcpxml_for_markers(video_markers: dict[str, list[tuple[float, str]]]) -> str
     sizes = collections.Counter(get_video_size(p) for p, _o, _d, _e in entries)
     (seq_w, seq_h), _n = sizes.most_common(1)[0]
 
+    # Phones restart their numbering, so IMG_0001.MOV from two shoots is two
+    # different clips with one name. On the timeline they read as the same clip
+    # placed twice. Where a stem repeats, qualify it with its folder so the two
+    # are tellable apart; unique names are left exactly as they were.
+    stem_counts = collections.Counter(p.stem for p, _o, _d, _e in entries)
+    def display_name(path: Path) -> str:
+        if stem_counts[path.stem] == 1:
+            return path.stem
+        parent = path.parent.name
+        return f"{parent}/{path.stem}" if parent else path.stem
+
     resources: list[str] = [
         f'    <format id="r0" name="FFVideoFormat" frameDuration="{num}/{den}s" '
         f'width="{seq_w}" height="{seq_h}" colorSpace="1-1-1 (Rec. 709)"/>'
@@ -1013,7 +1055,7 @@ def fcpxml_for_markers(video_markers: dict[str, list[tuple[float, str]]]) -> str
     for i, (p, offset, dur, events) in enumerate(entries, start=1):
         tc = start_timecode_sec(p, num, den)
         asset_id = f"a{i}"
-        name = _xml_escape(p.stem)
+        name = _xml_escape(display_name(p))
         resources.append(
             f'    <asset id="{asset_id}" name="{name}" '
             f'start="{_fcp_time(tc, num, den)}" duration="{_fcp_time(dur, num, den)}" '
