@@ -55,8 +55,12 @@ jobs:
           path: ~/.insightface
           key: insightface-buffalo_l-v1
 
-      - name: Install exiftool
-        run: brew install exiftool
+      # ffmpeg is here for the test gate below, not for the build: several
+      # tests probe and decode real fixture media. The test workflow has always
+      # installed both; this one only needed exiftool until the gate moved in,
+      # so the gate failed on a missing tool rather than on a real defect.
+      - name: Install ffmpeg + exiftool
+        run: brew install ffmpeg exiftool
 
       - name: Install Python deps
         run: |
