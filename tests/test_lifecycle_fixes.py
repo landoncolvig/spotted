@@ -1480,16 +1480,18 @@ def test_health_answers_without_touching_the_database(tmp_path):
     assert app.test_client().get("/health?k=wrong").status_code == 403
 
 
-def test_every_subresource_the_labeler_page_references_is_reachable(tmp_path):
+def test_page_requests_carry_the_token_without_relying_on_cookies(tmp_path):
     """A tester reached the naming step and every face was a broken image.
 
-    The page is opened with the token in its URL, but the face crops inside it
-    are plain <img src="/thumb/N.jpg"> with no query string, so the guard
-    rejected every one of them. The page looked fine; its contents did not.
+    The app loads this page in an IFRAME whose parent document is
+    tauri://localhost, so 127.0.0.1 is cross-site. No cookie is sent with the
+    iframe's sub-requests however it is scoped, which is why a cookie-based fix
+    looked correct in a shared-jar test and would have shipped fixing nothing.
+    The token has to be ON the requests the page emits: in the query string for
+    <img>, which cannot set headers, and in a header for fetch.
 
-    Fetch the page the way the app does, then fetch everything it references
-    the way a browser would, from the same cookie jar. Nothing it points at
-    may come back as forbidden.
+    Every client below is therefore COOKIE-LESS. A test that passes only
+    because one request's cookie carried into the next is not testing this.
     """
     import re
 
@@ -1510,31 +1512,121 @@ def test_every_subresource_the_labeler_page_references_is_reachable(tmp_path):
 
     thumbs = tmp_path / "thumbs"
     thumbs.mkdir()
-    # Pre-seed the cached crop so the route serves bytes instead of trying to
-    # decode a fixture video. This test is about reachability, not cropping.
     jpeg = bytes.fromhex("ffd8ffdb0043000806") + b"\x00" * 32 + bytes.fromhex("ffd9")
     (thumbs / "cluster_0007.jpg").write_bytes(jpeg)
 
     app = _web.create_app(db_path, thumbs)
     _web._install_guard(app, "tok")
-    client = app.test_client()
 
-    page = client.get("/?k=tok&view=all")
-    assert page.status_code == 200
-    html = page.get_data(as_text=True)
+    html_text = app.test_client().get("/?k=tok&view=all").get_data(as_text=True)
 
-    refs = set(re.findall(r'<(?:img|script)[^>]+src="([^"]+)"', html))
-    refs |= set(re.findall(r'<link[^>]+href="([^"]+)"', html))
-    refs = {r for r in refs if r.startswith("/")}
-    assert refs, "page referenced no sub-resources; the check would be vacuous"
-
-    for ref in sorted(refs):
-        got = client.get(ref)
-        assert got.status_code != 403, (
-            f"{ref} is forbidden to the very page that references it; "
-            "the labeler will render this as a broken image"
+    srcs = [s for s in re.findall(r'<img[^>]+src="([^"]+)"', html_text)
+            if s.startswith("/")]
+    assert srcs, "page emitted no image sources; the check would be vacuous"
+    for src in srcs:
+        fresh = app.test_client()      # no cookie jar, like a cross-site frame
+        got = fresh.get(src.replace("&amp;", "&"))
+        assert got.status_code == 200, (
+            f"{src} -> {got.status_code} for a cookie-less client; "
+            "the labeler renders this as a broken image"
         )
-        assert got.status_code == 200, f"{ref} -> {got.status_code}"
 
-    # And the guard must still hold for anyone without the token.
+    # The page's own fetch() must carry the token as a header, or every name
+    # someone types is lost to a silent 403.
+    assert "X-Spotted-Token" in html_text, "page never sets the token header"
+    posted = app.test_client().post(
+        "/save-one", json={"cluster_id": 7, "name": "Ellie"},
+        headers={"X-Spotted-Token": "tok"},
+    )
+    assert posted.status_code == 200, posted.data
+
+    # And the guard still refuses anyone presenting nothing.
     assert app.test_client().get("/thumb/7.jpg").status_code == 403
+    assert app.test_client().post(
+        "/save-one", json={"cluster_id": 7, "name": "x"}
+    ).status_code == 403
+
+
+def test_dedupe_keeps_the_markers_of_the_spelling_it_drops(tmp_path):
+    """Two index rows can name one file (case-insensitive volume, hard link).
+    The timeline keeps one, but the markers may have been recorded against the
+    other. Dropping that row silently discarded them: the run still reported
+    the clip as carrying markers while the FCPXML had none and no EDL was
+    written at all, and the EDL is the only thing DaVinci reads markers from.
+    """
+    import os
+
+    db_path = tmp_path / "index.db"
+    first = tmp_path / "AAA_first.mov"
+    first.write_bytes(b"")
+    second = tmp_path / "ZZZ_second.mov"
+    os.link(first, second)          # same inode; sorts last, so it is dropped
+
+    conn = _db.connect(db_path)
+    for p in (first, second):
+        vid = _db.add_video(conn, str(p), 2.0)
+        _db.mark_scan_complete(conn, vid)
+        if p is second:             # the DROPPED spelling owns the markers
+            _db.set_energy(conn, vid, 0.9, "high", [1.0])
+    _db.set_setting(conn, "last_scan_roots", json.dumps([str(tmp_path)]))
+    conn.commit()
+    conn.close()
+
+    res = CliRunner().invoke(
+        _cli.app, ["markers-write", "--db", str(db_path), "--no-sidecar"]
+    )
+    assert res.exit_code == 0, res.output
+    events = [
+        json.loads(l[len("__SPOTTED__ "):])
+        for l in res.output.splitlines() if l.startswith("__SPOTTED__ ")
+    ]
+    summary = next(e for e in events if e["event"] == "markers-summary")
+
+    assert summary["timeline_clips"] == 1, "the duplicate should not be on the timeline"
+    # A duplicate is not missing footage.
+    assert summary["skipped_missing"] == 0, summary
+    # The markers survived the drop.
+    assert summary["marked_clips"] == 1
+    assert (tmp_path / "Spotted Markers.edl").exists(), (
+        "no EDL: the markers were lost with the dropped spelling"
+    )
+    assert "<marker " in (tmp_path / "Spotted Markers.fcpxml").read_text()
+
+
+def test_a_filesystem_reporting_zero_inodes_does_not_collapse_the_batch(tmp_path, monkeypatch):
+    """Some SMB and FUSE mounts report st_ino == 0 for every file. Keyed on
+    that, every clip looks like the same clip and the whole batch collapses to
+    one, which is the "timeline holding 1 of her 170 clips" failure again."""
+    db_path = tmp_path / "index.db"
+    conn = _db.connect(db_path)
+    for name in ("a.mov", "b.mov", "c.mov"):
+        f = tmp_path / name
+        f.write_bytes(b"")
+        vid = _db.add_video(conn, str(f), 2.0)
+        _db.mark_scan_complete(conn, vid)
+        _db.set_energy(conn, vid, 0.9, "high", [0.5])
+    _db.set_setting(conn, "last_scan_roots", json.dumps([str(tmp_path)]))
+    conn.commit()
+    conn.close()
+
+    real_stat = Path.stat
+
+    class _ZeroIno:
+        def __init__(self, st): self._st = st
+        def __getattr__(self, n): return getattr(self._st, n)
+        st_ino = 0
+
+    monkeypatch.setattr(Path, "stat", lambda self, *a, **k: _ZeroIno(real_stat(self, *a, **k)))
+
+    res = CliRunner().invoke(
+        _cli.app, ["markers-write", "--db", str(db_path), "--no-sidecar"]
+    )
+    assert res.exit_code == 0, res.output
+    summary = next(
+        json.loads(l[len("__SPOTTED__ "):])
+        for l in res.output.splitlines()
+        if l.startswith("__SPOTTED__ ") and "markers-summary" in l
+    )
+    assert summary["timeline_clips"] == 3, (
+        f"a zero-inode filesystem collapsed the batch to {summary['timeline_clips']}"
+    )

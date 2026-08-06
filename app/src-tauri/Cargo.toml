@@ -1,6 +1,6 @@
 [package]
 name = "spotted"
-version = "0.0.93"
+version = "0.0.94"
 description = "Spot people in your video footage."
 authors = ["Landon Colvig <colviglandon@gmail.com>"]
 edition = "2021"

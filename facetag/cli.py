@@ -1276,21 +1276,41 @@ def markers_write(
     # pass the exists() check and the clip lands on the timeline twice, side by
     # side, because sorting puts the spellings next to each other. Identity is
     # the (device, inode) pair, which is what "the same file" actually means.
-    _seen_files: set[tuple[int, int]] = set()
+    _seen_files: dict[tuple[int, int], str] = {}
+    dupe_of: dict[str, str] = {}   # dropped spelling -> the one kept
     in_scope_paths = []
+    deduped = 0
     for p in sorted(
         p for (p,) in conn.execute("SELECT path FROM videos").fetchall()
         if _under_scope(p, root) and Path(p).exists()
     ):
+        key: tuple[int, int] | None = None
         try:
             st = Path(p).stat()
-            key = (st.st_dev, st.st_ino)
+            # Some network and FUSE mounts report st_ino 0 for every file. Keyed
+            # on that, a whole batch collapses to a single clip, which is the
+            # "timeline holding 1 of her 170 clips" failure in another costume.
+            # No inode means no identity: fall back to the path.
+            if st.st_ino:
+                key = (st.st_dev, st.st_ino)
         except OSError:
-            key = (-1, hash(p))  # unstattable: keep it rather than silently drop
-        if key in _seen_files:
-            _emit("timeline-duplicate-skipped", path=p)
+            key = None
+        if key is None:
+            in_scope_paths.append(p)
             continue
-        _seen_files.add(key)
+        first = _seen_files.get(key)
+        if first is not None:
+            # Same file under another spelling. Its markers get recorded under
+            # THIS path further down, while the export looks them up by the
+            # surviving one, so simply dropping the row throws the markers away:
+            # the run still reports "1 carrying markers" while the FCPXML has
+            # none and no EDL is written at all. Remember the pairing and merge
+            # once the markers exist.
+            dupe_of[p] = first
+            deduped += 1
+            _emit("timeline-duplicate-skipped", path=p, kept=first)
+            continue
+        _seen_files[key] = p
         in_scope_paths.append(p)
 
     # A batch where nothing earned a marker still gets its timeline. Bailing
@@ -1385,6 +1405,16 @@ def markers_write(
                 _emit("markers-sidecar-error", name=short, message=str(e))
             prog.update(task, advance=1)
 
+    # Markers recorded against a spelling that lost the dedupe belong to the
+    # file that kept it. Without this the export looks them up under a key that
+    # is no longer on the timeline and finds nothing, so the FCPXML comes out
+    # marker-less and no EDL is written, while the run still reports the clip
+    # as carrying markers.
+    for dropped, kept in dupe_of.items():
+        moved = video_markers.pop(dropped, None)
+        if moved:
+            video_markers[kept] = sorted(set(video_markers.get(kept, [])) | set(moved))
+
     # Account for every clip that did not reach the timeline. A tester got a
     # timeline holding 1 of her 170 clips and had no way to tell whether
     # Spotted had built it wrong or DaVinci had dropped the rest; answering
@@ -1393,7 +1423,9 @@ def markers_write(
         1 for (p,) in conn.execute("SELECT path FROM videos").fetchall()
         if _under_scope(p, root)
     )
-    offline = scanned - len(in_scope_paths)
+    # Duplicates are not missing footage. Counting them as offline reported
+    # "1 no longer on disk" for a file sitting right there.
+    offline = scanned - len(in_scope_paths) - deduped
     unmarked = len(in_scope_paths) - len(video_markers)
     # What the batch was actually shot at, and what the timeline settled on.
     # A dead frame at the end of a clip always traces back to a rate that does

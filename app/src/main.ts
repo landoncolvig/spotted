@@ -514,6 +514,11 @@ async function ensureSidecarListener() {
 async function runBatch(paths: string[], tags: string[] = []) {
   currentPaths = paths;
   currentPath = paths.length === 1 ? paths[0] : null;
+  // Clear the camera-raw explanation from any previous drop. friendlyError
+  // prefers it over the real error, so one folder of .r3d originals used to
+  // make every later failure in the session — empty folder, busy port,
+  // permissions — report itself as a RED problem.
+  lastCameraRaw = null;
   setState("working");
   workingPath.textContent = describeBatch(paths);
   setProgressIndeterminate();

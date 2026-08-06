@@ -46,7 +46,7 @@ def _install_guard(app, token: str) -> None:
     read or modify all of it. The token is generated per launch and handed to
     the app; nothing else can guess it.
     """
-    from flask import request, abort, g
+    from flask import request, abort
 
     @app.before_request
     def _guard():  # noqa: ANN202 - flask hook
@@ -55,37 +55,25 @@ def _install_guard(app, token: str) -> None:
             abort(403)
         # Cross-site requests never carry the token, so this also closes CSRF
         # on the POST routes.
-        from_query = request.args.get("k")
         supplied = (
-            from_query
+            request.args.get("k")
             or request.headers.get("X-Spotted-Token")
             or (request.cookies.get("spotted_token") or "")
         )
         if not token or supplied != token:
             abort(403)
-        g.token_from_query = bool(from_query)
 
-    @app.after_request
-    def _issue_cookie(response):  # noqa: ANN202 - flask hook
-        """Hand the browser the token so its sub-requests carry it.
-
-        Only the page the app opens has the token in its URL. The face crops
-        inside it are plain <img src="/thumb/N.jpg"> with no query string, so
-        every one of them was rejected and the whole grid rendered as broken
-        image icons: a tester reached the naming step and could not see a
-        single face. Same for the save POSTs.
-
-        Setting it once on the authorised page load fixes every sub-request
-        without putting the token in dozens of URLs. Host-only on loopback,
-        HttpOnly so page scripts cannot read it, SameSite=Strict so it is
-        never sent cross-site, which is what the guard exists to stop.
-        """
-        if getattr(g, "token_from_query", False):
-            response.set_cookie(
-                "spotted_token", token,
-                httponly=True, samesite="Strict", secure=False, path="/",
-            )
-        return response
+    # The page needs the token to build its own sub-requests. A cookie cannot
+    # do this job: the app loads the labeler in an IFRAME whose parent document
+    # is tauri://localhost, so 127.0.0.1 is cross-site and a SameSite=Strict
+    # cookie is never sent with the iframe's requests. Relaxing SameSite is not
+    # the answer either, since blocking cross-site requests is the point of the
+    # guard, and a cookie on 127.0.0.1 ignores the port and would leak the
+    # token to every other local service the user happens to be running.
+    #
+    # So the token travels on the requests the page itself emits: in the query
+    # string for <img>, which cannot set headers, and in a header for fetch.
+    app.config["TOKEN"] = token
 
 
 def create_app(
@@ -161,7 +149,17 @@ def create_app(
         # The thumb route uses the same ?show=all flag to pick between the
         # scoped and unscoped cache files. Propagate the query string so a
         # show-all view doesn't accidentally serve scoped thumbs.
-        thumb_qs = "?show=all" if show_all else ""
+        #
+        # The token rides along because an <img> cannot send a header, and the
+        # guard rejects anything without one. Without this every face crop is a
+        # 403 and the naming grid renders as a wall of broken images, which is
+        # exactly what a tester hit. A cookie cannot cover this: the app loads
+        # this page in a cross-site iframe.
+        tok = app.config.get("TOKEN") or ""
+        params = ["show=all"] if show_all else []
+        if tok:
+            params.append("k=" + tok)
+        thumb_qs = ("?" + "&".join(params)) if params else ""
 
         cards = []
         for cid, count, name, video_paths in summary:
@@ -244,6 +242,7 @@ def create_app(
 
         return (
             _PAGE
+            .replace("__TOKEN__", html.escape(tok, quote=True))
             .replace("__CARDS__", "\n".join(cards))
             .replace("__COUNT__", str(len(summary)))
             .replace("__SCOPE_CHIP__", scope_chip)
@@ -647,6 +646,19 @@ _PAGE = r"""<!doctype html>
 <script>
 const $ = (s) => document.querySelector(s);
 const $$ = (s) => document.querySelectorAll(s);
+
+// Every request this page makes has to carry the session token. The app loads
+// this page in an iframe whose parent is tauri://localhost, so 127.0.0.1 is
+// cross-site and no cookie will be sent no matter how it is scoped. Wrap fetch
+// once, here, rather than remembering the header at each call site: a POST that
+// silently 403s loses the name someone just typed.
+const SPOTTED_TOKEN = "__TOKEN__";
+const _rawFetch = window.fetch.bind(window);
+window.fetch = (input, init = {}) => {
+  const headers = new Headers(init.headers || {});
+  headers.set("X-Spotted-Token", SPOTTED_TOKEN);
+  return _rawFetch(input, { ...init, headers });
+};
 
 function toast(msg, err) {
   const t = $("#toast");
