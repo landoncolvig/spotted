@@ -10,6 +10,8 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
+ROOT_DIR = Path(__file__).resolve().parent.parent
+
 from facetag import cli as _cli
 from facetag import db as _db
 from facetag import markers as _markers
@@ -1630,3 +1632,32 @@ def test_a_filesystem_reporting_zero_inodes_does_not_collapse_the_batch(tmp_path
     assert summary["timeline_clips"] == 3, (
         f"a zero-inode filesystem collapsed the batch to {summary['timeline_clips']}"
     )
+
+
+def test_the_labeler_page_javascript_parses():
+    """The labeler's script is a Python string; nothing else checks it.
+
+    The frontend build covers app/src, not this. A typo here does not fail any
+    build, does not fail any import, and does not show up until a user's names
+    stop saving. The fetch wrapper that carries the session token lives in it,
+    so a syntax error there silently 403s every save.
+    """
+    import shutil
+    import subprocess
+    import tempfile
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not available")
+
+    src = (ROOT_DIR / "facetag" / "web.py").read_text()
+    start = src.index("<script>\nconst $ = (s) => document.querySelector")
+    end = src.index("</script>", start)
+    js = src[start + len("<script>"):end].replace("__TOKEN__", "sometoken")
+
+    with tempfile.TemporaryDirectory() as d:
+        path = Path(d) / "page.js"
+        path.write_text(js)
+        res = subprocess.run([node, "--check", str(path)],
+                             capture_output=True, text=True)
+    assert res.returncode == 0, f"labeler page JS does not parse:\n{res.stderr}"
