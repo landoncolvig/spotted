@@ -41,12 +41,17 @@ blocked on her sample + REDCINE-X install.
       frontend that needs it — including a guard that fails if `LABEL_PORT`
       and the `frame-src` port ever drift apart, since that would render the
       naming step as an empty iframe.
-- [ ] **Stop the sidecar capability accepting arbitrary args.**
-      `app/src-tauri/capabilities/default.json:22` has `"args": true`, which
-      lets any frontend code run the sidecar with any argv. Replace with the
-      explicit argument allowlist Tauri supports, one entry per command the
-      frontend actually invokes (scan, cluster, activity-suggest, tag-write,
-      markers-write, status, label-web, selftest).
+- [x] **Stop the sidecar capability accepting arbitrary args.** (v0.0.96)
+      Removed the whole `shell:` grant rather than narrowing it to an argument
+      allowlist, which the queue originally called for. The allowlist was
+      unnecessary: every sidecar spawn happens in Rust via
+      `app.shell().sidecar(...)`, which performs no scope check — the scope is
+      only read by the plugin's `execute`/`spawn` IPC commands, and the
+      frontend never imports the shell plugin at all. So the grant was pure
+      surface. Verified against the compiled ACL, not just the source.
+      `tests/test_capability_scope.py` pins it, including the premise: if the
+      frontend ever does import the shell plugin, the test fails and says to
+      scope the permission deliberately rather than restore `args: true`.
 - [ ] **Labeler needs Origin checking and a CSP.** `facetag/web.py` has no
       CSRF token, no `Origin`/`Referer` check on its POSTs, and sends no
       `Content-Security-Policy`. It binds localhost, so the threat is a
@@ -116,3 +121,5 @@ portrait frames degrading detection, labeler "failed to start" at 200+ clips.
 - 2026-08-09 — queue created, loop restarted after a 2-day gap.
 - 2026-08-09 — v0.0.95: main-window CSP locked down. No tester text; nothing
   she can see changed, and a CSP is only news if it broke something.
+- 2026-08-09 — v0.0.96: dropped the webview's shell grant entirely. No tester
+  text, same reason.
