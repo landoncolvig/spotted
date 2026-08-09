@@ -203,6 +203,7 @@ async fn scan_folder(
     window: Window,
     paths: Vec<String>,
     tags: Vec<String>,
+    energy: Option<bool>,
 ) -> Result<i32, String> {
     if paths.is_empty() {
         return Err("Nothing to scan.".into());
@@ -214,6 +215,11 @@ async fn scan_folder(
     if had_tags {
         args.push("--tags".to_string());
         args.push(tags.join(","));
+    }
+    // Default on, matching the sidecar. Only the opt-out is ever sent, so an
+    // older frontend that omits the field keeps the previous behaviour.
+    if energy == Some(false) {
+        args.push("--no-energy".to_string());
     }
     // Options first, then "--", so a clip whose name starts with a dash is
     // never read as a flag.
@@ -244,8 +250,14 @@ async fn tag_videos(
     overwrite: Option<bool>,
     scope: Option<String>,
     all_clips: Option<bool>,
+    energy: Option<bool>,
 ) -> Result<i32, String> {
     let mut args = vec!["tag-write".to_string()];
+    // The bucket lives in the index, so skipping the scoring pass is not
+    // enough to keep it off a clip scored on an earlier drop.
+    if energy == Some(false) {
+        args.push("--no-energy-keywords".to_string());
+    }
     // Re-tag Library is the one place library-wide is intended.
     if all_clips.unwrap_or(false) {
         args.push("--all".to_string());
@@ -482,11 +494,17 @@ async fn write_markers(
     window: Window,
     scope: Option<String>,
     all_clips: Option<bool>,
+    energy: Option<bool>,
 ) -> Result<i32, String> {
     let mut args = vec!["markers-write".to_string()];
     // Re-tag Library is the one place library-wide is intended.
     if all_clips.unwrap_or(false) {
         args.push("--all".to_string());
+    }
+    // Peaks persist in the index, so scan --no-energy does not stop a clip
+    // scored on an earlier drop from carrying its cues into this timeline.
+    if energy == Some(false) {
+        args.push("--no-energy-markers".to_string());
     }
     // Same reason as tag_videos: without a scope the DaVinci timeline is built
     // from every clip ever indexed, including ones long since moved or deleted,

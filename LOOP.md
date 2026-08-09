@@ -94,9 +94,22 @@ blocked on her sample + REDCINE-X install.
       partial count comes from the sidecar's own tally, never from counting
       the per-clip events, which would understate damage if the sidecar died
       partway.
-- [ ] **Energy tagging reviewable / opt-out.** Energy buckets and peak markers
-      are written with no review step and no way to turn them off, unlike
-      faces and activity tags which both have one.
+- [x] **Energy tagging opt-out.** (v0.0.99) A checkbox on the tags screen, on
+      by default. The trap: `scan --no-energy` alone looks like a complete
+      opt-out and is not, because `energy_bucket` and the peak rows persist in
+      the index, so a clip scored on an earlier drop keeps them. Wired to the
+      scan only, the checkbox would appear to work on a fresh folder and do
+      nothing on a re-drop, which is the state a real library is usually in.
+      So it acts at all three stages: `--no-energy` (stop computing),
+      `--no-energy-keywords` (stop writing the keyword), `--no-energy-markers`
+      (stop the peak cues, and skip the peak lookup that decides which clips
+      are in the marker set at all). Kept off `--exclude-tags` deliberately —
+      exclusions are persisted as review rejections and would have deleted a
+      user's own tag if they had typed "high energy".
+- [ ] **Energy REVIEW step** (the other half of the item above). Faces and
+      activity tags both get a confirm-before-write screen; energy still does
+      not. Opting out is now possible, but a user who wants energy still
+      cannot see or prune what it decided before it lands in their files.
 - [ ] **Name autocomplete in the labeler.** Typing a name that already exists
       in the library should complete, so "Grayson" and "grayson" stop being
       two people.
@@ -169,6 +182,8 @@ portrait frames degrading detection, labeler "failed to start" at 200+ clips.
   she can see changed, and a CSP is only news if it broke something.
 - 2026-08-09 — v0.0.96: dropped the webview's shell grant entirely. No tester
   text, same reason.
+- 2026-08-09 — v0.0.99: energy opt-out. Split the queue item: the opt-out
+  shipped, the review screen is still open and re-queued above.
 - 2026-08-09 — entitlement trimming attempted and NOT shipped. Proved
   `disable-library-validation` is required; could not get a reproducible
   result on the other two because this machine's disk is at 99%. Moved to

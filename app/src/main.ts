@@ -83,6 +83,7 @@ const tagsInput = document.getElementById("tags-input") as HTMLInputElement;
 const tagsStart = document.getElementById("tags-start") as HTMLButtonElement;
 const tagsSkip = document.getElementById("tags-skip") as HTMLButtonElement;
 const tagsOverwrite = document.getElementById("tags-overwrite") as HTMLInputElement;
+const tagsEnergy = document.getElementById("tags-energy") as HTMLInputElement;
 
 const LABEL_PORT = 8765;
 /** Tokenised labeler URL returned by start_label_server. */
@@ -109,6 +110,16 @@ let currentPath: string | null = null;
 // fresh) vs merging. Captured from the tags-screen checkbox when a run begins,
 // because that screen is gone by the time keywords are written.
 let overwriteKeywords = false;
+/** Whether this batch scores energy at all. Captured from the tags screen the
+ *  same way, and for the same reason: that screen is gone by write time.
+ *
+ *  Turning it off has to act at three stages, because a single one leaks. The
+ *  scan stops computing it, which only covers clips scanned from here on. The
+ *  keyword and the peak markers are ALSO suppressed at write time, because a
+ *  clip scored on an earlier drop keeps its `energy_bucket` and its peaks in
+ *  the index forever — so an opt-out that only passed `--no-energy` would
+ *  still stamp energy on every clip the user had scanned before. */
+let energyEnabled = true;
 
 function setState(s: State) {
   stage.setAttribute("data-state", s);
@@ -557,7 +568,7 @@ async function runBatch(paths: string[], tags: string[] = []) {
   await ensureSidecarListener();
 
   try {
-    await invoke<number>("scan_folder", { paths, tags });
+    await invoke<number>("scan_folder", { paths, tags, energy: energyEnabled });
     await invoke<number>("cluster_faces");
     workingLabel.textContent = "Naming people";
     workingDetail.textContent = "Opening labeler…";
@@ -856,6 +867,11 @@ async function runWrite(excludeTags: string[], allClips = false) {
     try {
       await invoke<number>("tag_videos", {
         excludeTags,
+        // A clip scored on an earlier drop keeps its bucket in the index, so
+        // opting out has to suppress the keyword here as well as skip the
+        // scoring pass. Without this the checkbox would look like it worked on
+        // a fresh folder and do nothing on a re-drop.
+        energy: energyEnabled,
         overwrite: overwriteKeywords,
         scope: currentPath ?? null,
         allClips,
@@ -874,7 +890,7 @@ async function runWrite(excludeTags: string[], allClips = false) {
     workingDetail.textContent = "For Premiere & DaVinci scrubber…";
     try {
       lastMarkerError = null;
-      await invoke<number>("write_markers", { scope: currentPath ?? null, allClips });
+      await invoke<number>("write_markers", { scope: currentPath ?? null, allClips, energy: energyEnabled });
     } catch (e) {
       if (cancelled) {
         cancelled = false;
@@ -1846,11 +1862,13 @@ function wireTagsScreen() {
   tagsStart.addEventListener("click", () => {
     if (currentPaths.length === 0) return;
     overwriteKeywords = tagsOverwrite.checked;
+    energyEnabled = tagsEnergy.checked;
     runBatch(currentPaths, readTagsInput());
   });
   tagsSkip.addEventListener("click", () => {
     if (currentPaths.length === 0) return;
     overwriteKeywords = tagsOverwrite.checked;
+    energyEnabled = tagsEnergy.checked;
     runBatch(currentPaths, []);
   });
   tagsInput.addEventListener("keydown", (e) => {

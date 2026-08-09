@@ -1067,6 +1067,10 @@ def tag_write(
     exclude_tags: str = typer.Option("", "--exclude-tags", help="Comma-separated matched tags to leave out (the ones the user unchecked on the review screen)."),
     scope: Path = typer.Option(None, "--scope", help="Only write clips under this folder. Without it every clip in the library is rewritten, which re-runs exiftool over footage that hasn't changed and re-risks every write on files the user isn't touching."),
     all_clips: bool = typer.Option(False, "--all", help="Ignore the batch scope and process every clip in the library (what Re-tag Library means)."),
+    energy_keywords: bool = typer.Option(
+        True, "--energy-keywords/--no-energy-keywords",
+        help="Include the 'high/medium/low energy' keyword. Off means faces and matched tags only. Separate from --exclude-tags because exclusions are persisted as review rejections, and routing energy through them would delete a user's own tag if they had typed \"high energy\".",
+    ),
 ):
     """Write per-video person keywords into each .mov via exiftool.
 
@@ -1086,7 +1090,7 @@ def tag_write(
     # later write. Not on a dry run — that must change nothing.
     if exclude and not dry_run:
         _db.delete_auto_tags_by_name(conn, exclude)
-    mapping = _tag.videos_with_keywords(conn, exclude_tags=exclude)
+    mapping = _tag.videos_with_keywords(conn, exclude_tags=exclude, include_energy=energy_keywords)
     scope = _resolve_scope(scope, conn, allow_all=all_clips)
     if scope is not None:
         # Writing is the expensive, risky half of a run: two exiftool calls and
@@ -1239,6 +1243,10 @@ def markers_write(
         True, "--resolve/--no-resolve",
         help="Also emit a 'Spotted Markers' DaVinci Resolve script (into Resolve's Scripts folder, else next to the footage). DaVinci ignores in-file XMP markers, so this is the only way markers show there — the user runs it from Workspace > Scripts after importing.",
     ),
+    energy_markers: bool = typer.Option(
+        True, "--energy-markers/--no-energy-markers",
+        help="Include 'Energy peak' cues. Off means face markers only. Needed as its own flag because energy peaks persist in the index: a clip scored on an earlier scan keeps its peaks, so `scan --no-energy` alone would not stop them appearing on a re-drop.",
+    ),
 ):
     """Write per-face timeline markers (XMP-xmpDM:Markers) into each video.
 
@@ -1259,9 +1267,10 @@ def markers_write(
     for vid, path_str in _markers.videos_with_named_faces(conn):
         if _under_scope(path_str, root):
             by_id[vid] = path_str
-    for vid, path_str in _db.videos_with_energy_peaks(conn):
-        if _under_scope(path_str, root):
-            by_id.setdefault(vid, path_str)
+    if energy_markers:
+        for vid, path_str in _db.videos_with_energy_peaks(conn):
+            if _under_scope(path_str, root):
+                by_id.setdefault(vid, path_str)
     videos = sorted(by_id.items())
 
     # Every scanned clip in this batch that is still on disk. The timeline is
@@ -1359,7 +1368,8 @@ def markers_write(
             # scan refreshes those versioned rows, while this cap makes the
             # export contract safe immediately even if a legacy row reaches
             # markers-write without passing through scan first.
-            events += _energy_marker_events(conn, vid)
+            if energy_markers:
+                events += _energy_marker_events(conn, vid)
             if not Path(path_str).exists():
                 # The index outlives the disk. A clip that moved or was deleted
                 # cannot be marked, and putting it in the DaVinci timeline makes

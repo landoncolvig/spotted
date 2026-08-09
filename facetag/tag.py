@@ -73,6 +73,7 @@ def videos_with_names(conn: sqlite3.Connection) -> dict[str, list[str]]:
 def videos_with_keywords(
     conn: sqlite3.Connection,
     exclude_tags: set[str] | None = None,
+    include_energy: bool = True,
 ) -> dict[str, list[str]]:
     """Return {video_path: [merged keywords]}.
 
@@ -112,10 +113,15 @@ def videos_with_keywords(
     # matched activities), so a clip with nothing but an energy reading still
     # gets its "<bucket> energy" keyword. Honors the same exclude set in case
     # the review screen later lets a user drop it.
+    # `include_energy=False` is the user opting out on the tags screen. It is a
+    # separate switch from `exclude_tags` on purpose: routing it through the
+    # exclude set would also delete a user's own activity tag if they happened
+    # to have typed "high energy", since exclusions are persisted as review
+    # rejections.
     energy_rows = conn.execute(
         "SELECT path, energy_bucket FROM videos "
         "WHERE energy_bucket IS NOT NULL AND energy_bucket != ''"
-    ).fetchall()
+    ).fetchall() if include_energy else []
 
     merged: dict[str, set[str]] = {}
     for path, name in person_rows:
