@@ -33,6 +33,10 @@ console = Console()
 
 DEFAULT_DB = Path.home() / ".facetag" / "index.db"
 DEFAULT_LABEL_DIR = Path.home() / ".facetag" / "label_thumbs"
+# How many clips per tag the review screen can prune individually. Each one
+# carries a base64 JPEG on the emit line, so this is a payload budget as much
+# as a UI choice; the row discloses how many it is not showing.
+CLIPS_SHOWN_PER_TAG = 6
 
 
 def _emit(event: str, **fields) -> None:
@@ -617,16 +621,29 @@ def activity_suggest(
         rollup: list[dict] = []
         for t, hits in agg.items():
             ordered = sorted(hits, key=lambda x: -x[1])
-            # Cap thumbnails per tag: enough to preview what matched (the count
-            # carries the total) while keeping the base64 payload on the emit
-            # line well within the shell reader's per-line budget.
-            thumbs = [u for p, _ in ordered[:4] if (u := _clip_thumb_datauri(p, thumb_cache))]
+            # Which clips to show. The obvious pick is the top scorers, and it
+            # is the wrong one now that these are prunable: the strongest
+            # matches are the ones most likely RIGHT. A user opening this row
+            # wants the marginal ones, so show the weakest.
+            #
+            # Capped, and the row says how many are not shown, because the
+            # payload is base64 JPEGs on a single emit line.
+            shown = ordered[-CLIPS_SHOWN_PER_TAG:][::-1]
+            clips = [
+                {
+                    "path": p,
+                    "name": Path(p).name,
+                    "score": round(s, 3),
+                    "thumb": _clip_thumb_datauri(p, thumb_cache),
+                }
+                for p, s in shown
+            ]
             rollup.append({
                 "tag": t,
                 "clips": len(hits),
                 "peak": round(max(s for _, s in hits), 3),
                 "sample": Path(ordered[0][0]).name,
-                "thumbs": thumbs,
+                "shown": clips,
             })
         return sorted(rollup, key=lambda m: (-m["clips"], -m["peak"]))
 
@@ -1110,6 +1127,10 @@ def tag_write(
         "", "--exclude-energy",
         help="Comma-separated energy buckets (low, medium, high) the user unchecked on the review screen. Separate from --exclude-tags for the same reason --no-energy-keywords is: exclusions there are persisted as review rejections against auto_tags.",
     ),
+    drop_pairs_file: Path = typer.Option(
+        None, "--drop-pairs-file",
+        help="JSON file of [[clip path, tag], ...] the user unchecked for individual clips on the review screen. A file rather than argv because the values are filesystem paths, which have no separator that is safe to split on.",
+    ),
     energy_keywords: bool = typer.Option(
         True, "--energy-keywords/--no-energy-keywords",
         help="Include the 'high/medium/low energy' keyword. Off means faces and matched tags only. Separate from --exclude-tags because exclusions are persisted as review rejections, and routing energy through them would delete a user's own tag if they had typed \"high energy\".",
@@ -1128,6 +1149,20 @@ def tag_write(
     """
     conn = _db.connect(db_path)
     exclude = {t.strip() for t in exclude_tags.split(",") if t.strip()}
+    # Per-clip rejections first: a clip dropped here must not then be written
+    # by the mapping built below.
+    if drop_pairs_file and drop_pairs_file.exists() and not dry_run:
+        try:
+            pairs = json.loads(drop_pairs_file.read_text())
+            dropped = _db.delete_auto_tag_pairs(
+                conn, [(p, t) for p, t in pairs]
+            )
+            if dropped:
+                _emit("tag-pruned", pairs=dropped)
+        except (ValueError, TypeError) as e:
+            # A malformed rejection list must not take the whole write with it.
+            # Losing the pruning is recoverable; losing the tagging is not.
+            _emit("tag-prune-error", message=str(e))
     # Persist review-screen rejections: drop unchecked tags from auto_tags so
     # they also stop surfacing in in-app search and can't sneak back into a
     # later write. Not on a dry run — that must change nothing.

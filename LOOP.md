@@ -138,8 +138,20 @@ blocked on her sample + REDCINE-X install.
       before the labeler and would date from whenever the user began typing
       names. `tag-skip` also gained a position, so a run of containers that
       cannot hold keywords stops leaving the bar parked.
-- [ ] **Per-clip pruning in the activity review.** Drop a tag from ONE clip
-      rather than dropping the whole tag.
+- [x] **Per-clip pruning in the activity review.** (v0.0.103) Each shown clip
+      is now its own reject button. The selection rule is the part worth
+      remembering: the clips offered are the tag's WEAKEST matches, not its
+      strongest. Showing top scorers is right for a preview and wrong for
+      pruning, since the strongest matches are the ones most likely correct
+      and someone opening the row is hunting the ones to remove. Capped at 6
+      with the row saying how many it is not showing, because a user who
+      prunes the six shown and sees the tag still land on 40 clips would
+      reasonably conclude pruning does not work. Rejections travel as a JSON
+      file rather than argv: the values are filesystem paths and there is no
+      separator they cannot legally contain.
+- [ ] **Prune more than the six shown** (second slice of the item above). No
+      way yet to reach the clips past the cap without dropping the tag
+      entirely.
 - [ ] **Report export.** Write what was tagged to a file the user keeps.
 - [ ] **iCloud pre-check.** Warn before scanning a folder whose files are
       not downloaded, instead of failing per clip.
@@ -205,6 +217,12 @@ portrait frames degrading detection, labeler "failed to start" at 200+ clips.
   she can see changed, and a CSP is only news if it broke something.
 - 2026-08-09 — v0.0.96: dropped the webview's shell grant entirely. No tester
   text, same reason.
+- 2026-08-09 — v0.0.103: per-clip pruning. The event-declaration test
+  strengthened last tick immediately earned it: it caught two new emits
+  (`tag-pruned`, `tag-prune-error`) that I had added without declaring in the
+  TS union — the exact v0.0.98 `tag-skip` bug repeating in my own work.
+  `tag-prune-error` now surfaces on the Done screen, since a prune that
+  silently failed means the user's unchecked tags went into their files.
 - 2026-08-09 — v0.0.102: write-phase position + ETA. Preflight caught a test
   of mine from v0.0.98 that anchored on `_emit("tag-skip"` as one line, so
   wrapping the call read as the sidecar having stopped emitting it. Second

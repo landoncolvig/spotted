@@ -252,8 +252,27 @@ async fn tag_videos(
     all_clips: Option<bool>,
     energy: Option<bool>,
     exclude_energy: Option<Vec<String>>,
+    drop_pairs: Option<Vec<(String, String)>>,
 ) -> Result<i32, String> {
     let mut args = vec!["tag-write".to_string()];
+    // Clips the user unchecked individually on the review screen, as
+    // [[path, tag], ...]. Written to a file rather than passed on argv: the
+    // values are filesystem paths, and there is no separator they cannot
+    // legally contain.
+    if let Some(pairs) = drop_pairs.filter(|p| !p.is_empty()) {
+        let cache_root = app
+            .path()
+            .app_cache_dir()
+            .map_err(|e| format!("couldn't resolve Spotted's local cache: {e}"))?;
+        let dir = prepare_sidecar_temp_dir(&cache_root)?;
+        let file = dir.join(format!("drop-pairs-{}.json", uuid::Uuid::new_v4().simple()));
+        let body = serde_json::to_string(&pairs)
+            .map_err(|e| format!("couldn't encode the review rejections: {e}"))?;
+        std::fs::write(&file, body)
+            .map_err(|e| format!("couldn't write the review rejections: {e}"))?;
+        args.push("--drop-pairs-file".to_string());
+        args.push(file.to_string_lossy().to_string());
+    }
     // The bucket lives in the index, so skipping the scoring pass is not
     // enough to keep it off a clip scored on an earlier drop.
     if energy == Some(false) {

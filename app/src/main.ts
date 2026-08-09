@@ -9,7 +9,9 @@ import {
 } from "@tauri-apps/plugin-notification";
 
 type State = "idle" | "tags" | "working" | "label" | "review" | "library" | "done";
-type MatchedTag = { tag: string; clips: number; peak: number; sample: string; thumbs?: string[] };
+/** One clip a tag matched, individually rejectable on the review screen. */
+type ShownClip = { path: string; name: string; score: number; thumb: string | null };
+type MatchedTag = { tag: string; clips: number; peak: number; sample: string; shown?: ShownClip[] };
 /** One energy bucket as the review screen shows it. Same shape as MatchedTag
  *  minus the score, so both render through the same row builder. */
 type EnergyBucket = { tag: string; bucket: string; clips: number; sample: string; thumbs?: string[] };
@@ -27,6 +29,8 @@ type SpottedEvent =
   | { event: "tag-video"; name: string; names: string[]; index: number; total: number }
   | { event: "tag-error"; name: string; message: string }
   | { event: "tag-skip"; name: string; reason: string; index?: number; total?: number }
+  | { event: "tag-pruned"; pairs: number }
+  | { event: "tag-prune-error"; message: string }
   | { event: "tag-empty"; message: string }
   | { event: "tag-failed"; failed: number; total: number; first: string }
   | { event: "tag-complete"; total: number }
@@ -128,6 +132,9 @@ let energyEnabled = true;
  *  energyEnabled: that is "never score this batch", this is "you scored it,
  *  but do not put low energy on my footage". */
 let excludedEnergyBuckets: string[] = [];
+/** [clip path, tag] pairs the user rejected for individual clips. Distinct
+ *  from unchecking a tag, which drops it everywhere. */
+let droppedClips: [string, string][] = [];
 
 function setState(s: State) {
   stage.setAttribute("data-state", s);
@@ -326,6 +333,10 @@ let lastTagFailed: Extract<SpottedEvent, { event: "tag-failed" }> | null = null;
 /** Clips deliberately passed over — a container that cannot hold keywords is
  *  not a failure, and must not be counted as one. */
 let lastTagSkips: { name: string; reason: string }[] = [];
+/** Set when the sidecar could not apply the per-clip rejections. Worth saying
+ *  out loud: the user unchecked clips, the write went ahead anyway, and those
+ *  tags are now in their files. Silence here looks like success. */
+let lastPruneError: string | null = null;
 // How many clips are in a container that can't hold in-file markers.
 let lastUnwritable = 0;
 // Explanation the sidecar sent for camera-raw footage, preferred over its exit text.
@@ -565,6 +576,13 @@ function handleSpottedEvent(evt: SpottedEvent) {
       lastTagFailed = evt;
       console.warn(evt);
       break;
+    case "tag-pruned":
+      console.info(`pruned ${evt.pairs} clip/tag pair(s)`);
+      break;
+    case "tag-prune-error":
+      lastPruneError = evt.message;
+      console.warn(evt);
+      break;
     case "error":
     case "tag-empty":
       // These are also surfaced through the sidecar exit-code path in
@@ -765,6 +783,7 @@ async function startTagFlow(allClips = false) {
   let matched: MatchedTag[] = [];
   let energy: EnergyBucket[] = [];
   excludedEnergyBuckets = [];
+  droppedClips = [];
   try {
     const out = await invoke<string>("suggest_activities", { scope: currentPath ?? null, allClips: false });
     matched = parseMatchedTags(out);
@@ -813,6 +832,9 @@ function parseMatchedTags(stdout: string): MatchedTag[] {
  *  one drops it from every clip; only checked tags get written. */
 function renderReview(matched: MatchedTag[], energy: EnergyBucket[] = []) {
   document.querySelector(".screen--review")?.remove();
+  // Re-rendering the screen rebuilds every control, so any rejection recorded
+  // against the old DOM is stale.
+  droppedClips = [];
 
   const screen = makeEl("div", "screen screen--review");
   const wrap = makeEl("div", "review-wrap");
@@ -847,19 +869,56 @@ function renderReview(matched: MatchedTag[], energy: EnergyBucket[] = []) {
     meta.textContent = `${m.clips} clip${m.clips === 1 ? "" : "s"} · e.g. ${m.sample}`;
     main.append(name, meta);
     row.append(input, main);
-    // Thumbnails of the clips this tag matched, so the user can SEE what it's
-    // tagging (faces get a photo grid; this brings the same to activities).
-    if (m.thumbs && m.thumbs.length) {
+    // The clips this tag matched, each one rejectable on its own. Dropping a
+    // whole tag says "beach was never right"; this says "beach is right, just
+    // not in this clip", which previously could not be said at all.
+    //
+    // These are the WEAKEST matches, not the strongest: a user opening this
+    // row is looking for the ones to remove, and the top scorers are the ones
+    // most likely correct.
+    if (m.shown && m.shown.length) {
       const thumbs = makeEl("div", "review-row__thumbs");
-      for (const src of m.thumbs) {
-        const img = document.createElement("img");
-        img.className = "review-thumb";
-        img.src = src;
-        img.alt = m.tag;
-        img.loading = "lazy";
-        thumbs.appendChild(img);
+      for (const clip of m.shown) {
+        const cell = makeEl("button", "review-clip");
+        cell.type = "button";
+        cell.title = `${clip.name} · ${clip.score}\nClick to keep this tag off this clip`;
+        if (clip.thumb) {
+          const img = document.createElement("img");
+          img.className = "review-thumb";
+          img.src = clip.thumb;
+          img.alt = `${m.tag} in ${clip.name}`;
+          img.loading = "lazy";
+          cell.appendChild(img);
+        } else {
+          // No frame could be extracted. Still rejectable — losing the preview
+          // must not also lose the control.
+          const ph = makeEl("span", "review-thumb review-thumb--missing");
+          ph.textContent = clip.name.slice(0, 12);
+          cell.appendChild(ph);
+        }
+        cell.addEventListener("click", () => {
+          const on = cell.classList.toggle("is-dropped");
+          if (on) droppedClips.push([clip.path, m.tag]);
+          else {
+            const i = droppedClips.findIndex(
+              ([p, t]) => p === clip.path && t === m.tag,
+            );
+            if (i >= 0) droppedClips.splice(i, 1);
+          }
+          updateCount();
+        });
+        thumbs.appendChild(cell);
       }
       row.appendChild(thumbs);
+      // Never let a cap masquerade as the whole set. Someone who prunes the
+      // six shown and sees the tag still land on 40 clips would reasonably
+      // conclude the pruning does not work.
+      if (m.clips > m.shown.length) {
+        const more = makeEl("span", "review-row__more");
+        more.textContent =
+          `showing the ${m.shown.length} weakest of ${m.clips} · uncheck the tag to drop it from all`;
+        main.appendChild(more);
+      }
     }
     list.appendChild(row);
     checks.push(input);
@@ -913,7 +972,11 @@ function renderReview(matched: MatchedTag[], energy: EnergyBucket[] = []) {
   const updateCount = () => {
     const all = checks.concat(energyChecks);
     const kept = all.filter((c) => c.checked).length;
-    count.textContent = `${kept} of ${all.length} tag${all.length === 1 ? "" : "s"} will be written`;
+    const pruned = droppedClips.length
+      ? ` · ${droppedClips.length} clip${droppedClips.length === 1 ? "" : "s"} dropped`
+      : "";
+    count.textContent =
+      `${kept} of ${all.length} tag${all.length === 1 ? "" : "s"} will be written${pruned}`;
     toggle.textContent = kept > 0 ? "Uncheck all" : "Check all";
   };
   checks.forEach((c) => c.addEventListener("change", updateCount));
@@ -961,6 +1024,7 @@ async function runWrite(excludeTags: string[], allClips = false) {
   lastTagFailures = [];
   lastTagFailed = null;
   lastTagSkips = [];
+  lastPruneError = null;
   lastUnwritable = 0;
   lastCameraRaw = null;
   document.getElementById("done-verify")?.replaceChildren();
@@ -983,6 +1047,9 @@ async function runWrite(excludeTags: string[], allClips = false) {
         // a fresh folder and do nothing on a re-drop.
         energy: energyEnabled,
         excludeEnergy: excludedEnergyBuckets,
+        // Rejections for individual clips. A tag unchecked entirely is already
+        // in excludeTags; these are the ones kept but wrong in one place.
+        dropPairs: droppedClips,
         overwrite: overwriteKeywords,
         scope: currentPath ?? null,
         allClips,
@@ -1202,7 +1269,8 @@ function renderVerification() {
     resolveCells.length ||
     coverageCells.length ||
     lastTagFailures.length ||
-    lastTagSkips.length
+    lastTagSkips.length ||
+    lastPruneError
   );
   if (!hasEvidence) return;
 
@@ -1274,6 +1342,14 @@ function renderVerification() {
     // guessing which three; the filenames are what makes it actionable. Capped
     // because a systemic failure names every clip in the batch, and the row
     // says how many it is holding back rather than quietly truncating.
+    {
+      label: "Clips you unchecked",
+      values: lastPruneError ? ["not applied — the tags were still written"] : [],
+      help: lastPruneError
+        ? `Spotted could not read the list of clips you unchecked: ${lastPruneError}`
+        : "",
+      bad: true,
+    },
     {
       label: "Clips that failed",
       values: lastTagFailures.slice(0, 8).map((t) => t.name).concat(

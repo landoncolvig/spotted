@@ -510,6 +510,36 @@ def delete_auto_tags_by_name(conn: sqlite3.Connection, tags: set[str]) -> int:
     return cur.rowcount
 
 
+def delete_auto_tag_pairs(conn: sqlite3.Connection, pairs: list[tuple[str, str]]) -> int:
+    """Delete specific (video path, tag) matches. Returns rows removed.
+
+    The finer-grained sibling of `delete_auto_tags_by_name`. Unchecking a whole
+    tag says "beach was never right"; unchecking one clip says "beach is right,
+    just not in this one", which used to have no way to be said at all — the
+    user's only option was dropping the tag from every clip it found.
+
+    Persisted the same way and for the same reason: the rejection has to
+    outlive this write, or the tag returns on the next one.
+    """
+    clean = [
+        (p, t.strip().lower())
+        for p, t in pairs
+        if p and t and t.strip()
+    ]
+    if not clean:
+        return 0
+    removed = 0
+    for path, tag in clean:
+        cur = conn.execute(
+            "DELETE FROM auto_tags WHERE LOWER(tag) = ? AND video_id IN "
+            "(SELECT id FROM videos WHERE path = ?)",
+            (tag, path),
+        )
+        removed += cur.rowcount
+    conn.commit()
+    return removed
+
+
 def get_auto_tags(conn: sqlite3.Connection, video_id: int) -> list[tuple[str, float]]:
     """Return [(tag, score)] for a video, highest score first."""
     rows = conn.execute(
