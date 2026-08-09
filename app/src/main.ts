@@ -26,7 +26,7 @@ type SpottedEvent =
   | { event: "tag-start"; total: number }
   | { event: "tag-video"; name: string; names: string[]; index: number; total: number }
   | { event: "tag-error"; name: string; message: string }
-  | { event: "tag-skip"; name: string; reason: string }
+  | { event: "tag-skip"; name: string; reason: string; index?: number; total?: number }
   | { event: "tag-empty"; message: string }
   | { event: "tag-failed"; failed: number; total: number; first: string }
   | { event: "tag-complete"; total: number }
@@ -368,20 +368,37 @@ const batch = {
   scanDone: 0,
   scanFaces: 0,
   tagTotal: 0,
+  tagDone: 0,
   startedAt: 0,
+  // The write phase gets its own clock. Sharing the scan's would date from
+  // before the labeler, which the user spent an unbounded amount of time in,
+  // and every estimate would be nonsense.
+  tagStartedAt: 0,
 };
 
 /** " · about 12 min left" once there's enough history to mean anything.
- *  A scan runs for hours; a bar with no time estimate reads as a hang. */
-function etaSuffix(): string {
-  if (!batch.startedAt || batch.scanDone < 2 || batch.scanTotal <= batch.scanDone) return "";
-  const elapsed = Date.now() - batch.startedAt;
-  const remaining = (elapsed / batch.scanDone) * (batch.scanTotal - batch.scanDone);
+ *  A long run with no time estimate reads as a hang. */
+function eta(done: number, total: number, startedAt: number): string {
+  if (!startedAt || done < 2 || total <= done) return "";
+  const elapsed = Date.now() - startedAt;
+  const remaining = (elapsed / done) * (total - done);
   const mins = Math.round(remaining / 60000);
   if (mins < 1) return " · under a minute left";
   if (mins < 60) return ` · about ${mins} min left`;
   const h = Math.floor(mins / 60);
   return ` · about ${h}h ${mins % 60}m left`;
+}
+
+function etaSuffix(): string {
+  return eta(batch.scanDone, batch.scanTotal, batch.startedAt);
+}
+
+/** Writing runs exiftool twice and xattr twice per clip, so on a few hundred
+ *  clips it is minutes of a moving bar over a filename with no position in it.
+ *  The scan has said "12 of 107 · about 3 min left" for a while; this phase
+ *  was still the one where someone would wonder whether it had stopped. */
+function tagEtaSuffix(): string {
+  return eta(batch.tagDone, batch.tagTotal, batch.tagStartedAt);
 }
 
 function handleSpottedEvent(evt: SpottedEvent) {
@@ -437,12 +454,16 @@ function handleSpottedEvent(evt: SpottedEvent) {
       break;
     case "tag-start":
       batch.tagTotal = evt.total;
+      batch.tagDone = 0;
+      batch.tagStartedAt = Date.now();
       workingLabel.textContent = "Writing keywords";
       workingDetail.textContent = `Tagging ${evt.total} clips…`;
       setProgress(0);
       break;
     case "tag-video":
-      workingDetail.textContent = `${evt.name} — ${evt.names.join(", ")}`;
+      batch.tagDone = evt.index;
+      workingDetail.textContent =
+        `${evt.name} · ${evt.index}/${evt.total}` + tagEtaSuffix();
       if (batch.tagTotal > 0) setProgress((evt.index / batch.tagTotal) * 100);
       break;
     case "tag-complete":
@@ -531,6 +552,14 @@ function handleSpottedEvent(evt: SpottedEvent) {
       break;
     case "tag-skip":
       lastTagSkips.push({ name: evt.name, reason: evt.reason });
+      // A run of unwritable containers used to leave the bar parked wherever
+      // the last writable clip left it.
+      if (evt.index) {
+        batch.tagDone = evt.index;
+        workingDetail.textContent =
+          `${evt.name} · ${evt.index}/${evt.total ?? batch.tagTotal}` + tagEtaSuffix();
+        if (batch.tagTotal > 0) setProgress((evt.index / batch.tagTotal) * 100);
+      }
       break;
     case "tag-failed":
       lastTagFailed = evt;
@@ -572,6 +601,8 @@ async function runBatch(paths: string[], tags: string[] = []) {
   batch.scanDone = 0;
   batch.scanFaces = 0;
   batch.tagTotal = 0;
+  batch.tagDone = 0;
+  batch.tagStartedAt = 0;
 
   await ensureSidecarListener();
 

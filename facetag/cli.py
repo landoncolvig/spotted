@@ -1185,7 +1185,13 @@ def tag_write(
                 # Scanned fine, but the container can't hold keywords. Say so
                 # instead of surfacing a raw exiftool error as a failure.
                 unwritable.append(short)
-                _emit("tag-skip", name=short, reason="format can't store keywords")
+                # Carries its position for the same reason tag-video does: the
+                # UI advances on these, and a batch of unwritable containers
+                # would otherwise sit on a frozen bar.
+                _emit(
+                    "tag-skip", name=short, reason="format can't store keywords",
+                    index=idx, total=len(mapping),
+                )
                 prog.update(task, advance=1)
                 continue
             vid = _db.video_id_for_path(conn, path_str)

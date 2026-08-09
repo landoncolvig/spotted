@@ -23,20 +23,25 @@ MAIN_TS = (ROOT / "app/src/main.ts").read_text()
 CLI_PY = (ROOT / "facetag/cli.py").read_text()
 
 
+# Tolerant of line breaks inside the call. Anchoring on `_emit("tag-skip"`
+# meant that wrapping the call across lines — which says nothing about
+# behaviour — reported itself as the sidecar having stopped emitting the event.
+EMITTED = set(re.findall(r'_emit\(\s*"(tag-[a-z-]+)"', CLI_PY))
+
+
 def test_the_sidecar_still_emits_what_this_feature_reads():
     """If the sidecar stops sending these, the done screen goes quiet again
     and no frontend test would notice."""
-    assert '_emit("tag-error"' in CLI_PY
-    assert '_emit("tag-skip"' in CLI_PY
-    assert '_emit("tag-failed", failed=len(failed), total=len(mapping)' in CLI_PY
+    assert {"tag-error", "tag-skip", "tag-failed"} <= EMITTED
+    assert "failed=len(failed), total=len(mapping)" in CLI_PY
 
 
 def test_every_emitted_tag_event_is_declared_in_the_frontend():
     """tag-skip was emitted by the sidecar and absent from the TS union, so it
     fell through the event switch and was dropped without a trace."""
-    emitted = set(re.findall(r'_emit\("(tag-[a-z-]+)"', CLI_PY))
     declared = set(re.findall(r'\{ event: "(tag-[a-z-]+)"', MAIN_TS))
-    assert emitted <= declared, f"sidecar emits undeclared: {emitted - declared}"
+    assert EMITTED, "the emit scan matched nothing; this check would be vacuous"
+    assert EMITTED <= declared, f"sidecar emits undeclared: {EMITTED - declared}"
 
 
 def test_per_clip_failures_are_kept_not_just_logged():

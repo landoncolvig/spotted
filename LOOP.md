@@ -127,8 +127,17 @@ blocked on her sample + REDCINE-X install.
       in the keyword written into the file, which is the only place the user
       sees the name. Suggestions are library-wide even though the labeler is
       batch-scoped, since reusing a name from an earlier drop is the point.
-- [ ] **Scan ETA.** Long scans show progress with no time estimate; on a
-      200-clip drop the user can't tell a slow run from a hung one.
+- [x] **Scan ETA.** The queue was stale: the scan already had one
+      (`etaSuffix`, "12 of 107 · about 3 min left"). The complaint behind it
+      was still true one phase later, so (v0.0.102) the WRITE phase got the
+      same treatment — it showed a filename over a moving bar with no position
+      and no estimate, and it runs exiftool twice plus xattr twice per clip, so
+      it is the long phase where a hang would matter most because it is the one
+      touching the user's files. Both phases now share one estimator. The write
+      phase times itself rather than reusing the scan's clock, which starts
+      before the labeler and would date from whenever the user began typing
+      names. `tag-skip` also gained a position, so a run of containers that
+      cannot hold keywords stops leaving the bar parked.
 - [ ] **Per-clip pruning in the activity review.** Drop a tag from ONE clip
       rather than dropping the whole tag.
 - [ ] **Report export.** Write what was tagged to a file the user keeps.
@@ -196,6 +205,12 @@ portrait frames degrading detection, labeler "failed to start" at 200+ clips.
   she can see changed, and a CSP is only news if it broke something.
 - 2026-08-09 — v0.0.96: dropped the webview's shell grant entirely. No tester
   text, same reason.
+- 2026-08-09 — v0.0.102: write-phase position + ETA. Preflight caught a test
+  of mine from v0.0.98 that anchored on `_emit("tag-skip"` as one line, so
+  wrapping the call read as the sidecar having stopped emitting it. Second
+  time a literal-anchored test has mis-reported a formatting change as a
+  defect; both are now whitespace-tolerant, and fixing it also un-weakened a
+  neighbouring regex test that had silently stopped covering tag-skip.
 - 2026-08-09 — v0.0.101: name autocomplete + case-insensitive person merge.
   This one retroactively repairs existing libraries: any already-split person
   is consolidated the next time the labeler's Done button runs the merge.
