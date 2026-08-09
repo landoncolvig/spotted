@@ -23,6 +23,7 @@ type SpottedEvent =
   | { event: "tag-start"; total: number }
   | { event: "tag-video"; name: string; names: string[]; index: number; total: number }
   | { event: "tag-error"; name: string; message: string }
+  | { event: "tag-skip"; name: string; reason: string }
   | { event: "tag-empty"; message: string }
   | { event: "tag-failed"; failed: number; total: number; first: string }
   | { event: "tag-complete"; total: number }
@@ -294,6 +295,18 @@ let lastResolveEdl: string | null = null;
  *  rest did not. A tester received a timeline holding 1 of her 170 clips with
  *  nothing on screen to explain it, and assumed DaVinci had dropped them. */
 let lastMarkersSummary: Extract<SpottedEvent, { event: "markers-summary" }> | null = null;
+/** Which clips exiftool could not write, and why. The sidecar reports these
+ *  per clip and then exits non-zero if any of them failed, so a batch where
+ *  106 of 107 clips tagged perfectly arrives at the UI as one error string.
+ *  Keeping the individual failures means a run that half-worked can be
+ *  reported as half-worked, and the user can go look at the clips named. */
+let lastTagFailures: { name: string; message: string }[] = [];
+/** The sidecar's own count of the damage, which is authoritative: the per-clip
+ *  events can be truncated by a crash, this cannot. */
+let lastTagFailed: Extract<SpottedEvent, { event: "tag-failed" }> | null = null;
+/** Clips deliberately passed over — a container that cannot hold keywords is
+ *  not a failure, and must not be counted as one. */
+let lastTagSkips: { name: string; reason: string }[] = [];
 // How many clips are in a container that can't hold in-file markers.
 let lastUnwritable = 0;
 // Explanation the sidecar sent for camera-raw footage, preferred over its exit text.
@@ -491,10 +504,21 @@ function handleSpottedEvent(evt: SpottedEvent) {
     case "library-person":
       handleLibraryEvent(evt);
       break;
-    case "error":
     case "tag-error":
-    case "tag-empty":
+      // Kept, not just logged. The exit-code path gives one message for the
+      // whole batch; these are what let the done screen name the clips.
+      lastTagFailures.push({ name: evt.name, message: evt.message });
+      console.warn(evt);
+      break;
+    case "tag-skip":
+      lastTagSkips.push({ name: evt.name, reason: evt.reason });
+      break;
     case "tag-failed":
+      lastTagFailed = evt;
+      console.warn(evt);
+      break;
+    case "error":
+    case "tag-empty":
       // These are also surfaced through the sidecar exit-code path in
       // runTagWrite()'s catch — log here for the devtools breadcrumb.
       console.warn(evt);
@@ -813,6 +837,9 @@ async function runWrite(excludeTags: string[], allClips = false) {
   lastResolveEdl = null;
   lastMarkerError = null;
   lastMarkersSummary = null;
+  lastTagFailures = [];
+  lastTagFailed = null;
+  lastTagSkips = [];
   lastUnwritable = 0;
   lastCameraRaw = null;
   document.getElementById("done-verify")?.replaceChildren();
@@ -870,17 +897,27 @@ async function runWrite(excludeTags: string[], allClips = false) {
     setState("done");
     if (tagWriteError) {
       showError(tagWriteError);
-      if (lastResolveTimeline || lastResolveEdl) {
+      // "Couldn't finish" is the right headline only when nothing landed. One
+      // unwritable clip in a batch of 107 used to read exactly the same as all
+      // 107 failing, which sends someone to re-run a batch that was fine.
+      const partial = tagWriteWasPartial();
+      if (partial || lastResolveTimeline || lastResolveEdl) {
         doneTitle.textContent = "Finished with issues";
-        doneSub.textContent =
-          `${friendlyError(tagWriteError)} The DaVinci files were still created below.`;
+        doneSub.textContent = [
+          partial,
+          partial ? "" : friendlyError(tagWriteError),
+          lastResolveTimeline || lastResolveEdl
+            ? "The DaVinci files were still created below."
+            : "",
+        ].filter(Boolean).join(" ");
       }
       renderVerification();
       notifyIfBackground(
         "Spotted finished with issues",
-        lastResolveTimeline || lastResolveEdl
-          ? "DaVinci files were created, but some clip metadata could not be written."
-          : "Some clip metadata and timeline files could not be written.",
+        partial ||
+          (lastResolveTimeline || lastResolveEdl
+            ? "DaVinci files were created, but some clip metadata could not be written."
+            : "Some clip metadata and timeline files could not be written."),
       );
     } else {
       renderDone(stats);
@@ -895,6 +932,19 @@ async function runWrite(excludeTags: string[], allClips = false) {
       showError(String(err));
     }
   }
+}
+
+/** "Tagged 106 of 107 clips." when some of the batch survived, else "".
+ *
+ *  Only the sidecar's own tally is trusted for this. Counting the per-clip
+ *  tag-error events instead would understate the damage whenever the sidecar
+ *  died partway, and overstating success is the one direction that matters
+ *  here: it sends someone away believing footage is tagged when it is not. */
+function tagWriteWasPartial(): string {
+  const f = lastTagFailed;
+  if (!f || f.total <= 0 || f.failed <= 0 || f.failed >= f.total) return "";
+  const ok = f.total - f.failed;
+  return `Tagged ${ok} of ${f.total} clips. ${f.failed} could not be written.`;
 }
 
 /** library-stats and batch-stats carry the same payload; the finish line takes
@@ -1018,7 +1068,9 @@ function renderVerification() {
     markers ||
     lastMarkerError ||
     resolveCells.length ||
-    coverageCells.length
+    coverageCells.length ||
+    lastTagFailures.length ||
+    lastTagSkips.length
   );
   if (!hasEvidence) return;
 
@@ -1035,7 +1087,17 @@ function renderVerification() {
   // time it means the step ran and found nothing to do, which is a different
   // sentence — a tester read a clean run as the app doing nothing at all.
   // `note` says which one it was; rows carrying one render as a plain fact.
-  const rows: Array<{ label: string; values: string[]; help: string; note?: string }> = [];
+  // `bad` inverts the row's reading. Every other row here is evidence that a
+  // step worked, so empty means something is wrong and gets a warning. A row
+  // listing failures means the opposite: empty is the good case, and it is
+  // dropped rather than rendered as "⚠ Clips that failed: empty".
+  const rows: Array<{
+    label: string;
+    values: string[];
+    help: string;
+    note?: string;
+    bad?: boolean;
+  }> = [];
   if (v) {
     rows.push({
       label: "Keys (DaVinci, Finder)",
@@ -1076,6 +1138,28 @@ function renderVerification() {
       values: resolveCells,
       help: "Import the FCPXML with File > Import > Timeline, then import the EDL with Timelines > Import > Timeline Markers.",
     },
+    // Named, not counted. "3 clips failed" leaves someone scrolling a folder
+    // guessing which three; the filenames are what makes it actionable. Capped
+    // because a systemic failure names every clip in the batch, and the row
+    // says how many it is holding back rather than quietly truncating.
+    {
+      label: "Clips that failed",
+      values: lastTagFailures.slice(0, 8).map((t) => t.name).concat(
+        lastTagFailures.length > 8 ? [`+${lastTagFailures.length - 8} more`] : [],
+      ),
+      help: lastTagFailures.length
+        ? `Keywords could not be written into these. First reason: ${lastTagFailures[0].message}`
+        : "",
+      bad: true,
+    },
+    {
+      label: "Skipped (can't hold keywords)",
+      values: lastTagSkips.slice(0, 8).map((t) => t.name).concat(
+        lastTagSkips.length > 8 ? [`+${lastTagSkips.length - 8} more`] : [],
+      ),
+      help: "These containers cannot carry in-file keywords. They are still scanned, named, and placed in the DaVinci timeline.",
+      bad: true,
+    },
     {
       label: "Your tags (matched)",
       values: lastActivityResult?.sample?.tags ?? [],
@@ -1088,13 +1172,15 @@ function renderVerification() {
 
   for (const row of rows) {
     const filled = row.values.length > 0;
+    if (row.bad && !filled) continue;  // nothing failed: say nothing
     const explained = !filled && Boolean(row.note);
     const div = document.createElement("div");
     div.className =
-      "done-verify__row " + (filled ? "is-ok" : explained ? "is-none" : "is-empty");
+      "done-verify__row " +
+      (row.bad ? "is-empty" : filled ? "is-ok" : explained ? "is-none" : "is-empty");
     const dot = document.createElement("span");
     dot.className = "done-verify__dot";
-    dot.textContent = filled ? "✓" : explained ? "–" : "⚠";
+    dot.textContent = row.bad ? "⚠" : filled ? "✓" : explained ? "–" : "⚠";
     const label = document.createElement("span");
     label.className = "done-verify__label";
     label.textContent = row.label;

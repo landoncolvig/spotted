@@ -74,16 +74,26 @@ blocked on her sample + REDCINE-X install.
       passphrase + `TAURI_KEY_PASSWORD` secret. **Ask Landon before doing
       this** — it rotates the update-signing key and mis-sequencing it breaks
       the auto-updater for anyone on an older build.
-- [ ] **Ad-hoc signing + dyld entitlements.** The app is unsigned and relies
-      on entitlements that permit unsigned library loading. Real fix is an
-      Apple Developer cert; until then, document the exposure in README and
-      drop any entitlement not actually needed by the sidecar.
+- [ ] **Ad-hoc signing + dyld entitlements.** BLOCKED on disk space, see the
+      Blocked section. Partly answered: `disable-library-validation` is
+      definitively required and must stay. Whether the other two can go is
+      still unproven, so do not ship a reduction on the strength of the note
+      below.
 
 ## Deferred features
 
-- [ ] **Partial-failure Done screen.** Today a batch is green or it isn't.
-      Show per-clip outcomes when some clips failed and others didn't, so a
-      run that half-worked reads as half-worked.
+- [x] **Partial-failure Done screen.** (v0.0.98) `tag-write` exits non-zero if
+      any single clip fails, so 1 bad clip in 107 rendered identically to all
+      107 failing — "Couldn't finish" — which sends someone back to re-run a
+      batch that was fine. The per-clip detail was already on the wire and the
+      frontend was discarding it in a `console.warn`. Now kept and shown:
+      "Tagged 106 of 107 clips", plus the failing filenames (capped at 8, and
+      the cap announces itself). `tag-skip` was emitted by the sidecar and
+      missing from the TS union entirely, so it fell through the switch; a
+      test now compares emitted `tag-*` events against declared ones. The
+      partial count comes from the sidecar's own tally, never from counting
+      the per-clip events, which would understate damage if the sidecar died
+      partway.
 - [ ] **Energy tagging reviewable / opt-out.** Energy buckets and peak markers
       are written with no review step and no way to turn them off, unlike
       faces and activity tags which both have one.
@@ -118,6 +128,31 @@ blocked on her sample + REDCINE-X install.
   `scripts/redline_probe.sh` reports what REDline can do once she has it.
 - **Two-frame Resolve offset** — needs a Resolve-proven source mapping from
   her real artifact.
+- **Trimming the dyld entitlements** — needs disk space on this machine. The
+  only honest way to test is against the real frozen sidecar, and the way to
+  get one without CI is to download the shipped `Spotted.app.tar.gz`, re-sign
+  the sidecar with a reduced entitlement set, and run its `selftest`. That
+  needs roughly 3GB free: 690MB for the bundle and about a gigabyte more for
+  PyInstaller's unpack plus CoreML's model compilation scratch. The volume sat
+  at 99% (2-3GB free) and the runs became unreproducible — the same config
+  passed at 3.0GB free and failed at 2.4GB with
+  `Error compiling model: I/O error`, which reads like an entitlement problem
+  and is not one.
+
+  What the runs did establish, because it fails instantly and identically
+  regardless of disk: **`disable-library-validation` is required.** Without it
+  the sidecar dies before any Python runs, at
+  `dlopen(Python.framework)` → *"mapping process and mapped file
+  (non-platform) have different Team IDs"*. That is the entitlement the file's
+  comment actually justifies.
+
+  Unproven: `allow-unsigned-executable-memory` and
+  `allow-dyld-environment-variables`. One clean run passed the full selftest
+  with only `disable-library-validation`, and it could not be reproduced under
+  disk pressure. One observation is not enough to change what the whole fleet
+  auto-installs. Note also that `selftest` exercises the sidecar only — the
+  Tauri parent shares the same entitlements file and cannot be tested here
+  without launching the GUI.
 
 ## Waiting on Ellie
 
@@ -134,6 +169,13 @@ portrait frames degrading detection, labeler "failed to start" at 200+ clips.
   she can see changed, and a CSP is only news if it broke something.
 - 2026-08-09 — v0.0.96: dropped the webview's shell grant entirely. No tester
   text, same reason.
+- 2026-08-09 — entitlement trimming attempted and NOT shipped. Proved
+  `disable-library-validation` is required; could not get a reproducible
+  result on the other two because this machine's disk is at 99%. Moved to
+  Blocked with the method written down. No release.
+- 2026-08-09 — v0.0.98: partial-failure Done screen. First tick whose change
+  Ellie would actually see, but not texting her: she has not run a batch since
+  2026-08-03, and this only shows up when a clip fails.
 - 2026-08-09 — v0.0.97: labeler response headers + Origin gate. Preflight
   earned its keep here: the CSP nonce attribute broke the test that
   node-syntax-checks the labeler's JavaScript, which anchored on a literal
