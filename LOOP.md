@@ -171,8 +171,18 @@ blocked on her sample + REDCINE-X install.
       while it ran. The other seven are console-only deliberately, and
       declared so that being console-only is a decision rather than an
       oversight.
-- [ ] **iCloud pre-check.** Warn before scanning a folder whose files are
-      not downloaded, instead of failing per clip.
+- [x] **iCloud pre-check.** (v0.0.106) Checked once, up front, instead of
+      meeting evicted clips one at a time inside the scan as per-clip decode
+      failures — which reads as "my footage is broken" rather than "these have
+      not downloaded yet", and the user's next move differs completely. Two
+      signals, because providers differ: `st_blocks == 0` with a non-zero size
+      (an APFS dataless placeholder), and a sibling `.<name>.icloud`, which is
+      what iCloud leaves when it evicts a file outright — the video path then
+      does not exist at all, so there is nothing to stat. A partly-downloaded
+      folder scans what is there and names the rest; a folder with nothing
+      downloaded stops with the reason rather than running a pass that can
+      only fail. Guarded against two false positives: a genuinely deleted clip
+      and a zero-byte file both need different advice.
 
 ## Roadmap (multi-tick — split before starting)
 
@@ -235,6 +245,9 @@ portrait frames degrading detection, labeler "failed to start" at 200+ clips.
   she can see changed, and a CSP is only news if it broke something.
 - 2026-08-09 — v0.0.96: dropped the webview's shell grant entirely. No tester
   text, same reason.
+- 2026-08-09 — v0.0.106: iCloud pre-check. Three of my own tests asserted
+  pretty-printed JSON; `_emit` uses compact separators. Fixed the assertions,
+  not the emit.
 - 2026-08-09 — v0.0.105: triaged all 13 silent events. TypeScript caught me
   collecting `index-prune-error` without surfacing it, which is the same
   mistake in miniature — the compiler noticed a value that reached nobody.

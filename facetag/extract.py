@@ -50,6 +50,40 @@ def camera_raw_in(paths: list[Path]) -> list[str]:
     return sorted(found)
 
 
+def not_downloaded(videos: list[Path]) -> list[Path]:
+    """Clips that exist in the index sense but have no data on this disk.
+
+    iCloud Drive, Dropbox and OneDrive all evict file contents while leaving
+    something that looks like a file. Spotted used to discover this one clip at
+    a time, deep inside a scan, as a decode failure per clip — which reads as
+    "this footage is broken" rather than "these are not downloaded yet".
+
+    Two signals, because the providers differ:
+
+    `st_blocks == 0` with a non-zero size means the file occupies no space, so
+    whatever the directory entry says, the bytes are elsewhere. This is what an
+    APFS dataless placeholder looks like.
+
+    A sibling `.<name>.icloud` is what iCloud leaves when it evicts a file
+    outright: the real name disappears and a small plist takes its place. It is
+    checked separately because in that case the video path does not exist at
+    all, so there is nothing to stat.
+    """
+    missing: list[Path] = []
+    for v in videos:
+        try:
+            st = v.stat()
+        except OSError:
+            # Gone entirely, or the placeholder form. Either way there is
+            # nothing here to read.
+            if (v.parent / f".{v.name}.icloud").exists():
+                missing.append(v)
+            continue
+        if st.st_size > 0 and st.st_blocks == 0:
+            missing.append(v)
+    return missing
+
+
 def walk_videos(root: Path) -> list[Path]:
     if root.is_file():
         return [root] if is_video(root) else []

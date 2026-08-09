@@ -29,6 +29,7 @@ type SpottedEvent =
   | { event: "tag-video"; name: string; names: string[]; index: number; total: number }
   | { event: "tag-error"; name: string; message: string }
   | { event: "tag-skip"; name: string; reason: string; index?: number; total?: number }
+  | { event: "scan-not-downloaded"; clips: number; names: string[]; fatal: boolean; message: string }
   | { event: "report-complete"; path: string; clips: number }
   // Failures the user needs to hear about. Each one used to fall through the
   // event switch, so the step reported success it had not achieved.
@@ -355,6 +356,11 @@ let lastTagFailed: Extract<SpottedEvent, { event: "tag-failed" }> | null = null;
 /** Clips deliberately passed over — a container that cannot hold keywords is
  *  not a failure, and must not be counted as one. */
 let lastTagSkips: { name: string; reason: string }[] = [];
+/** Clips a cloud provider had evicted, skipped before the scan started.
+ *  Kept so the Done screen can name them: someone who dropped 200 clips and
+ *  got 140 needs to know the other 60 were not downloaded, not lost. */
+let lastNotDownloaded: { count: number; names: string[] } | null = null;
+
 /** Clips whose Finder tag or Spotlight comment could not be written. The
  *  keyword write can succeed while this fails, so the run looks clean and
  *  Finder search quietly does not find those clips. */
@@ -612,6 +618,13 @@ function handleSpottedEvent(evt: SpottedEvent) {
       break;
     case "report-complete":
       console.info(`report: ${evt.clips} clip(s) → ${evt.path}`);
+      break;
+    case "scan-not-downloaded":
+      lastNotDownloaded = { count: evt.clips, names: evt.names };
+      // The fatal case is surfaced by the sidecar's exit; this line covers the
+      // partial one, where the scan carries on without them.
+      if (!evt.fatal) workingDetail.textContent = evt.message;
+      console.warn(evt);
       break;
     case "finder-error":
       lastFinderErrors.push({ name: evt.name, message: evt.message });
@@ -1099,6 +1112,7 @@ async function runWrite(excludeTags: string[], allClips = false) {
   lastTagFailed = null;
   lastTagSkips = [];
   lastFinderErrors = [];
+  lastNotDownloaded = null;
   lastMarkerSkips = [];
   lastEnergySkips = [];
   lastIndexPruneError = null;
@@ -1348,6 +1362,7 @@ function renderVerification() {
     coverageCells.length ||
     lastTagFailures.length ||
     lastTagSkips.length ||
+    lastNotDownloaded ||
     lastFinderErrors.length ||
     lastMarkerSkips.length ||
     lastEnergySkips.length ||
@@ -1424,6 +1439,20 @@ function renderVerification() {
     // guessing which three; the filenames are what makes it actionable. Capped
     // because a systemic failure names every clip in the batch, and the row
     // says how many it is holding back rather than quietly truncating.
+    {
+      // Someone who dropped 200 clips and saw 140 tagged needs to know the
+      // other 60 are on a server, not missing.
+      label: "Not downloaded",
+      values: lastNotDownloaded
+        ? lastNotDownloaded.names.slice(0, 8).concat(
+            lastNotDownloaded.count > lastNotDownloaded.names.length
+              ? [`+${lastNotDownloaded.count - lastNotDownloaded.names.length} more`]
+              : [],
+          )
+        : [],
+      help: "iCloud Drive, Dropbox and OneDrive keep a placeholder until something opens the file. Download these in Finder and drop the folder again.",
+      bad: true,
+    },
     {
       // The keyword write can succeed while this fails, so without a row here
       // the run reports clean and Finder search silently misses those clips.

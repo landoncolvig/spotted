@@ -330,6 +330,38 @@ def scan(
         console.print(f"[red]No videos found under {where}[/red]")
         raise typer.Exit(1)
 
+    # Clips a cloud provider has evicted. Checked here, once, before anything
+    # expensive starts: these used to surface one at a time deep inside the
+    # scan as per-clip decode failures, which reads as "my footage is broken"
+    # rather than "these have not downloaded yet".
+    evicted = _extract.not_downloaded(videos)
+    if evicted:
+        names = [p.name for p in evicted[:5]]
+        shown = ", ".join(names) + (f" and {len(evicted) - 5} more" if len(evicted) > 5 else "")
+        if len(evicted) == len(videos):
+            # Nothing to scan. Stop with the reason rather than running a whole
+            # pass that can only fail.
+            message = (
+                f"None of these {len(videos)} clip(s) are downloaded to this Mac. "
+                "iCloud Drive, Dropbox and OneDrive keep a placeholder in place "
+                "of a file's contents until something opens it. Open the folder "
+                "in Finder and choose Download Now, then drop it again."
+            )
+            console.print(f"[yellow]{message}[/yellow]")
+            _emit("scan-not-downloaded", clips=len(evicted), names=names, fatal=True, message=message)
+            raise typer.Exit(1)
+        message = (
+            f"{len(evicted)} of {len(videos)} clip(s) are not downloaded to this "
+            f"Mac and will be skipped: {shown}. Download them in Finder and drop "
+            "the folder again to include them."
+        )
+        console.print(f"[yellow]{message}[/yellow]")
+        _emit("scan-not-downloaded", clips=len(evicted), names=names, fatal=False, message=message)
+        # Carry on with the clips that ARE here. A partly-downloaded folder is
+        # the normal case, and refusing all of it helps nobody.
+        skip = {str(p) for p in evicted}
+        videos = [v for v in videos if str(v) not in skip]
+
     batch_tags = [t.strip().lower() for t in tags.split(",") if t.strip()] if tags else []
 
     conn = _db.connect(db_path)
