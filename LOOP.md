@@ -33,11 +33,14 @@ blocked on her sample + REDCINE-X install.
 
 ## Security / hardening
 
-- [ ] **Lock the main window's CSP.** `app/src-tauri/tauri.conf.json:31` is
-      `"csp": null`, so the webview has no content-security policy at all.
-      Set a real one (self + the data: URIs the activity-review thumbnails
-      use + the localhost labeler iframe origin). Verify the labeler iframe
-      and the base64 thumb strip both still render before tagging.
+- [x] **Lock the main window's CSP.** (v0.0.95) Was `"csp": null` — no policy
+      at all. Now `script-src 'self'`, no eval, no wildcards, with `asset:`
+      and `data:` in img-src for person and activity thumbnails,
+      `ipc: http://ipc.localhost` for invoke, and `frame-src` pinned to the
+      labeler origin. `tests/test_webview_csp.py` pins the policy against the
+      frontend that needs it — including a guard that fails if `LABEL_PORT`
+      and the `frame-src` port ever drift apart, since that would render the
+      naming step as an empty iframe.
 - [ ] **Stop the sidecar capability accepting arbitrary args.**
       `app/src-tauri/capabilities/default.json:22` has `"args": true`, which
       lets any frontend code run the sidecar with any argv. Replace with the
@@ -111,3 +114,5 @@ portrait frames degrading detection, labeler "failed to start" at 200+ clips.
 ## Log
 
 - 2026-08-09 — queue created, loop restarted after a 2-day gap.
+- 2026-08-09 — v0.0.95: main-window CSP locked down. No tester text; nothing
+  she can see changed, and a CSP is only news if it broke something.
