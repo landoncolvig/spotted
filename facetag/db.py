@@ -769,7 +769,20 @@ def face_times_in_video(
 
 
 def known_names(conn: sqlite3.Connection) -> list[str]:
-    return [r[0] for r in conn.execute("SELECT DISTINCT name FROM people ORDER BY name").fetchall()]
+    """Every name already in the library, for the labeler's autocomplete.
+
+    Filters blanks and keeps one spelling per name, so the suggestion list
+    cannot itself offer the two variants that produce a split person.
+    """
+    rows = conn.execute(
+        "SELECT name FROM people WHERE name IS NOT NULL AND name != ''"
+    ).fetchall()
+    seen: dict[str, str] = {}
+    for (name,) in rows:
+        key = name.strip().lower()
+        if key and key not in seen:
+            seen[key] = name.strip()
+    return sorted(seen.values(), key=str.lower)
 
 
 def has_clusters(conn: sqlite3.Connection) -> bool:
@@ -811,6 +824,14 @@ def merge_clusters_by_name(conn: sqlite3.Connection) -> dict[str, list[int]]:
     most faces as canonical. Re-point all faces from the other clusters
     to the canonical cluster_id. Delete the redundant people rows.
 
+    Names are matched case- and whitespace-insensitively, so "Grayson",
+    "grayson" and "Grayson " are one person rather than three. They used to
+    group on the raw string, which meant a single inconsistent keystroke split
+    someone permanently: the labeler would show two cards for them forever, and
+    an editor searching one spelling would miss half their clips. The surviving
+    row keeps the spelling of the largest cluster, on the same reasoning the
+    canonical cluster is chosen — most of the faces were filed under it.
+
     Idempotent — running it twice is a no-op.
     """
     rows = conn.execute(
@@ -822,24 +843,35 @@ def merge_clusters_by_name(conn: sqlite3.Connection) -> dict[str, list[int]]:
         "ORDER BY p.name, cnt DESC"
     ).fetchall()
 
-    by_name: dict[str, list[tuple[int, int]]] = {}
+    # Keyed on the normalised name; the spellings are carried alongside so the
+    # winner can be looked up once the largest cluster is known.
+    by_name: dict[str, list[tuple[int, int, str]]] = {}
     for cid, name, cnt in rows:
-        by_name.setdefault(name, []).append((int(cid), int(cnt)))
+        by_name.setdefault(name.strip().lower(), []).append(
+            (int(cid), int(cnt), name)
+        )
 
     merged: dict[str, list[int]] = {}
-    for name, entries in by_name.items():
+    for entries in by_name.values():
+        entries.sort(key=lambda x: -x[1])  # largest cluster first
+        canonical, _, winning_name = entries[0]
         if len(entries) <= 1:
             continue
-        entries.sort(key=lambda x: -x[1])  # largest cluster first
-        canonical = entries[0][0]
-        others = [cid for cid, _ in entries[1:]]
+        others = [cid for cid, _, _ in entries[1:]]
         for old_cid in others:
             conn.execute(
                 "UPDATE faces SET cluster_id = ? WHERE cluster_id = ?",
                 (canonical, old_cid),
             )
             conn.execute("DELETE FROM people WHERE cluster_id = ?", (old_cid,))
-        merged[name] = [cid for cid, _ in entries]
+        # Settle on one spelling. Without this the merge would be invisible in
+        # the keyword written into the files, which is the only place the user
+        # actually sees the name.
+        conn.execute(
+            "UPDATE people SET name = ? WHERE cluster_id = ?",
+            (winning_name, canonical),
+        )
+        merged[winning_name] = [cid for cid, _, _ in entries]
 
     conn.commit()
     return merged

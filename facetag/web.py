@@ -205,6 +205,11 @@ def create_app(
 
         with _conn() as conn:
             summary = db.cluster_summary_with_videos(conn, scope_paths=scope)
+            # Read on the same connection rather than reopening later: the
+            # labeler is scoped to a batch, but the suggestions are deliberately
+            # library-wide, since the whole point is to reuse a name the user
+            # typed on an earlier drop.
+            all_names = db.known_names(conn)
 
         # Apply the view filter and count what we're hiding so the header
         # can offer a "show N hidden" affordance — users without context
@@ -250,7 +255,7 @@ def create_app(
                 <button type="button" class="hide-btn" data-cluster="{cid}" title="Hide this cluster (not a person)">×</button>
               </div>
               <img loading="lazy" src="/thumb/{cid}.jpg{thumb_qs}" alt="cluster {cid}">
-              <input type="text" name="name-{cid}" placeholder="name…" value="{existing}" autocomplete="off">
+              <input type="text" name="name-{cid}" placeholder="name…" value="{existing}" list="known-names" autocomplete="off">
               {badge}
               {_render_seen_in(video_paths)}
             </div>
@@ -316,6 +321,10 @@ def create_app(
             _PAGE
             .replace("__NONCE__", html.escape(g.csp_nonce, quote=True))
             .replace("__TOKEN__", html.escape(tok, quote=True))
+            .replace("__KNOWN_NAMES__", "".join(
+                f'<option value="{html.escape(n, quote=True)}">'
+                for n in all_names
+            ))
             .replace("__CARDS__", "\n".join(cards))
             .replace("__COUNT__", str(len(summary)))
             .replace("__SCOPE_CHIP__", scope_chip)
@@ -714,6 +723,9 @@ _PAGE = r"""<!doctype html>
     <input class="filter" id="filter" placeholder="filter…" autocomplete="off">
   </div>
 </header>
+<!-- Names already in the library. A native datalist needs no script, which
+     matters here: the page runs under a nonce CSP with no inline handlers. -->
+<datalist id="known-names">__KNOWN_NAMES__</datalist>
 <div class="grid" id="grid">__CARDS__</div>
 <div id="toast"></div>
 <script nonce="__NONCE__">

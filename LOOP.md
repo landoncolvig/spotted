@@ -117,9 +117,16 @@ blocked on her sample + REDCINE-X install.
       level drops its keyword AND its peak cues, which needs gating in two
       places, because a clip can enter the marker set through its named faces
       and would otherwise collect energy cues on the way past.
-- [ ] **Name autocomplete in the labeler.** Typing a name that already exists
-      in the library should complete, so "Grayson" and "grayson" stop being
-      two people.
+- [x] **Name autocomplete in the labeler.** (v0.0.101) Two halves, because
+      autocomplete alone only lowers the odds. The labeler now suggests every
+      name already in the library via a native `<datalist>` (no script, which
+      matters under the page's nonce CSP), and `merge_clusters_by_name` groups
+      case- and whitespace-insensitively, so a second spelling stops mattering
+      when someone types it anyway. The surviving row takes the spelling of
+      the largest cluster; without settling that, the merge would be invisible
+      in the keyword written into the file, which is the only place the user
+      sees the name. Suggestions are library-wide even though the labeler is
+      batch-scoped, since reusing a name from an earlier drop is the point.
 - [ ] **Scan ETA.** Long scans show progress with no time estimate; on a
       200-clip drop the user can't tell a slow run from a hung one.
 - [ ] **Per-clip pruning in the activity review.** Drop a tag from ONE clip
@@ -189,6 +196,9 @@ portrait frames degrading detection, labeler "failed to start" at 200+ clips.
   she can see changed, and a CSP is only news if it broke something.
 - 2026-08-09 — v0.0.96: dropped the webview's shell grant entirely. No tester
   text, same reason.
+- 2026-08-09 — v0.0.101: name autocomplete + case-insensitive person merge.
+  This one retroactively repairs existing libraries: any already-split person
+  is consolidated the next time the labeler's Done button runs the merge.
 - 2026-08-09 — v0.0.100: energy review screen. Closes the asymmetry — nothing
   Spotted decides about someone's footage now reaches their files unseen.
 - 2026-08-09 — v0.0.99: energy opt-out. Split the queue item: the opt-out
