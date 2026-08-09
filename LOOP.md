@@ -160,14 +160,17 @@ blocked on her sample + REDCINE-X install.
       and a report showing intent would be worse than none, since being
       checkable after the fact is the entire point. Scoped to the batch the
       Done screen just described, except after Re-tag Library.
-- [ ] **13 sidecar events reach nobody.** Found while adding this one. The
-      frontend does not declare `finder-error`, `markers-skip`, `energy-skip`,
-      `cluster-empty`, `index-prune-error` and 8 others, so they fall through
-      the event switch silently. `finder-error` is a per-clip write failure the
-      UI never hears about, which is the same class of bug v0.0.98 fixed for
-      `tag-skip`. The list is pinned in `tests/test_partial_tag_failure.py` as
-      `KNOWN_UNDECLARED` so it cannot grow; each entry needs a decision —
-      surface it, or confirm the CLI console is the only audience.
+- [x] **13 sidecar events reached nobody.** (v0.0.105) All triaged, allowlist
+      now empty and must stay that way. Four were failures the user needed and
+      now show on the Done screen: `finder-error` (the important one — the
+      keyword write can succeed while the Finder tag and Spotlight comment
+      fail, so the run reported clean while Finder search quietly could not
+      find those clips), `markers-skip`, `energy-skip`, `index-prune-error`.
+      Two were progress for the embedding backfill, which runs on any library
+      first scanned before activity tagging existed and showed nothing at all
+      while it ran. The other seven are console-only deliberately, and
+      declared so that being console-only is a decision rather than an
+      oversight.
 - [ ] **iCloud pre-check.** Warn before scanning a folder whose files are
       not downloaded, instead of failing per clip.
 
@@ -232,6 +235,9 @@ portrait frames degrading detection, labeler "failed to start" at 200+ clips.
   she can see changed, and a CSP is only news if it broke something.
 - 2026-08-09 — v0.0.96: dropped the webview's shell grant entirely. No tester
   text, same reason.
+- 2026-08-09 — v0.0.105: triaged all 13 silent events. TypeScript caught me
+  collecting `index-prune-error` without surfacing it, which is the same
+  mistake in miniature — the compiler noticed a value that reached nobody.
 - 2026-08-09 — v0.0.104: report export. Generalised the event-declaration
   guard from `tag-*` to ALL events, which immediately surfaced 13 pre-existing
   events the frontend silently drops. Pinned them in an allowlist that cannot

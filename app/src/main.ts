@@ -30,6 +30,26 @@ type SpottedEvent =
   | { event: "tag-error"; name: string; message: string }
   | { event: "tag-skip"; name: string; reason: string; index?: number; total?: number }
   | { event: "report-complete"; path: string; clips: number }
+  // Failures the user needs to hear about. Each one used to fall through the
+  // event switch, so the step reported success it had not achieved.
+  | { event: "finder-error"; name: string; message: string }
+  | { event: "markers-skip"; name: string; reason: string }
+  | { event: "energy-skip"; name: string; reason: string }
+  | { event: "index-prune-error"; message: string }
+  // Progress for the embedding backfill, which runs on any library first
+  // scanned before activity tagging existed and showed nothing at all.
+  | { event: "activity-backfill-start"; total: number }
+  | { event: "activity-backfill"; name: string; index: number; total: number; embeddings: number }
+  // Declared so they cannot be mistaken for an oversight, but deliberately
+  // console-only: each reports something the UI already conveys elsewhere or
+  // that the user has no decision to make about.
+  | { event: "cluster-empty" }
+  | { event: "cluster-skipped"; clusters: number }
+  | { event: "index-pruned"; count: number }
+  | { event: "person-thumbs-complete"; count: number; dir: string }
+  | { event: "resolve-stale-removed"; path: string }
+  | { event: "timeline-duplicate-skipped"; path: string; kept: string }
+  | { event: "video-energy"; name: string; bucket: string; score: number; peaks: number }
   | { event: "tag-pruned"; pairs: number }
   | { event: "tag-prune-error"; message: string }
   | { event: "tag-empty"; message: string }
@@ -335,6 +355,18 @@ let lastTagFailed: Extract<SpottedEvent, { event: "tag-failed" }> | null = null;
 /** Clips deliberately passed over — a container that cannot hold keywords is
  *  not a failure, and must not be counted as one. */
 let lastTagSkips: { name: string; reason: string }[] = [];
+/** Clips whose Finder tag or Spotlight comment could not be written. The
+ *  keyword write can succeed while this fails, so the run looks clean and
+ *  Finder search quietly does not find those clips. */
+let lastFinderErrors: { name: string; message: string }[] = [];
+/** Clips whose container cannot carry in-file markers. Not a failure — the
+ *  same fact the tag side already reports as "in EDL only". */
+let lastMarkerSkips: { name: string; reason: string }[] = [];
+/** Clips that could not be scored for energy. */
+let lastEnergySkips: { name: string; reason: string }[] = [];
+/** Set when the index prune failed, which leaves stale rows behind. */
+let lastIndexPruneError: string | null = null;
+
 /** Set when the sidecar could not apply the per-clip rejections. Worth saying
  *  out loud: the user unchecked clips, the write went ahead anyway, and those
  *  tags are now in their files. Silence here looks like success. */
@@ -580,6 +612,42 @@ function handleSpottedEvent(evt: SpottedEvent) {
       break;
     case "report-complete":
       console.info(`report: ${evt.clips} clip(s) → ${evt.path}`);
+      break;
+    case "finder-error":
+      lastFinderErrors.push({ name: evt.name, message: evt.message });
+      console.warn(evt);
+      break;
+    case "markers-skip":
+      lastMarkerSkips.push({ name: evt.name, reason: evt.reason });
+      break;
+    case "energy-skip":
+      lastEnergySkips.push({ name: evt.name, reason: evt.reason });
+      console.warn(evt);
+      break;
+    case "index-prune-error":
+      lastIndexPruneError = evt.message;
+      console.warn(evt);
+      break;
+    case "activity-backfill-start":
+      workingLabel.textContent = "Catching up on older clips";
+      workingDetail.textContent =
+        `Indexing ${evt.total} clip${evt.total === 1 ? "" : "s"} scanned before tag matching existed…`;
+      setProgressIndeterminate();
+      break;
+    case "activity-backfill":
+      workingDetail.textContent = `${evt.name} · ${evt.index}/${evt.total}`;
+      if (evt.total > 0) setProgress((evt.index / evt.total) * 100);
+      break;
+    // Deliberately console-only. See the union above for why each is here
+    // rather than on screen.
+    case "cluster-empty":
+    case "cluster-skipped":
+    case "index-pruned":
+    case "person-thumbs-complete":
+    case "resolve-stale-removed":
+    case "timeline-duplicate-skipped":
+    case "video-energy":
+      console.info(evt);
       break;
     case "tag-pruned":
       console.info(`pruned ${evt.pairs} clip/tag pair(s)`);
@@ -1030,6 +1098,10 @@ async function runWrite(excludeTags: string[], allClips = false) {
   lastTagFailures = [];
   lastTagFailed = null;
   lastTagSkips = [];
+  lastFinderErrors = [];
+  lastMarkerSkips = [];
+  lastEnergySkips = [];
+  lastIndexPruneError = null;
   lastPruneError = null;
   lastUnwritable = 0;
   lastCameraRaw = null;
@@ -1276,6 +1348,10 @@ function renderVerification() {
     coverageCells.length ||
     lastTagFailures.length ||
     lastTagSkips.length ||
+    lastFinderErrors.length ||
+    lastMarkerSkips.length ||
+    lastEnergySkips.length ||
+    lastIndexPruneError ||
     lastPruneError
   );
   if (!hasEvidence) return;
@@ -1348,6 +1424,44 @@ function renderVerification() {
     // guessing which three; the filenames are what makes it actionable. Capped
     // because a systemic failure names every clip in the batch, and the row
     // says how many it is holding back rather than quietly truncating.
+    {
+      // The keyword write can succeed while this fails, so without a row here
+      // the run reports clean and Finder search silently misses those clips.
+      label: "Finder tags that failed",
+      values: lastFinderErrors.slice(0, 8).map((t) => t.name).concat(
+        lastFinderErrors.length > 8 ? [`+${lastFinderErrors.length - 8} more`] : [],
+      ),
+      help: lastFinderErrors.length
+        ? `Spotlight and Finder search will not find these by name. First reason: ${lastFinderErrors[0].message}`
+        : "",
+      bad: true,
+    },
+    {
+      label: "Skipped (can't hold markers)",
+      values: lastMarkerSkips.slice(0, 8).map((t) => t.name).concat(
+        lastMarkerSkips.length > 8 ? [`+${lastMarkerSkips.length - 8} more`] : [],
+      ),
+      help: "These containers cannot carry in-file markers. They are still in the DaVinci timeline and EDL.",
+      bad: true,
+    },
+    {
+      label: "Not scored for energy",
+      values: lastEnergySkips.slice(0, 8).map((t) => t.name).concat(
+        lastEnergySkips.length > 8 ? [`+${lastEnergySkips.length - 8} more`] : [],
+      ),
+      help: lastEnergySkips.length
+        ? `No energy keyword or peak markers on these. First reason: ${lastEnergySkips[0].reason}`
+        : "",
+      bad: true,
+    },
+    {
+      label: "Index cleanup",
+      values: lastIndexPruneError ? ["failed — stale clips may still be listed"] : [],
+      help: lastIndexPruneError
+        ? `Spotted could not forget clips that left the disk: ${lastIndexPruneError}`
+        : "",
+      bad: true,
+    },
     {
       label: "Clips you unchecked",
       values: lastPruneError ? ["not applied — the tags were still written"] : [],

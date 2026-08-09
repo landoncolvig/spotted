@@ -44,20 +44,15 @@ def test_every_emitted_tag_event_is_declared_in_the_frontend():
     assert EMITTED <= declared, f"sidecar emits undeclared: {EMITTED - declared}"
 
 
-# Events the sidecar emits that the frontend does not declare, so they fall
-# through the event switch and reach nobody. Found while adding report-complete
-# and left as an explicit list rather than a silent gap: each one needs a
-# decision (surface it, or confirm the CLI console is the only audience). Some
-# clearly matter — finder-error is a per-clip write failure the UI never hears
-# about, which is exactly the class of bug v0.0.98 was about.
+# Every event the sidecar emits is now declared in the frontend. The list this
+# replaces held 13, found when this check was generalised from `tag-*` to all
+# events. `finder-error` was the one that mattered: a per-clip Finder-write
+# failure the UI could not report, so a run said "Done" while Spotlight search
+# quietly could not find those clips.
 #
-# Nothing may be ADDED to this list. Declare the event instead.
-KNOWN_UNDECLARED = {
-    "activity-backfill", "activity-backfill-start", "cluster-empty",
-    "cluster-skipped", "energy-skip", "finder-error", "index-prune-error",
-    "index-pruned", "markers-skip", "person-thumbs-complete",
-    "resolve-stale-removed", "timeline-duplicate-skipped", "video-energy",
-}
+# Keep this empty. An event with nowhere to go is a step reporting success it
+# did not achieve.
+KNOWN_UNDECLARED: set[str] = set()
 
 
 def test_no_new_event_starts_falling_through_the_switch():
