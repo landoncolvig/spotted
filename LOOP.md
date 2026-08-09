@@ -106,10 +106,17 @@ blocked on her sample + REDCINE-X install.
       are in the marker set at all). Kept off `--exclude-tags` deliberately —
       exclusions are persisted as review rejections and would have deleted a
       user's own tag if they had typed "high energy".
-- [ ] **Energy REVIEW step** (the other half of the item above). Faces and
-      activity tags both get a confirm-before-write screen; energy still does
-      not. Opting out is now possible, but a user who wants energy still
-      cannot see or prune what it decided before it lands in their files.
+- [x] **Energy REVIEW step.** (v0.0.100) The review screen now has an Energy
+      section: a row per level with clip count, a sample name and thumbnails,
+      each unchecked individually. `activity-suggest` emits `energy-summary`
+      alongside `activity-complete`, read off the same captured stdout.
+      Two things that would have made it nearly invisible: `activity-suggest`
+      returns early when the user typed no tags, so the emit had to go BEFORE
+      that bail; and the frontend skipped the review whenever no tags matched,
+      which is the normal state for someone who never typed any. Unchecking a
+      level drops its keyword AND its peak cues, which needs gating in two
+      places, because a clip can enter the marker set through its named faces
+      and would otherwise collect energy cues on the way past.
 - [ ] **Name autocomplete in the labeler.** Typing a name that already exists
       in the library should complete, so "Grayson" and "grayson" stop being
       two people.
@@ -182,6 +189,8 @@ portrait frames degrading detection, labeler "failed to start" at 200+ clips.
   she can see changed, and a CSP is only news if it broke something.
 - 2026-08-09 — v0.0.96: dropped the webview's shell grant entirely. No tester
   text, same reason.
+- 2026-08-09 — v0.0.100: energy review screen. Closes the asymmetry — nothing
+  Spotted decides about someone's footage now reaches their files unseen.
 - 2026-08-09 — v0.0.99: energy opt-out. Split the queue item: the opt-out
   shipped, the review screen is still open and re-queued above.
 - 2026-08-09 — entitlement trimming attempted and NOT shipped. Proved

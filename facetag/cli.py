@@ -562,11 +562,47 @@ def activity_suggest(
     from collections import defaultdict
 
     conn = _db.connect(db_path)
+    root = _resolve_scope(scope, conn, allow_all=all_clips)
 
-    user_tags = _db.all_batch_tags(conn, _resolve_scope(scope, conn, allow_all=all_clips))
+    def _emit_energy_summary() -> None:
+        """What energy decided, in the same shape the review screen already
+        renders for matched tags. Emitted here because this command is the last
+        thing to run before the review, and energy is computed back at scan
+        time with nothing in between to report it."""
+        buckets = _db.energy_bucket_summary(conn)
+        if not buckets:
+            return
+        thumb_cache: dict = {}
+        rows = []
+        for bucket, paths in buckets.items():
+            in_scope = [p for p in paths if _under_scope(p, root)]
+            if not in_scope:
+                continue
+            thumbs = [
+                u for p in in_scope[:4]
+                if (u := _clip_thumb_datauri(p, thumb_cache))
+            ]
+            rows.append({
+                "tag": f"{bucket} energy",
+                "bucket": bucket,
+                "clips": len(in_scope),
+                "sample": Path(in_scope[0]).name,
+                "thumbs": thumbs,
+            })
+        if not rows:
+            return
+        order = {b: i for i, b in enumerate(reversed(_energy.BUCKETS))}
+        rows.sort(key=lambda r: order.get(r["bucket"], 99))
+        _emit("energy-summary", buckets=rows)
+
+    user_tags = _db.all_batch_tags(conn, root)
     if not user_tags:
         console.print("[yellow]No tags to look for — the user didn't enter any on the welcome screen.[/yellow]")
         _emit("activity-empty", message="no user tags entered")
+        # Someone who typed no tags still had their footage scored, and is
+        # exactly the person the energy review exists for. Bailing here without
+        # this is how the review would have been invisible to most users.
+        _emit_energy_summary()
         raise typer.Exit(0)
 
     def _aggregate(results: dict[str, list[tuple[str, float]]]) -> list[dict]:
@@ -600,6 +636,9 @@ def activity_suggest(
             sp = next(iter(results.keys()))
             sample = {"file": Path(sp).name, "tags": [t for t, _ in results[sp]]}
         _emit("activity-complete", total=total, tagged=len(results), sample=sample, matched=_aggregate(results))
+        # After activity-complete, so the frontend can read both off one
+        # captured stdout without caring which arrived first.
+        _emit_energy_summary()
 
     # Load the matcher eagerly so a present-but-unloadable model surfaces here
     # (the old lazy load inside apply_auto_tags was unguarded and crashed the
@@ -1067,6 +1106,10 @@ def tag_write(
     exclude_tags: str = typer.Option("", "--exclude-tags", help="Comma-separated matched tags to leave out (the ones the user unchecked on the review screen)."),
     scope: Path = typer.Option(None, "--scope", help="Only write clips under this folder. Without it every clip in the library is rewritten, which re-runs exiftool over footage that hasn't changed and re-risks every write on files the user isn't touching."),
     all_clips: bool = typer.Option(False, "--all", help="Ignore the batch scope and process every clip in the library (what Re-tag Library means)."),
+    exclude_energy: str = typer.Option(
+        "", "--exclude-energy",
+        help="Comma-separated energy buckets (low, medium, high) the user unchecked on the review screen. Separate from --exclude-tags for the same reason --no-energy-keywords is: exclusions there are persisted as review rejections against auto_tags.",
+    ),
     energy_keywords: bool = typer.Option(
         True, "--energy-keywords/--no-energy-keywords",
         help="Include the 'high/medium/low energy' keyword. Off means faces and matched tags only. Separate from --exclude-tags because exclusions are persisted as review rejections, and routing energy through them would delete a user's own tag if they had typed \"high energy\".",
@@ -1090,7 +1133,12 @@ def tag_write(
     # later write. Not on a dry run — that must change nothing.
     if exclude and not dry_run:
         _db.delete_auto_tags_by_name(conn, exclude)
-    mapping = _tag.videos_with_keywords(conn, exclude_tags=exclude, include_energy=energy_keywords)
+    mapping = _tag.videos_with_keywords(
+        conn,
+        exclude_tags=exclude,
+        include_energy=energy_keywords,
+        exclude_energy={b.strip() for b in exclude_energy.split(",") if b.strip()},
+    )
     scope = _resolve_scope(scope, conn, allow_all=all_clips)
     if scope is not None:
         # Writing is the expensive, risky half of a run: two exiftool calls and
@@ -1243,6 +1291,10 @@ def markers_write(
         True, "--resolve/--no-resolve",
         help="Also emit a 'Spotted Markers' DaVinci Resolve script (into Resolve's Scripts folder, else next to the footage). DaVinci ignores in-file XMP markers, so this is the only way markers show there — the user runs it from Workspace > Scripts after importing.",
     ),
+    exclude_energy: str = typer.Option(
+        "", "--exclude-energy",
+        help="Comma-separated energy buckets whose clips should not get peak cues. Unchecking a bucket on the review screen means no energy on those clips, so the cues go with the keyword rather than surviving it.",
+    ),
     energy_markers: bool = typer.Option(
         True, "--energy-markers/--no-energy-markers",
         help="Include 'Energy peak' cues. Off means face markers only. Needed as its own flag because energy peaks persist in the index: a clip scored on an earlier scan keeps its peaks, so `scan --no-energy` alone would not stop them appearing on a re-drop.",
@@ -1267,9 +1319,16 @@ def markers_write(
     for vid, path_str in _markers.videos_with_named_faces(conn):
         if _under_scope(path_str, root):
             by_id[vid] = path_str
+    dropped_buckets = {b.strip() for b in exclude_energy.split(",") if b.strip()}
+    # Which clips may carry energy cues at all. Kept as an explicit id set
+    # because a clip can enter the marker set through its NAMED FACES, and
+    # would then still pick up energy cues below despite its bucket being
+    # unchecked — filtering only the peak query is not enough.
+    energy_ok: set[int] = set()
     if energy_markers:
-        for vid, path_str in _db.videos_with_energy_peaks(conn):
+        for vid, path_str in _db.videos_with_energy_peaks(conn, dropped_buckets):
             if _under_scope(path_str, root):
+                energy_ok.add(vid)
                 by_id.setdefault(vid, path_str)
     videos = sorted(by_id.items())
 
@@ -1368,7 +1427,7 @@ def markers_write(
             # scan refreshes those versioned rows, while this cap makes the
             # export contract safe immediately even if a legacy row reaches
             # markers-write without passing through scan first.
-            if energy_markers:
+            if energy_markers and vid in energy_ok:
                 events += _energy_marker_events(conn, vid)
             if not Path(path_str).exists():
                 # The index outlives the disk. A clip that moved or was deleted

@@ -92,11 +92,18 @@ def test_the_default_stays_on_for_a_frontend_that_does_not_send_it():
         assert "energy == Some(false)" in window, f"{cmd} not gated on an explicit false"
 
 
-def test_markers_write_skips_the_peak_lookup_entirely_when_off():
-    """Not just the events: the peak query also decides which clips are in the
-    marker set at all, and a clip pulled in only by its peaks would otherwise
-    still be there with nothing to show."""
+def test_markers_write_gates_both_the_peak_lookup_and_the_events():
+    """Two separate gates are needed and it is easy to add only one.
+
+    The lookup decides which clips enter the marker set at all, so a clip
+    pulled in only by its peaks must not be there. The per-clip events need
+    their own gate because a clip can enter the set through its NAMED FACES
+    and would otherwise still collect energy cues on the way past.
+    """
     body = CLI_PY[CLI_PY.index("def markers_write"):]
     body = body[:body.index("\n@app.command")] if "\n@app.command" in body else body
-    assert "if energy_markers:\n        for vid, path_str in _db.videos_with_energy_peaks" in body
-    assert "if energy_markers:\n                events += _energy_marker_events" in body
+    lookup = body[body.index("videos_with_energy_peaks") - 120:body.index("videos_with_energy_peaks")]
+    assert "if energy_markers:" in lookup
+    events = body[body.index("_energy_marker_events(conn, vid)") - 120:body.index("_energy_marker_events(conn, vid)")]
+    assert "energy_markers" in events, "events are not gated on the flag"
+    assert "energy_ok" in events, "events are not gated per clip"

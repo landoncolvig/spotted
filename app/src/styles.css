@@ -508,6 +508,15 @@ body {
   margin: 6px 0 0;
   line-height: 1.5;
 }
+/* Separates the energy rows from the tag rows. Energy was not asked for by
+   name, so it reads as its own thing rather than another tag. */
+.review-section {
+  font-size: 15px;
+  font-weight: 600;
+  margin: 22px 0 0;
+  padding-top: 18px;
+  border-top: 1px solid var(--border);
+}
 .review-tools {
   display: flex; align-items: center; justify-content: space-between;
   margin: 20px 0 8px;

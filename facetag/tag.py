@@ -74,6 +74,7 @@ def videos_with_keywords(
     conn: sqlite3.Connection,
     exclude_tags: set[str] | None = None,
     include_energy: bool = True,
+    exclude_energy: set[str] | None = None,
 ) -> dict[str, list[str]]:
     """Return {video_path: [merged keywords]}.
 
@@ -130,7 +131,12 @@ def videos_with_keywords(
         if tag.strip().lower() in excluded:
             continue
         merged.setdefault(path, set()).add(tag)
+    dropped_buckets = {
+        b.strip().lower() for b in (exclude_energy or set()) if b.strip()
+    }
     for path, bucket in energy_rows:
+        if (bucket or "").strip().lower() in dropped_buckets:
+            continue
         kw = f"{bucket} energy"
         if kw.lower() in excluded:
             continue

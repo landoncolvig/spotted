@@ -10,6 +10,9 @@ import {
 
 type State = "idle" | "tags" | "working" | "label" | "review" | "library" | "done";
 type MatchedTag = { tag: string; clips: number; peak: number; sample: string; thumbs?: string[] };
+/** One energy bucket as the review screen shows it. Same shape as MatchedTag
+ *  minus the score, so both render through the same row builder. */
+type EnergyBucket = { tag: string; bucket: string; clips: number; sample: string; thumbs?: string[] };
 type SidecarLine = { kind: "stdout" | "stderr"; line: string };
 type SpottedEvent =
   | { event: "scan-start"; total: number }
@@ -51,6 +54,7 @@ type SpottedEvent =
   | { event: "markers-sidecar-error"; name: string; message: string }
   | { event: "activity-start"; total: number }
   | { event: "activity-complete"; total: number; tagged: number; sample: { file: string; tags: string[] } | null; matched?: MatchedTag[] }
+  | { event: "energy-summary"; buckets: EnergyBucket[] }
   | { event: "activity-empty"; message: string }
   | { event: "activity-fallback"; reason: string; tags: string[]; clips: number }
   | { event: "activities-disabled"; reason: string }
@@ -120,6 +124,10 @@ let overwriteKeywords = false;
  *  the index forever — so an opt-out that only passed `--no-energy` would
  *  still stamp energy on every clip the user had scanned before. */
 let energyEnabled = true;
+/** Energy buckets the user unchecked on the review screen. Distinct from
+ *  energyEnabled: that is "never score this batch", this is "you scored it,
+ *  but do not put low energy on my footage". */
+let excludedEnergyBuckets: string[] = [];
 
 function setState(s: State) {
   stage.setAttribute("data-state", s);
@@ -724,18 +732,38 @@ async function startTagFlow(allClips = false) {
   // no matches, silently skip the review, and write tags unconfirmed — the
   // exact failure the review screen exists to prevent.
   let matched: MatchedTag[] = [];
+  let energy: EnergyBucket[] = [];
+  excludedEnergyBuckets = [];
   try {
     const out = await invoke<string>("suggest_activities", { scope: currentPath ?? null, allClips: false });
     matched = parseMatchedTags(out);
+    energy = energyEnabled ? parseEnergyBuckets(out) : [];
   } catch (e) {
     console.warn("activity suggest failed (non-fatal):", e);
   }
-  if (matched.length === 0) {
+  // Energy alone is reason enough to stop and ask. Someone who typed no tags
+  // still had their footage scored, and used to reach the write with nothing
+  // to confirm.
+  if (matched.length === 0 && energy.length === 0) {
     await runWrite([], allClips);
     return;
   }
-  renderReview(matched);
+  renderReview(matched, energy);
   setState("review");
+}
+
+/** Pull the energy buckets out of the energy-summary line, read from the same
+ *  captured stdout and for the same reason as parseMatchedTags: the event
+ *  global can land after the invoke promise resolves, and reading it early
+ *  would skip the review and write unconfirmed. */
+function parseEnergyBuckets(stdout: string): EnergyBucket[] {
+  for (const line of stdout.split("\n")) {
+    const evt = parseSpotted(line.trim());
+    if (evt && evt.event === "energy-summary" && Array.isArray(evt.buckets)) {
+      return evt.buckets;
+    }
+  }
+  return [];
 }
 
 /** Pull the `matched` array out of the activity-complete line in the sidecar's
@@ -752,7 +780,7 @@ function parseMatchedTags(stdout: string): MatchedTag[] {
 
 /** Confirm screen: the tags Spotted found, each checked by default. Unchecking
  *  one drops it from every clip; only checked tags get written. */
-function renderReview(matched: MatchedTag[]) {
+function renderReview(matched: MatchedTag[], energy: EnergyBucket[] = []) {
   document.querySelector(".screen--review")?.remove();
 
   const screen = makeEl("div", "screen screen--review");
@@ -773,6 +801,7 @@ function renderReview(matched: MatchedTag[]) {
 
   const list = makeEl("div", "review-list");
   const checks: HTMLInputElement[] = [];
+  const energyChecks: HTMLInputElement[] = [];
   for (const m of matched) {
     const row = makeEl("label", "review-row");
     const input = document.createElement("input");
@@ -806,15 +835,62 @@ function renderReview(matched: MatchedTag[]) {
   }
   wrap.appendChild(list);
 
+  // Energy gets its own section rather than sitting among the tags. It is not
+  // something the user asked for by name — it was scored for them — so it
+  // needs the sentence explaining what it is.
+  if (energy.length) {
+    const head = makeEl("div", "review-section");
+    head.textContent = "Energy";
+    const note = makeEl("p", "review-sub");
+    note.textContent =
+      "Spotted scored how lively each clip is and dropped a marker on its peak moments. Uncheck a level to keep it off your footage.";
+    wrap.append(head, note);
+
+    const elist = makeEl("div", "review-list");
+    for (const b of energy) {
+      const row = makeEl("label", "review-row");
+      const input = document.createElement("input");
+      input.type = "checkbox";
+      input.checked = true;
+      input.className = "review-check";
+      input.dataset.bucket = b.bucket;
+      const main = makeEl("span", "review-row__main");
+      const name = makeEl("span", "review-row__tag");
+      name.textContent = b.tag;
+      const meta = makeEl("span", "review-row__meta");
+      meta.textContent = `${b.clips} clip${b.clips === 1 ? "" : "s"} · e.g. ${b.sample}`;
+      main.append(name, meta);
+      row.append(input, main);
+      if (b.thumbs && b.thumbs.length) {
+        const thumbs = makeEl("div", "review-row__thumbs");
+        for (const src of b.thumbs) {
+          const img = document.createElement("img");
+          img.className = "review-thumb";
+          img.src = src;
+          img.alt = b.tag;
+          img.loading = "lazy";
+          thumbs.appendChild(img);
+        }
+        row.appendChild(thumbs);
+      }
+      elist.appendChild(row);
+      energyChecks.push(input);
+    }
+    wrap.appendChild(elist);
+  }
+
   const updateCount = () => {
-    const kept = checks.filter((c) => c.checked).length;
-    count.textContent = `${kept} of ${checks.length} tag${checks.length === 1 ? "" : "s"} will be written`;
+    const all = checks.concat(energyChecks);
+    const kept = all.filter((c) => c.checked).length;
+    count.textContent = `${kept} of ${all.length} tag${all.length === 1 ? "" : "s"} will be written`;
     toggle.textContent = kept > 0 ? "Uncheck all" : "Check all";
   };
   checks.forEach((c) => c.addEventListener("change", updateCount));
+  energyChecks.forEach((c) => c.addEventListener("change", updateCount));
   toggle.addEventListener("click", () => {
-    const anyChecked = checks.some((c) => c.checked);
-    checks.forEach((c) => (c.checked = !anyChecked));
+    const all = checks.concat(energyChecks);
+    const anyChecked = all.some((c) => c.checked);
+    all.forEach((c) => (c.checked = !anyChecked));
     updateCount();
   });
   updateCount();
@@ -829,6 +905,9 @@ function renderReview(matched: MatchedTag[]) {
 
   writeBtn.addEventListener("click", () => {
     const exclude = checks.filter((c) => !c.checked).map((c) => c.dataset.tag!);
+    excludedEnergyBuckets = energyChecks
+      .filter((c) => !c.checked)
+      .map((c) => c.dataset.bucket!);
     runWrite(exclude);
   });
 
@@ -872,6 +951,7 @@ async function runWrite(excludeTags: string[], allClips = false) {
         // scoring pass. Without this the checkbox would look like it worked on
         // a fresh folder and do nothing on a re-drop.
         energy: energyEnabled,
+        excludeEnergy: excludedEnergyBuckets,
         overwrite: overwriteKeywords,
         scope: currentPath ?? null,
         allClips,
@@ -890,7 +970,12 @@ async function runWrite(excludeTags: string[], allClips = false) {
     workingDetail.textContent = "For Premiere & DaVinci scrubber…";
     try {
       lastMarkerError = null;
-      await invoke<number>("write_markers", { scope: currentPath ?? null, allClips, energy: energyEnabled });
+      await invoke<number>("write_markers", {
+        scope: currentPath ?? null,
+        allClips,
+        energy: energyEnabled,
+        excludeEnergy: excludedEnergyBuckets,
+      });
     } catch (e) {
       if (cancelled) {
         cancelled = false;

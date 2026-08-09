@@ -251,12 +251,18 @@ async fn tag_videos(
     scope: Option<String>,
     all_clips: Option<bool>,
     energy: Option<bool>,
+    exclude_energy: Option<Vec<String>>,
 ) -> Result<i32, String> {
     let mut args = vec!["tag-write".to_string()];
     // The bucket lives in the index, so skipping the scoring pass is not
     // enough to keep it off a clip scored on an earlier drop.
     if energy == Some(false) {
         args.push("--no-energy-keywords".to_string());
+    }
+    // Buckets the user unchecked on the review screen.
+    if let Some(buckets) = exclude_energy.filter(|b| !b.is_empty()) {
+        args.push("--exclude-energy".to_string());
+        args.push(buckets.join(","));
     }
     // Re-tag Library is the one place library-wide is intended.
     if all_clips.unwrap_or(false) {
@@ -495,6 +501,7 @@ async fn write_markers(
     scope: Option<String>,
     all_clips: Option<bool>,
     energy: Option<bool>,
+    exclude_energy: Option<Vec<String>>,
 ) -> Result<i32, String> {
     let mut args = vec!["markers-write".to_string()];
     // Re-tag Library is the one place library-wide is intended.
@@ -505,6 +512,10 @@ async fn write_markers(
     // scored on an earlier drop from carrying its cues into this timeline.
     if energy == Some(false) {
         args.push("--no-energy-markers".to_string());
+    }
+    if let Some(buckets) = exclude_energy.filter(|b| !b.is_empty()) {
+        args.push("--exclude-energy".to_string());
+        args.push(buckets.join(","));
     }
     // Same reason as tag_videos: without a scope the DaVinci timeline is built
     // from every clip ever indexed, including ones long since moved or deleted,

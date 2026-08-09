@@ -230,13 +230,42 @@ def energy_peaks_for_video(conn: sqlite3.Connection, video_id: int) -> list[floa
         return []
 
 
-def videos_with_energy_peaks(conn: sqlite3.Connection) -> list[tuple[int, str]]:
-    """Return [(video_id, path)] for clips that have at least one energy peak."""
+def videos_with_energy_peaks(
+    conn: sqlite3.Connection,
+    exclude_buckets: set[str] | None = None,
+) -> list[tuple[int, str]]:
+    """Return [(video_id, path)] for clips that have at least one energy peak.
+
+    `exclude_buckets` drops the buckets a user unchecked on the review screen.
+    Unchecking "low energy" means they do not want energy on those clips, so
+    the peak cues go with the keyword rather than surviving it.
+    """
     rows = conn.execute(
-        "SELECT id, path FROM videos WHERE energy_peaks IS NOT NULL "
+        "SELECT id, path, energy_bucket FROM videos WHERE energy_peaks IS NOT NULL "
         "AND energy_peaks != '' AND energy_peaks != '[]'"
     ).fetchall()
-    return [(int(i), p) for i, p in rows]
+    drop = {b.strip().lower() for b in (exclude_buckets or set()) if b.strip()}
+    return [
+        (int(i), p) for i, p, bucket in rows
+        if (bucket or "").strip().lower() not in drop
+    ]
+
+
+def energy_bucket_summary(conn: sqlite3.Connection) -> dict[str, list[str]]:
+    """{bucket: [clip paths]} for every scored clip, busiest bucket first.
+
+    Feeds the review screen. Energy is the last thing Spotted decided about
+    someone's footage without showing them first.
+    """
+    rows = conn.execute(
+        "SELECT energy_bucket, path FROM videos "
+        "WHERE energy_bucket IS NOT NULL AND energy_bucket != '' "
+        "ORDER BY energy_score DESC"
+    ).fetchall()
+    out: dict[str, list[str]] = {}
+    for bucket, path in rows:
+        out.setdefault(bucket, []).append(path)
+    return out
 
 
 def _split_batch_tag_rows(rows) -> list[str]:
