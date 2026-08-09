@@ -514,6 +514,25 @@ fn dirs_home_dir() -> Option<std::path::PathBuf> {
 }
 
 #[tauri::command]
+async fn write_report(
+    app: AppHandle,
+    window: Window,
+    out: String,
+    scope: Option<String>,
+    all_clips: Option<bool>,
+) -> Result<i32, String> {
+    let mut args = vec!["report".to_string(), "--out".to_string(), out];
+    if all_clips.unwrap_or(false) {
+        args.push("--all".to_string());
+    }
+    if let Some(path) = scope.filter(|p| !p.is_empty()) {
+        args.push("--scope".to_string());
+        args.push(path);
+    }
+    run_sidecar(app, window, args).await
+}
+
+#[tauri::command]
 async fn write_markers(
     app: AppHandle,
     window: Window,
@@ -1146,6 +1165,7 @@ pub fn run() {
             rename_person,
             delete_person,
             reveal_in_finder,
+            write_report,
             set_window_title,
             cancel_work,
             check_for_updates,

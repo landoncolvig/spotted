@@ -1,6 +1,6 @@
 import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { open, confirm } from "@tauri-apps/plugin-dialog";
+import { open, save, confirm } from "@tauri-apps/plugin-dialog";
 import { homeDir } from "@tauri-apps/api/path";
 import {
   isPermissionGranted,
@@ -29,6 +29,7 @@ type SpottedEvent =
   | { event: "tag-video"; name: string; names: string[]; index: number; total: number }
   | { event: "tag-error"; name: string; message: string }
   | { event: "tag-skip"; name: string; reason: string; index?: number; total?: number }
+  | { event: "report-complete"; path: string; clips: number }
   | { event: "tag-pruned"; pairs: number }
   | { event: "tag-prune-error"; message: string }
   | { event: "tag-empty"; message: string }
@@ -86,6 +87,7 @@ const doneSub = document.getElementById("done-sub") as HTMLElement;
 const doneTitle = document.getElementById("done-title") as HTMLElement;
 const btnAgain = document.getElementById("btn-again") as HTMLButtonElement;
 const btnReveal = document.getElementById("btn-reveal") as HTMLButtonElement;
+const btnReport = document.getElementById("btn-report") as HTMLButtonElement | null;
 const tagsPath = document.getElementById("tags-path") as HTMLElement;
 const tagsInput = document.getElementById("tags-input") as HTMLInputElement;
 const tagsStart = document.getElementById("tags-start") as HTMLButtonElement;
@@ -576,6 +578,9 @@ function handleSpottedEvent(evt: SpottedEvent) {
       lastTagFailed = evt;
       console.warn(evt);
       break;
+    case "report-complete":
+      console.info(`report: ${evt.clips} clip(s) → ${evt.path}`);
+      break;
     case "tag-pruned":
       console.info(`pruned ${evt.pairs} clip/tag pair(s)`);
       break;
@@ -1011,6 +1016,7 @@ function renderReview(matched: MatchedTag[], energy: EnergyBucket[] = []) {
 
 async function runWrite(excludeTags: string[], allClips = false) {
   cancelled = false;
+  lastRunWasLibraryWide = allClips;
   // Clear both the state and the rendered panel. Resetting only the globals
   // left the previous run's green paths visible when this run failed before
   // renderVerification() was called.
@@ -1414,6 +1420,37 @@ btnReveal.addEventListener("click", async () => {
     } catch (e) {
       console.warn("reveal failed:", e);
     }
+  }
+});
+
+/** Whether the last run was a library-wide re-tag, so the report covers what
+ *  the Done screen just described rather than silently widening to everything. */
+let lastRunWasLibraryWide = false;
+
+btnReport?.addEventListener("click", async () => {
+  const target = await save({
+    title: "Save report",
+    defaultPath: "spotted-report.csv",
+    filters: [{ name: "CSV", extensions: ["csv"] }],
+  });
+  if (!target) return;  // cancelled
+  const label = btnReport.textContent;
+  btnReport.disabled = true;
+  btnReport.textContent = "Saving…";
+  try {
+    await invoke<number>("write_report", {
+      out: target,
+      scope: lastRunWasLibraryWide ? null : (currentPath ?? null),
+      allClips: lastRunWasLibraryWide,
+    });
+    flashToast("Report saved.");
+  } catch (e) {
+    // A failed export must say so. The user asked for a file and would
+    // otherwise go looking for one that is not there.
+    showError(String(e));
+  } finally {
+    btnReport.disabled = false;
+    btnReport.textContent = label;
   }
 });
 

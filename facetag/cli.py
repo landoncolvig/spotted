@@ -1688,6 +1688,76 @@ def markers_write(
         console.print(f"[bold green]Done.[/bold green] Wrote markers to {len(videos)} clips.")
 
 
+@app.command()
+def report(
+    db_path: Path = typer.Option(DEFAULT_DB, "--db"),
+    out: Path = typer.Option(..., "--out", help="Where to write the CSV."),
+    scope: Path = typer.Option(None, "--scope", help="Only report clips under this path. Without it the whole library is reported."),
+    all_clips: bool = typer.Option(False, "--all", help="Ignore the batch scope and report every clip in the library."),
+):
+    """Write a CSV of what Spotted put in each clip.
+
+    Reports `videos.spotted_keywords`, which is the set Spotted last actually
+    wrote into that file — not the set it intended to write. Those differ
+    whenever a clip failed or its container could not hold keywords, and a
+    report that quietly showed intent would be worse than no report: it is the
+    artifact someone keeps in order to check the work later.
+    """
+    import csv
+
+    conn = _db.connect(db_path)
+    root = _resolve_scope(scope, conn, allow_all=all_clips)
+    rows = conn.execute(
+        "SELECT id, path, energy_bucket, energy_peaks FROM videos ORDER BY path"
+    ).fetchall()
+
+    people = {}
+    for path_str, name in conn.execute(
+        "SELECT DISTINCT v.path, p.name FROM faces f "
+        "JOIN videos v ON v.id = f.video_id "
+        "JOIN people p ON p.cluster_id = f.cluster_id "
+        "WHERE p.name IS NOT NULL AND p.name != ''"
+    ).fetchall():
+        people.setdefault(path_str, []).append(name)
+
+    tags = {}
+    for path_str, tag in conn.execute(
+        "SELECT v.path, a.tag FROM auto_tags a JOIN videos v ON v.id = a.video_id"
+    ).fetchall():
+        tags.setdefault(path_str, []).append(tag)
+
+    written = 0
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with out.open("w", newline="", encoding="utf-8") as fh:
+        w = csv.writer(fh)
+        w.writerow([
+            "clip", "folder", "people", "tags", "energy",
+            "energy peaks", "keywords written", "on disk",
+        ])
+        for vid, path_str, bucket, peaks in rows:
+            if not _under_scope(path_str, root):
+                continue
+            kw = _db.get_spotted_keywords(conn, vid)
+            try:
+                n_peaks = len(json.loads(peaks)) if peaks else 0
+            except (ValueError, TypeError):
+                n_peaks = 0
+            w.writerow([
+                Path(path_str).name,
+                str(Path(path_str).parent),
+                "; ".join(sorted(people.get(path_str, []))),
+                "; ".join(sorted(tags.get(path_str, []))),
+                bucket or "",
+                n_peaks,
+                "; ".join(kw),
+                "yes" if Path(path_str).exists() else "no",
+            ])
+            written += 1
+
+    _emit("report-complete", path=str(out), clips=written)
+    console.print(f"[bold green]Done.[/bold green] {written} clip(s) → {out}")
+
+
 @app.command("person-thumbs")
 def person_thumbs(
     db_path: Path = typer.Option(DEFAULT_DB, "--db"),

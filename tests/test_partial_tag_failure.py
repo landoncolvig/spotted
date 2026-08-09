@@ -44,6 +44,37 @@ def test_every_emitted_tag_event_is_declared_in_the_frontend():
     assert EMITTED <= declared, f"sidecar emits undeclared: {EMITTED - declared}"
 
 
+# Events the sidecar emits that the frontend does not declare, so they fall
+# through the event switch and reach nobody. Found while adding report-complete
+# and left as an explicit list rather than a silent gap: each one needs a
+# decision (surface it, or confirm the CLI console is the only audience). Some
+# clearly matter — finder-error is a per-clip write failure the UI never hears
+# about, which is exactly the class of bug v0.0.98 was about.
+#
+# Nothing may be ADDED to this list. Declare the event instead.
+KNOWN_UNDECLARED = {
+    "activity-backfill", "activity-backfill-start", "cluster-empty",
+    "cluster-skipped", "energy-skip", "finder-error", "index-prune-error",
+    "index-pruned", "markers-skip", "person-thumbs-complete",
+    "resolve-stale-removed", "timeline-duplicate-skipped", "video-energy",
+}
+
+
+def test_no_new_event_starts_falling_through_the_switch():
+    """The tag-only check above missed this class twice. This is the general
+    form: every event the sidecar emits is either declared or on the list."""
+    emitted = set(re.findall(r'_emit\(\s*"([a-z0-9-]+)"', CLI_PY))
+    declared = set(re.findall(r'\{ event: "([a-z0-9-]+)"', MAIN_TS))
+    assert emitted, "the emit scan matched nothing; this check would be vacuous"
+    undeclared = emitted - declared - KNOWN_UNDECLARED
+    assert not undeclared, (
+        f"emitted but not declared in main.ts: {sorted(undeclared)} — declare "
+        "them or they reach nobody"
+    )
+    stale = KNOWN_UNDECLARED - emitted
+    assert not stale, f"no longer emitted, drop from the list: {sorted(stale)}"
+
+
 def test_per_clip_failures_are_kept_not_just_logged():
     assert "lastTagFailures.push" in MAIN_TS
     assert "lastTagSkips.push" in MAIN_TS
