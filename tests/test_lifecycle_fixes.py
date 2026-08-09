@@ -1642,6 +1642,7 @@ def test_the_labeler_page_javascript_parses():
     stop saving. The fetch wrapper that carries the session token lives in it,
     so a syntax error there silently 403s every save.
     """
+    import re
     import shutil
     import subprocess
     import tempfile
@@ -1651,9 +1652,15 @@ def test_the_labeler_page_javascript_parses():
         pytest.skip("node not available")
 
     src = (ROOT_DIR / "facetag" / "web.py").read_text()
-    start = src.index("<script>\nconst $ = (s) => document.querySelector")
-    end = src.index("</script>", start)
-    js = src[start + len("<script>"):end].replace("__TOKEN__", "sometoken")
+    # Match the opening tag by pattern, not by literal text: it carries a CSP
+    # nonce attribute as of v0.0.97, and anchoring on "<script>" made adding
+    # that look like the labeler's JavaScript had stopped parsing.
+    opening = re.search(
+        r"<script[^>]*>(?=\nconst \$ = \(s\) => document\.querySelector)", src
+    )
+    assert opening, "labeler script tag not found"
+    end = src.index("</script>", opening.end())
+    js = src[opening.end():end].replace("__TOKEN__", "sometoken")
 
     with tempfile.TemporaryDirectory() as d:
         path = Path(d) / "page.js"

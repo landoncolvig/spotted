@@ -1,15 +1,17 @@
 """Single-page web labeler. One scrollable list of clusters with name inputs and a Save All button."""
 from __future__ import annotations
 
+import hmac
 import html
 import io
 import os
+import secrets
 import threading
 import webbrowser
 from pathlib import Path
 
 import cv2
-from flask import Flask, jsonify, request, send_file
+from flask import Flask, g, jsonify, request, send_file
 
 from . import db
 from .label import _crop_face, _make_grid
@@ -60,8 +62,24 @@ def _install_guard(app, token: str) -> None:
             or request.headers.get("X-Spotted-Token")
             or (request.cookies.get("spotted_token") or "")
         )
-        if not token or supplied != token:
+        # compare_digest rather than !=, which returns as soon as two bytes
+        # differ and so leaks the token a character at a time. Compare as
+        # bytes: given str it rejects any non-ASCII input with TypeError, so a
+        # `?k=é` would 500 where it should 403.
+        supplied_b = supplied.encode("utf-8", "replace")
+        if not token or not hmac.compare_digest(supplied_b, token.encode("utf-8")):
             abort(403)
+        # Second gate on the writes, independent of the token. A browser sets
+        # Origin on every cross-origin POST and will not let a page forge it,
+        # so this holds even in the case the token guard cannot cover: the
+        # token leaking (it rides in the iframe URL's query string) and being
+        # replayed from a page the user has open. Absent Origin means the
+        # caller is not a browser — curl, the tests — and the token stands
+        # alone there, which is the same trust boundary as before.
+        if request.method not in ("GET", "HEAD", "OPTIONS"):
+            origin = request.headers.get("Origin")
+            if origin is not None and origin != f"http://{request.host}":
+                abort(403)
 
     # The page needs the token to build its own sub-requests. A cookie cannot
     # do this job: the app loads the labeler in an IFRAME whose parent document
@@ -76,6 +94,59 @@ def _install_guard(app, token: str) -> None:
     app.config["TOKEN"] = token
 
 
+def _install_headers(app) -> None:
+    """Response headers the labeler needs, installed for every route.
+
+    Two of these earn their place on their own:
+
+    `Referrer-Policy: no-referrer` because the session token travels in the
+    query string (an <img> cannot set a header, so it has nowhere else to
+    ride). Any cross-origin request this page made would put that whole URL,
+    token included, in a Referer header. The CSP below means it should never
+    make one; this is the belt to that suspenders.
+
+    The CSP itself is nonce-based rather than 'unsafe-inline'. The page has
+    exactly one <style> and one <script>, both ours and both inline, and the
+    page also renders names and filenames the user did not write. Those are
+    escaped, but escaping is the kind of thing that is correct until someone
+    adds a route, so the policy stops injected script from running even then.
+
+    Deliberately NOT set: frame-ancestors, and X-Frame-Options. The app loads
+    this page in an iframe whose parent is `tauri://localhost`, and a custom
+    scheme in frame-ancestors is not something WebKit can be relied on to
+    match. Getting it wrong renders the naming step as a blank panel, which is
+    a worse outcome than the thing it would prevent — a hostile framer still
+    cannot read a cross-origin document, and cannot act without the token.
+    """
+
+    @app.before_request
+    def _make_nonce():  # noqa: ANN202 - flask hook
+        g.csp_nonce = secrets.token_urlsafe(16)
+
+    @app.after_request
+    def _headers(resp):  # noqa: ANN202 - flask hook
+        nonce = getattr(g, "csp_nonce", "")
+        resp.headers["Content-Security-Policy"] = "; ".join(
+            [
+                "default-src 'none'",
+                f"script-src 'nonce-{nonce}'",
+                f"style-src 'nonce-{nonce}'",
+                "img-src 'self'",
+                "connect-src 'self'",
+                "base-uri 'none'",
+                "form-action 'none'",
+            ]
+        )
+        resp.headers["Referrer-Policy"] = "no-referrer"
+        resp.headers["X-Content-Type-Options"] = "nosniff"
+        if resp.mimetype == "text/html":
+            # The HTML carries the token in a JS constant. Keep it out of the
+            # browser's disk cache, where it would outlive the session that
+            # issued it.
+            resp.headers["Cache-Control"] = "no-store"
+        return resp
+
+
 def create_app(
     db_path: Path,
     thumb_dir: Path,
@@ -87,6 +158,7 @@ def create_app(
     app.config["DB_PATH"] = db_path
     app.config["THUMB_DIR"] = thumb_dir
     app.config["SCOPE_PATHS"] = list(scope_paths) if scope_paths else []
+    _install_headers(app)
 
     def _conn():
         return db.connect(db_path)
@@ -242,6 +314,7 @@ def create_app(
 
         return (
             _PAGE
+            .replace("__NONCE__", html.escape(g.csp_nonce, quote=True))
             .replace("__TOKEN__", html.escape(tok, quote=True))
             .replace("__CARDS__", "\n".join(cards))
             .replace("__COUNT__", str(len(summary)))
@@ -369,7 +442,7 @@ _PAGE = r"""<!doctype html>
 <html lang="en"><head>
 <meta charset="utf-8">
 <title>Spotted — name the people</title>
-<style>
+<style nonce="__NONCE__">
   :root {
     --bg: #0E0F12;
     --surface: #1C1D22;
@@ -643,7 +716,7 @@ _PAGE = r"""<!doctype html>
 </header>
 <div class="grid" id="grid">__CARDS__</div>
 <div id="toast"></div>
-<script>
+<script nonce="__NONCE__">
 const $ = (s) => document.querySelector(s);
 const $$ = (s) => document.querySelectorAll(s);
 

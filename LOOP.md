@@ -52,11 +52,22 @@ blocked on her sample + REDCINE-X install.
       `tests/test_capability_scope.py` pins it, including the premise: if the
       frontend ever does import the shell plugin, the test fails and says to
       scope the permission deliberately rather than restore `args: true`.
-- [ ] **Labeler needs Origin checking and a CSP.** `facetag/web.py` has no
-      CSRF token, no `Origin`/`Referer` check on its POSTs, and sends no
-      `Content-Security-Policy`. It binds localhost, so the threat is a
-      malicious page in the user's browser POSTing names into their library.
-      Reject cross-origin POSTs, add a CSP header.
+- [x] **Labeler needs Origin checking and a CSP.** (v0.0.97) The queue was out
+      of date on one point: the labeler already had a per-session token, and
+      that closes ordinary CSRF on its own. What it could not cover is the
+      token leaking — it rides in the iframe URL's query string, because an
+      `<img>` has no way to send a header. So: an `Origin` check on writes
+      (browsers set it and will not let a page forge it, absent means a
+      non-browser caller and the token stands alone), `Referrer-Policy:
+      no-referrer` so that token-bearing URL never leaves in a `Referer`,
+      `no-store` on the HTML that embeds the token, `compare_digest` on the
+      token compare, and a nonce-based CSP with `default-src 'none'`.
+      Deliberately no `frame-ancestors` and no `X-Frame-Options`: the parent
+      is `tauri://localhost` and WebKit cannot be relied on to match a custom
+      scheme, and a blank naming step is worse than what it would prevent.
+      `tests/test_labeler_headers.py` covers it, including a rendered card,
+      since `default-src 'none'` is only safe while the page loads nothing but
+      its own images.
 - [ ] **Signing key passphrase is empty.** `~/.tauri/spotted.key` and the
       `TAURI_PRIVATE_KEY` Actions secret have no passphrase, so the key file
       alone is enough to sign an update for the whole fleet. Needs a
@@ -123,3 +134,8 @@ portrait frames degrading detection, labeler "failed to start" at 200+ clips.
   she can see changed, and a CSP is only news if it broke something.
 - 2026-08-09 — v0.0.96: dropped the webview's shell grant entirely. No tester
   text, same reason.
+- 2026-08-09 — v0.0.97: labeler response headers + Origin gate. Preflight
+  earned its keep here: the CSP nonce attribute broke the test that
+  node-syntax-checks the labeler's JavaScript, which anchored on a literal
+  `<script>`. Fixed the anchor, then re-broke the JS on purpose to confirm the
+  test still catches what it was written for. No tester text.
