@@ -2115,14 +2115,36 @@ function wireMenuEvents() {
       flashToast(`Couldn't save telemetry setting: ${e}`, true);
     }
   });
+/** "on 12 Aug at 3:04 PM (2 hours ago)". A bare Unix stamp is unreadable, and
+ *  a bare relative age is ambiguous once there is more than one backup. */
+function describeBackupAge(takenAt: number): string {
+  if (!takenAt) return "at an unknown time";
+  const when = new Date(takenAt * 1000);
+  const stamp = when.toLocaleString(undefined, {
+    day: "numeric", month: "short", hour: "numeric", minute: "2-digit",
+  });
+  const mins = Math.max(0, Math.round((Date.now() - when.getTime()) / 60000));
+  let ago: string;
+  if (mins < 1) ago = "just now";
+  else if (mins < 60) ago = `${mins} min ago`;
+  else if (mins < 60 * 24) {
+    const h = Math.round(mins / 60);
+    ago = `${h} hour${h === 1 ? "" : "s"} ago`;
+  } else {
+    const d = Math.round(mins / (60 * 24));
+    ago = `${d} day${d === 1 ? "" : "s"} ago`;
+  }
+  return `on ${stamp} (${ago})`;
+}
+
   listen("menu://restore-backup", async () => {
     if (isBusy()) {
       flashToast("Finish or cancel the current batch first.");
       return;
     }
-    let backups: string[] = [];
+    let backups: { path: string; taken_at: number }[] = [];
     try {
-      backups = await invoke<string[]>("list_library_backups");
+      backups = await invoke<{ path: string; taken_at: number }[]>("list_library_backups");
     } catch (e) {
       flashToast(`Couldn't list backups: ${e}`, true);
       return;
@@ -2131,9 +2153,11 @@ function wireMenuEvents() {
       flashToast("No backups available.");
       return;
     }
-    const latest = backups[0].split("/").pop() ?? backups[0];
+    // The directory is named `.facetag.backup-<unix seconds>`, which told the
+    // user nothing at the one moment it mattered: deciding whether to
+    // overwrite their current library with it. Say when it was taken.
     const ok = await confirm(
-      `Restore from ${latest}?\n\n` +
+      `Restore the library backed up ${describeBackupAge(backups[0].taken_at)}?\n\n` +
       "Your current library (if any) will be moved aside as a safety " +
       "backup before the restore, so this is itself reversible.",
       { title: "Restore Last Backup", okLabel: "Restore", cancelLabel: "Cancel" }

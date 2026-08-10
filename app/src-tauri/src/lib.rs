@@ -449,6 +449,10 @@ fn restore_last_backup() -> Result<RestoreResult, String> {
     }
     fs::rename(latest, &root)
         .map_err(|e| format!("restore mv {} → {}: {e}", latest.display(), root.display()))?;
+    // Restoring is the only thing that creates a pre-restore copy, so it is
+    // also the only place that can bound them. Best-effort: failing to tidy up
+    // must not report a successful restore as a failure.
+    let _ = trim_old_backups(&home, 3);
     Ok(RestoreResult { restored_from: latest.display().to_string() })
 }
 
@@ -457,16 +461,38 @@ struct RestoreResult {
     restored_from: String,
 }
 
+#[derive(Serialize, Clone)]
+struct BackupInfo {
+    path: String,
+    /// When the backup was taken, as Unix seconds. The UI turns this into a
+    /// date and an age. The directory name alone is `.facetag.backup-`
+    /// followed by that number, which told the user nothing at the one moment
+    /// it mattered: deciding whether to overwrite their current library with
+    /// it.
+    taken_at: u64,
+}
+
 #[tauri::command]
-fn list_library_backups() -> Vec<String> {
+fn list_library_backups() -> Vec<BackupInfo> {
     let home = match dirs_home_dir() {
         Some(h) => h,
         None => return Vec::new(),
     };
     list_backups(&home)
         .into_iter()
-        .map(|p| p.display().to_string())
+        .map(|p| BackupInfo {
+            taken_at: backup_stamp(&p).unwrap_or(0),
+            path: p.display().to_string(),
+        })
         .collect()
+}
+
+/// The Unix-seconds suffix on a backup directory name.
+fn backup_stamp(path: &std::path::Path) -> Option<u64> {
+    path.file_name()
+        .and_then(|s| s.to_str())
+        .and_then(|s| s.rsplit('-').next())
+        .and_then(|s| s.parse::<u64>().ok())
 }
 
 fn list_backups(home: &std::path::Path) -> Vec<std::path::PathBuf> {
@@ -482,16 +508,38 @@ fn list_backups(home: &std::path::Path) -> Vec<std::path::PathBuf> {
             .collect(),
         Err(_) => Vec::new(),
     };
-    // Newest first (timestamp suffix sorts lexicographically because
-    // chrono_timestamp emits zero-padded YYYYMMDDHHMMSS).
-    out.sort();
-    out.reverse();
+    // Newest first, sorted on the suffix as a NUMBER. The comment here used to
+    // claim the stamp was zero-padded YYYYMMDDHHMMSS; it is Unix seconds, which
+    // only sorts lexicographically while the digit count holds. That is true
+    // until 2286, so this was never a live bug, but "restore the newest" is the
+    // wrong thing to leave resting on a coincidence.
+    out.sort_by_key(|p| std::cmp::Reverse(backup_stamp(p).unwrap_or(0)));
     out
 }
 
 fn trim_old_backups(home: &std::path::Path, keep: usize) -> std::io::Result<()> {
     let backups = list_backups(home);
     for old in backups.into_iter().skip(keep) {
+        std::fs::remove_dir_all(&old)?;
+    }
+    // The safety copies a restore leaves behind. They are not in list_backups
+    // (deliberately — restoring must never pick one up as a candidate), which
+    // also meant nothing ever removed them, so a library's worth of thumbnails
+    // accumulated in $HOME on every restore.
+    let mut pre: Vec<std::path::PathBuf> = match std::fs::read_dir(home) {
+        Ok(rd) => rd
+            .filter_map(|e| e.ok().map(|d| d.path()))
+            .filter(|p| {
+                p.file_name()
+                    .and_then(|s| s.to_str())
+                    .map(|s| s.starts_with(".facetag.pre-restore-"))
+                    .unwrap_or(false)
+            })
+            .collect(),
+        Err(_) => Vec::new(),
+    };
+    pre.sort_by_key(|p| std::cmp::Reverse(backup_stamp(p).unwrap_or(0)));
+    for old in pre.into_iter().skip(keep) {
         std::fs::remove_dir_all(&old)?;
     }
     Ok(())
@@ -1214,7 +1262,7 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::prepare_sidecar_temp_dir;
+    use super::{backup_stamp, list_backups, prepare_sidecar_temp_dir, trim_old_backups};
     use std::fs;
 
     fn scratch_root() -> std::path::PathBuf {
@@ -1264,6 +1312,99 @@ mod tests {
                 .expect_err("unwritable cache should return an explanation")
                 .contains("local working folder"),
             "the error should identify Spotted's working folder"
+        );
+    }
+
+    /// Backup dirs are named `.facetag.backup-<unix seconds>`. Sorting those
+    /// as text is only correct while every stamp has the same digit count,
+    /// which stops being true in 2286. Never a live bug; also never a thing
+    /// "restore the newest" should rest on.
+    #[test]
+    fn newest_backup_is_chosen_numerically_not_alphabetically() {
+        let root = scratch_root();
+        fs::create_dir_all(&root).expect("scratch root should be created");
+        // 999999999 sorts AFTER 1000000000 as text, and before it as a number.
+        for stamp in ["999999999", "1000000000"] {
+            fs::create_dir_all(root.join(format!(".facetag.backup-{stamp}")))
+                .expect("backup dir should be created");
+        }
+
+        let found = list_backups(&root);
+
+        fs::remove_dir_all(&root).expect("scratch directory should be removable");
+        assert_eq!(
+            found.first().and_then(|p| backup_stamp(p)),
+            Some(1_000_000_000),
+            "the newest backup must win on the number, not the string"
+        );
+    }
+
+    #[test]
+    fn a_restores_safety_copy_is_never_offered_as_a_backup() {
+        let root = scratch_root();
+        fs::create_dir_all(&root).expect("scratch root should be created");
+        fs::create_dir_all(root.join(".facetag.backup-1700000000"))
+            .expect("backup dir should be created");
+        // Newer stamp: it would win any sort if it were a candidate at all.
+        fs::create_dir_all(root.join(".facetag.pre-restore-1800000000"))
+            .expect("pre-restore dir should be created");
+
+        let found = list_backups(&root);
+
+        fs::remove_dir_all(&root).expect("scratch directory should be removable");
+        assert_eq!(found.len(), 1, "only real backups are restore candidates");
+        assert_eq!(found[0].file_name().unwrap(), ".facetag.backup-1700000000");
+    }
+
+    /// These are invisible to list_backups by design, which also meant nothing
+    /// ever deleted them: a library's worth of thumbnails per restore.
+    #[test]
+    fn trimming_bounds_the_safety_copies_too() {
+        let root = scratch_root();
+        fs::create_dir_all(&root).expect("scratch root should be created");
+        for i in 0..5 {
+            fs::create_dir_all(root.join(format!(".facetag.pre-restore-170000000{i}")))
+                .expect("pre-restore dir should be created");
+            fs::create_dir_all(root.join(format!(".facetag.backup-170000000{i}")))
+                .expect("backup dir should be created");
+        }
+
+        trim_old_backups(&root, 3).expect("trim should succeed");
+
+        let left: Vec<String> = fs::read_dir(&root)
+            .expect("scratch root should be readable")
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .collect();
+        fs::remove_dir_all(&root).expect("scratch directory should be removable");
+
+        let backups = left.iter().filter(|n| n.starts_with(".facetag.backup-")).count();
+        let pre = left.iter().filter(|n| n.starts_with(".facetag.pre-restore-")).count();
+        assert_eq!(backups, 3, "should keep the 3 newest backups");
+        assert_eq!(pre, 3, "should keep the 3 newest safety copies, not all 5");
+        assert!(
+            left.contains(&".facetag.pre-restore-1700000004".to_string()),
+            "the newest safety copy must survive"
+        );
+    }
+
+    #[test]
+    fn a_malformed_backup_name_does_not_panic_the_listing() {
+        let root = scratch_root();
+        fs::create_dir_all(&root).expect("scratch root should be created");
+        fs::create_dir_all(root.join(".facetag.backup-not-a-number"))
+            .expect("backup dir should be created");
+        fs::create_dir_all(root.join(".facetag.backup-1700000000"))
+            .expect("backup dir should be created");
+
+        let found = list_backups(&root);
+
+        fs::remove_dir_all(&root).expect("scratch directory should be removable");
+        assert_eq!(found.len(), 2);
+        assert_eq!(
+            found.first().and_then(|p| backup_stamp(p)),
+            Some(1_700_000_000),
+            "an unparseable stamp sorts last rather than winning"
         );
     }
 }

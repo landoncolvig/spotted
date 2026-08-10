@@ -186,9 +186,19 @@ blocked on her sample + REDCINE-X install.
 
 ## Roadmap (multi-tick — split before starting)
 
-- [ ] **Backup + undo for Reset Library.** Ranked #4 in ROADMAP.md, half a
-      day, cheap to reverse. One bad click currently loses every name the
-      user has typed.
+- [x] **Backup + undo for Reset Library.** Already existed — the third stale
+      queue item. Reset renames `~/.facetag` aside rather than deleting, keeps
+      3, and Restore Last Backup rolls it back behind a confirm. What was
+      actually missing (v0.0.107): the restore dialog named the backup
+      `.facetag.backup-1754774400`, so at the one moment that matters — about
+      to overwrite the current library — the user could not tell whether it
+      was from five minutes or three weeks ago. Now it says the date and the
+      age. Two latent problems fixed alongside: backups were sorted as TEXT on
+      a Unix-seconds suffix, so "newest" was resting on every stamp having the
+      same digit count (true until 2286, so never live, but not something
+      restore should rest on); and `.facetag.pre-restore-*` copies were
+      excluded from the backup listing by design, which also meant nothing
+      ever deleted them — a library's worth of thumbnails per restore.
 - [ ] **Opt-in telemetry + error reporting.** Ranked #2. Blind on where users
       drop off. Local-first product, so this must be opt-in and say what it
       sends.
@@ -245,6 +255,9 @@ portrait frames degrading detection, labeler "failed to start" at 200+ clips.
   she can see changed, and a CSP is only news if it broke something.
 - 2026-08-09 — v0.0.96: dropped the webview's shell grant entirely. No tester
   text, same reason.
+- 2026-08-09 — v0.0.107: backup/undo was already built; fixed what was
+  missing around it. Third stale queue item, so the remaining ROADMAP entries
+  are worth verifying before trusting them.
 - 2026-08-09 — v0.0.106: iCloud pre-check. Three of my own tests asserted
   pretty-printed JSON; `_emit` uses compact separators. Fixed the assertions,
   not the emit.
