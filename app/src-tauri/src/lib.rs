@@ -324,23 +324,40 @@ async fn suggest_activities(
     scope: Option<String>,
     all_clips: Option<bool>,
 ) -> Result<String, String> {
-    // Capture the sidecar's stdout and RETURN it so the frontend reads the
-    // activity-complete payload from the invoke result, not from a racy
-    // side-channel event. Still emits sidecar://line for live progress, and
-    // still registers the PID so a long match can be cancelled.
+    let mut args = vec!["activity-suggest".to_string()];
+    if all_clips.unwrap_or(false) {
+        args.push("--all".to_string());
+    }
+    if let Some(path) = scope.filter(|p| !p.is_empty()) {
+        args.push("--scope".to_string());
+        args.push(path);
+    }
+    let result = run_sidecar_capture(app, window, args).await;
+    let mut payload = HashMap::new();
+    payload.insert(
+        "status".into(),
+        if result.is_ok() { "ok" } else { "error" }.into(),
+    );
+    telemetry::track("activity-suggest-complete", payload);
+    result
+}
+
+/// Run the sidecar and RETURN its stdout, rather than relying on the
+/// sidecar://line events alone.
+///
+/// The reason is in v0.0.62's scar tissue: a payload read from the event
+/// global can arrive after the invoke promise resolves, so the caller sees
+/// nothing and carries on as though the step produced no result. Callers that
+/// need the answer read it from here. Progress events are still emitted, and
+/// the PID is still registered so a long run stays cancellable.
+async fn run_sidecar_capture(
+    app: AppHandle,
+    window: Window,
+    args: Vec<String>,
+) -> Result<String, String> {
     let sidecar = sidecar_command(&app)?;
     let (mut rx, child) = sidecar
-        .args({
-            let mut a = vec!["activity-suggest".to_string()];
-            if all_clips.unwrap_or(false) {
-                a.push("--all".to_string());
-            }
-            if let Some(path) = scope.filter(|p| !p.is_empty()) {
-                a.push("--scope".to_string());
-                a.push(path);
-            }
-            a
-        })
+        .args(args)
         .spawn()
         .map_err(|e| format!("sidecar spawn: {e}"))?;
 
@@ -394,10 +411,6 @@ async fn suggest_activities(
             _ => {}
         }
     }
-
-    let mut payload = HashMap::new();
-    payload.insert("status".into(), if code == 0 { "ok" } else { "error" }.into());
-    telemetry::track("activity-suggest-complete", payload);
 
     if code == 0 {
         Ok(collected.join("\n"))
@@ -559,6 +572,28 @@ fn chrono_timestamp() -> String {
 
 fn dirs_home_dir() -> Option<std::path::PathBuf> {
     std::env::var_os("HOME").map(std::path::PathBuf::from)
+}
+
+/// Every clip a tag matched. Small payload by design — names and scores, no
+/// thumbnails — so the review screen's "show all" works for a tag that landed
+/// on six clips or six hundred.
+#[tauri::command]
+async fn list_tag_clips(
+    app: AppHandle,
+    window: Window,
+    tag: String,
+    scope: Option<String>,
+    all_clips: Option<bool>,
+) -> Result<String, String> {
+    let mut args = vec!["activity-clips".to_string(), "--tag".to_string(), tag];
+    if all_clips.unwrap_or(false) {
+        args.push("--all".to_string());
+    }
+    if let Some(path) = scope.filter(|p| !p.is_empty()) {
+        args.push("--scope".to_string());
+        args.push(path);
+    }
+    run_sidecar_capture(app, window, args).await
 }
 
 #[tauri::command]
@@ -1214,6 +1249,7 @@ pub fn run() {
             delete_person,
             reveal_in_finder,
             write_report,
+            list_tag_clips,
             set_window_title,
             cancel_work,
             check_for_updates,

@@ -1790,6 +1790,37 @@ def report(
     console.print(f"[bold green]Done.[/bold green] {written} clip(s) → {out}")
 
 
+@app.command("activity-clips")
+def activity_clips(
+    tag: str = typer.Option(..., "--tag", help="The matched tag to list clips for."),
+    db_path: Path = typer.Option(DEFAULT_DB, "--db"),
+    scope: Path = typer.Option(None, "--scope", help="Only list clips under this path."),
+    all_clips: bool = typer.Option(False, "--all", help="Ignore the batch scope."),
+):
+    """Every clip a tag matched, for the review screen's "show all" control.
+
+    The review screen carries a handful of clips per tag with a base64
+    thumbnail each, which is what caps it at six — the whole rollup rides on
+    one emit line. This is the way past that cap: names and scores only, no
+    images, so the payload stays small whether a tag matched six clips or six
+    hundred.
+    """
+    conn = _db.connect(db_path)
+    root = _resolve_scope(scope, conn, allow_all=all_clips)
+    rows = conn.execute(
+        "SELECT v.path, a.score FROM auto_tags a JOIN videos v ON v.id = a.video_id "
+        "WHERE LOWER(a.tag) = ? ORDER BY a.score ASC",
+        (tag.strip().lower(),),
+    ).fetchall()
+    clips = [
+        {"path": p, "name": Path(p).name, "score": round(sc, 3)}
+        for p, sc in rows
+        if _under_scope(p, root)
+    ]
+    _emit("activity-clips", tag=tag, clips=clips)
+    console.print(f"{len(clips)} clip(s) matched '{tag}'.")
+
+
 @app.command("person-thumbs")
 def person_thumbs(
     db_path: Path = typer.Option(DEFAULT_DB, "--db"),

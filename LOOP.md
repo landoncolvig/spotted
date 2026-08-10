@@ -149,9 +149,17 @@ blocked on her sample + REDCINE-X install.
       reasonably conclude pruning does not work. Rejections travel as a JSON
       file rather than argv: the values are filesystem paths and there is no
       separator they cannot legally contain.
-- [ ] **Prune more than the six shown** (second slice of the item above). No
-      way yet to reach the clips past the cap without dropping the tag
-      entirely.
+- [x] **Prune more than the six shown.** (v0.0.111) A tag matching 40 clips
+      showed 6, said so, and offered no way to reach the other 34 short of
+      dropping the tag from all of them — the all-or-nothing choice per-clip
+      pruning existed to remove. "Show the rest" fetches them through a new
+      `activity-clips` command carrying names and scores and NO thumbnails,
+      which is what capped the first payload (a base64 JPEG per clip on one
+      emit line), so it costs the same for 6 clips or 600. Same order (weakest
+      first) and the same rejection list as the thumbnail rows, since two
+      paths recording rejections differently is how one of them quietly stops
+      working. Extracted `run_sidecar_capture` rather than copying 60 lines of
+      spawn-and-collect out of `suggest_activities`.
 - [x] **Report export.** (v0.0.104) "Save report" on the Done screen writes a
       CSV: clip, folder, people, tags, energy, peak count, keywords written,
       still-on-disk. It reports `videos.spotted_keywords` — what Spotted last
@@ -284,8 +292,11 @@ portrait frames degrading detection, labeler "failed to start" at 200+ clips.
   she can see changed, and a CSP is only news if it broke something.
 - 2026-08-09 — v0.0.96: dropped the webview's shell grant entirely. No tester
   text, same reason.
-- 2026-08-09 — v0.0.110: bundle diet, ~150MB off the download. Last ROADMAP
-  item. Backlog is now empty except the two things parked on Landon.
+- 2026-08-09 — v0.0.111: reach the clips past the review cap. Also corrects
+  the previous log line: the backlog was NOT empty. Two items were still
+  unchecked (this one, and opt-in telemetry) — I read the file wrong.
+- 2026-08-09 — v0.0.110: bundle diet, ~150MB off the download (measured
+  673MB→564MB on the published tarball). Last ROADMAP item.
 - 2026-08-09 — v0.0.109: keyboard labeler. First ROADMAP item in five that
   was genuinely missing, and the advertised shortcut actively led somewhere
   destructive.

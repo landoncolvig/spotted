@@ -537,7 +537,10 @@ body {
   padding: 2px 0 8px;
 }
 .review-row {
-  display: flex; align-items: center; gap: 12px;
+  /* wrap so the expanded clip list can take a line of its own. The thumbnail
+     strip has overflow:hidden and flex:0 1 auto, so it still clips rather than
+     wrapping in the normal case. */
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
   padding: 10px 14px;
   border: 1px solid var(--border);
   border-radius: var(--r-md);
@@ -606,6 +609,51 @@ body {
   padding: 2px;
   text-align: center;
   overflow: hidden;
+}
+/* The disclosure line is a button now, but it is still a line of small print
+   in the row's text column, not a call to action. */
+.review-row__more--btn {
+  background: none;
+  border: 0;
+  padding: 0;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.review-row__more--btn:disabled { cursor: default; text-decoration: none; }
+/* The clips past the thumbnail cap. Scrolls rather than growing the row
+   unboundedly — a tag can match hundreds. */
+.review-rest {
+  flex-basis: 100%;
+  margin-top: 8px;
+  max-height: 190px;
+  overflow-y: auto;
+  border-top: 1px solid var(--border);
+  padding-top: 8px;
+}
+.review-rest__head {
+  font-size: 11px;
+  color: var(--text-dim);
+  margin-bottom: 4px;
+}
+.review-rest__row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 0;
+  cursor: pointer;
+}
+.review-rest__name {
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.review-rest__row:has(input:not(:checked)) .review-rest__name {
+  opacity: 0.4;
+  text-decoration: line-through;
 }
 .review-row__more {
   font-size: 11px;

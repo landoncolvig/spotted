@@ -81,6 +81,7 @@ type SpottedEvent =
   | { event: "activity-start"; total: number }
   | { event: "activity-complete"; total: number; tagged: number; sample: { file: string; tags: string[] } | null; matched?: MatchedTag[] }
   | { event: "energy-summary"; buckets: EnergyBucket[] }
+  | { event: "activity-clips"; tag: string; clips: { path: string; name: string; score: number }[] }
   | { event: "activity-empty"; message: string }
   | { event: "activity-fallback"; reason: string; tags: string[]; clips: number }
   | { event: "activities-disabled"; reason: string }
@@ -914,6 +915,53 @@ function parseMatchedTags(stdout: string): MatchedTag[] {
   return [];
 }
 
+/** Pull the clip list out of the activity-clips line, same reason as the
+ *  other two parsers: read the answer from the invoke result, not a global
+ *  that may not have been written yet. */
+function parseTagClips(stdout: string, tag: string): { path: string; name: string; score: number }[] {
+  for (const line of stdout.split("\n")) {
+    const evt = parseSpotted(line.trim());
+    if (evt && evt.event === "activity-clips" && evt.tag === tag && Array.isArray(evt.clips)) {
+      return evt.clips;
+    }
+  }
+  return [];
+}
+
+/** The clips past the thumbnail cap, as a compact rejectable list. No images:
+ *  a tag that matched 600 clips would otherwise be 600 base64 JPEGs. */
+function buildRestOfClips(
+  tag: string,
+  rest: { path: string; name: string; score: number }[],
+  onChange: () => void,
+): HTMLElement {
+  const wrap = makeEl("div", "review-rest");
+  const head = makeEl("div", "review-rest__head");
+  head.textContent = `${rest.length} more, weakest first`;
+  wrap.appendChild(head);
+  for (const c of rest) {
+    const item = makeEl("label", "review-rest__row");
+    const box = document.createElement("input");
+    box.type = "checkbox";
+    box.checked = true;
+    box.className = "review-check";
+    const name = makeEl("span", "review-rest__name");
+    name.textContent = c.name;
+    name.title = `${c.path} · ${c.score}`;
+    box.addEventListener("change", () => {
+      if (!box.checked) droppedClips.push([c.path, tag]);
+      else {
+        const i = droppedClips.findIndex(([p, t]) => p === c.path && t === tag);
+        if (i >= 0) droppedClips.splice(i, 1);
+      }
+      onChange();
+    });
+    item.append(box, name);
+    wrap.appendChild(item);
+  }
+  return wrap;
+}
+
 /** Confirm screen: the tags Spotted found, each checked by default. Unchecking
  *  one drops it from every clip; only checked tags get written. */
 function renderReview(matched: MatchedTag[], energy: EnergyBucket[] = []) {
@@ -1000,9 +1048,41 @@ function renderReview(matched: MatchedTag[], energy: EnergyBucket[] = []) {
       // six shown and sees the tag still land on 40 clips would reasonably
       // conclude the pruning does not work.
       if (m.clips > m.shown.length) {
-        const more = makeEl("span", "review-row__more");
+        // Used to be a bare sentence saying the rest existed and could not be
+        // reached. The thumbnails are what cap this row — every one is a
+        // base64 image on a single emit line — so the rest are fetched
+        // without them: names and scores, which is enough to prune by.
+        const more = makeEl("button", "review-row__more review-row__more--btn");
+        (more as HTMLButtonElement).type = "button";
         more.textContent =
-          `showing the ${m.shown.length} weakest of ${m.clips} · uncheck the tag to drop it from all`;
+          `showing the ${m.shown.length} weakest of ${m.clips} · show the rest`;
+        more.addEventListener("click", async () => {
+          if (more.dataset.loaded === "1") return;
+          more.textContent = "Loading…";
+          (more as HTMLButtonElement).disabled = true;
+          try {
+            const out = await invoke<string>("list_tag_clips", {
+              tag: m.tag,
+              scope: currentPath ?? null,
+              allClips: false,
+            });
+            const all = parseTagClips(out, m.tag);
+            const already = new Set(m.shown!.map((c) => c.path));
+            const rest = all.filter((c) => !already.has(c.path));
+            if (rest.length === 0) {
+              more.textContent = "Nothing further to show.";
+              more.dataset.loaded = "1";
+              return;
+            }
+            more.remove();
+            row.appendChild(buildRestOfClips(m.tag, rest, updateCount));
+          } catch (e) {
+            // Say so. Silently leaving the button spinning would read as the
+            // rest not existing after all.
+            more.textContent = `Couldn't load the rest: ${friendlyError(String(e))}`;
+            (more as HTMLButtonElement).disabled = false;
+          }
+        });
         main.appendChild(more);
       }
     }
