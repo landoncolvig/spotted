@@ -32,11 +32,32 @@ coremltools_datas, coremltools_binaries, coremltools_hidden = collect_all("corem
 ftfy_datas, ftfy_binaries, ftfy_hidden = collect_all("ftfy")
 regex_datas, regex_binaries, regex_hidden = collect_all("regex")
 
-# Bundle the pre-downloaded buffalo_l model from the user's ~/.insightface.
-# build.sh ensures this exists before pyinstaller runs.
+# Bundle the pre-downloaded buffalo_l models from the user's ~/.insightface.
+# build.sh ensures these exist before pyinstaller runs.
+#
+# Only the two models facetag actually loads. detect.py passes
+# allowed_modules=["detection", "recognition"], so the other three in buffalo_l
+# were shipped to every user and then skipped at load with "model ignore":
+#
+#   1k3d68.onnx     143.6 MB  landmark_3d_68   never loaded
+#   2d106det.onnx     5.0 MB  landmark_2d_106  never loaded
+#   genderage.onnx    1.3 MB  genderage        never loaded
+#
+# That is ~150 MB of a ~682 MB download. FaceAnalysis globs the model directory
+# and skips what is not in allowed_modules, so a file that is absent is simply
+# never enumerated.
+#
+# BUNDLED_INSIGHTFACE_MODELS and detect.py's allowed_modules have to agree:
+# adding a module there without adding its model here means the module is
+# requested and missing. tests/test_bundle_contents.py fails if they drift.
 insightface_home = os.path.expanduser("~/.insightface")
+BUNDLED_INSIGHTFACE_MODELS = ["det_10g.onnx", "w600k_r50.onnx"]
 model_datas = [
-    (os.path.join(insightface_home, "models", "buffalo_l"), "insightface_root/models/buffalo_l"),
+    (
+        os.path.join(insightface_home, "models", "buffalo_l", _m),
+        "insightface_root/models/buffalo_l",
+    )
+    for _m in BUNDLED_INSIGHTFACE_MODELS
 ]
 
 # Bundle exiftool (Perl + scripts). build.sh stages a copy under sidecar/vendor/exiftool.

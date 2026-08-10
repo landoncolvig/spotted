@@ -224,8 +224,17 @@ blocked on her sample + REDCINE-X install.
       keyboard. Enter flushes the pending debounced save first, or advancing
       would lose the name just typed. Navigation skips cards the filter has
       hidden.
-- [ ] **Bundle diet.** Ranked #8. 720MB and growing; drop transformers, slim
-      the tokenizer.
+- [x] **Bundle diet.** (v0.0.110) The ROADMAP's stated action — drop
+      transformers, slim the tokenizer — was already done (fifth stale item),
+      so the weight was elsewhere. buffalo_l has five models and `detect.py`
+      loads two: `allowed_modules=["detection","recognition"]`. The other three
+      were downloaded by every user and skipped at load with "model ignore" —
+      `1k3d68.onnx` 143.6MB, `2d106det.onnx` 5.0MB, `genderage.onnx` 1.3MB, so
+      ~150MB of a ~682MB download for nothing. v0.0.41 stopped them being
+      LOADED; it never stopped them being SHIPPED. The spec now bundles the two
+      by name. `tests/test_bundle_contents.py` fails if `allowed_modules` and
+      the bundled list ever drift — the reverse mistake (asking for a module
+      whose model is absent) is the one that breaks face detection outright.
 
 ## Blocked
 
@@ -275,6 +284,8 @@ portrait frames degrading detection, labeler "failed to start" at 200+ clips.
   she can see changed, and a CSP is only news if it broke something.
 - 2026-08-09 — v0.0.96: dropped the webview's shell grant entirely. No tester
   text, same reason.
+- 2026-08-09 — v0.0.110: bundle diet, ~150MB off the download. Last ROADMAP
+  item. Backlog is now empty except the two things parked on Landon.
 - 2026-08-09 — v0.0.109: keyboard labeler. First ROADMAP item in five that
   was genuinely missing, and the advertised shortcut actively led somewhere
   destructive.

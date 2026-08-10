@@ -33,6 +33,16 @@ print("Model downloaded.")
 PY
 fi
 
+# The spec bundles only the two models facetag loads, so a partial or failed
+# fetch would otherwise surface as a PyInstaller path error, or worse as a
+# sidecar that starts and cannot detect a face.
+for _m in det_10g.onnx w600k_r50.onnx; do
+  if [[ ! -f "$HOME/.insightface/models/buffalo_l/$_m" ]]; then
+    echo "Missing $_m in ~/.insightface/models/buffalo_l — delete that folder and re-run to refetch."
+    exit 1
+  fi
+done
+
 # 2) Stage exiftool into sidecar/vendor/exiftool so the spec can pick it up.
 EXIFTOOL_BIN="$(command -v exiftool || true)"
 if [[ -z "$EXIFTOOL_BIN" ]]; then
