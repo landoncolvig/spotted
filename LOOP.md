@@ -207,9 +207,18 @@ blocked on her sample + REDCINE-X install.
       restore should rest on); and `.facetag.pre-restore-*` copies were
       excluded from the backup listing by design, which also meant nothing
       ever deleted them — a library's worth of thumbnails per restore.
-- [ ] **Opt-in telemetry + error reporting.** Ranked #2. Blind on where users
-      drop off. Local-first product, so this must be opt-in and say what it
-      sends.
+- [x] **Opt-in telemetry + error reporting.** Already built — the SIXTH stale
+      item, and the mechanism is sound: off unless explicitly opted in, a
+      no-op with no app id compiled in, Sentry on the same gate with
+      `send_default_pii: false` and the hostname pinned so no crash report
+      ships "Ellies-MacBook-Pro". What was wrong (v0.0.112) was the consent
+      itself. Both dialogs named "macOS version" when only the OS family is
+      ever sent, and omitted the hashed install id, the session id and the
+      per-run counts — so someone agreeing was agreeing to less than was
+      collected, in an app whose footer says "Local. No cloud." TELEMETRY.md
+      was accurate throughout; the text people actually read was not. Both
+      dialogs now match the code, and a test fails if any call site grows a
+      payload field the consent text does not cover.
 - [x] **In-app library search.** Already existed — the FOURTH stale item. It
       matches people by name, clips by keyword, and cross-references so
       "wedding" surfaces the people in wedding-tagged clips. Two real gaps
@@ -292,6 +301,8 @@ portrait frames degrading detection, labeler "failed to start" at 200+ clips.
   she can see changed, and a CSP is only news if it broke something.
 - 2026-08-09 — v0.0.96: dropped the webview's shell grant entirely. No tester
   text, same reason.
+- 2026-08-09 — v0.0.112: telemetry was built; the consent text was wrong.
+  Backlog is now genuinely empty apart from the two items parked on Landon.
 - 2026-08-09 — v0.0.111: reach the clips past the review cap. Also corrects
   the previous log line: the backlog was NOT empty. Two items were still
   unchecked (this one, and opt-in telemetry) — I read the file wrong.

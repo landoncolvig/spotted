@@ -2202,9 +2202,13 @@ function wireMenuEvents() {
                       "not set";
     const wantOn = await confirm(
       `Anonymous usage telemetry is ${currently}.\n\n` +
-      "What gets sent: event names (scan/tag/activity complete), app " +
-      "version, macOS version.\n\n" +
-      "What never leaves your Mac: clip names, folder paths, face data.\n\n" +
+      "What gets sent: which step ran (scan, tag write, tag matching) and " +
+      "whether it worked, how many clips were in the batch, how many tags " +
+      "you unchecked, Spotted's version, and that you are on a Mac. Each " +
+      "install gets a random ID, and each launch a second one, so runs can " +
+      "be grouped without knowing who you are.\n\n" +
+      "What never leaves your Mac: clip names, folder paths, your tags, " +
+      "people's names, face data, and anything inside your files.\n\n" +
       "Turn it ON to help improve Spotted, or OFF to disable.",
       { title: "Telemetry", okLabel: "Turn ON", cancelLabel: "Turn OFF" }
     );
@@ -2412,13 +2416,21 @@ async function maybeAskTelemetry(): Promise<void> {
     return;
   }
   if (cfg.telemetry_enabled !== null) return; // already decided
+  // This text is the consent. It has to match what the code sends, not a
+  // shorter version of it. The previous wording named "macOS version" (only
+  // the OS family is sent, never a version) and left out the install ID, the
+  // session ID and the per-run counts, so someone agreeing to it was agreeing
+  // to less than was collected. TELEMETRY.md was right; this was not.
   const ok = await confirm(
     "Help improve Spotted by sharing anonymous usage data?\n\n" +
-    "What gets sent: event names (scan complete, tag write complete), app " +
-    "version, and macOS version.\n\n" +
-    "What never leaves your Mac: clip names, folder paths, face data, " +
-    "people's names, anything from inside your files.\n\n" +
-    "You can change this anytime under Spotted → Telemetry…",
+    "What gets sent: which step ran (scan, tag write) and whether it worked, " +
+    "how many clips were in the batch, how many tags you unchecked, " +
+    "Spotted's version, and that you are on a Mac. Each install gets a " +
+    "random ID, and each launch a second one, so runs can be grouped without " +
+    "knowing who you are.\n\n" +
+    "What never leaves your Mac: clip names, folder paths, your tags, " +
+    "people's names, face data, and anything inside your files.\n\n" +
+    "You can change this anytime under Spotted > Telemetry.",
     {
       title: "Help improve Spotted",
       okLabel: "Yes, share anonymously",
