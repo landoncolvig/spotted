@@ -202,7 +202,17 @@ blocked on her sample + REDCINE-X install.
 - [ ] **Opt-in telemetry + error reporting.** Ranked #2. Blind on where users
       drop off. Local-first product, so this must be opt-in and say what it
       sends.
-- [ ] **In-app library search.** Ranked #5.
+- [x] **In-app library search.** Already existed — the FOURTH stale item. It
+      matches people by name, clips by keyword, and cross-references so
+      "wedding" surfaces the people in wedding-tagged clips. Two real gaps
+      fixed (v0.0.108): the clip index carries each filename and the search
+      ignored it, so someone who knew a clip was IMG_0042.mov got nothing back
+      with the answer already in memory; and the panel drew 200 rows under a
+      header reporting the true total, so a common tag on a large library read
+      as "847 clips" above a list of 200 with nothing saying the rest existed
+      — the same cap-masquerading-as-the-whole-set defect as the review
+      screen. A filename hit now highlights the filename, since it lights up
+      no keyword chip and the row would otherwise appear unexplained.
 - [ ] **Keyboard-driven labeler.** Ranked #6.
 - [ ] **Bundle diet.** Ranked #8. 720MB and growing; drop transformers, slim
       the tokenizer.
@@ -255,6 +265,10 @@ portrait frames degrading detection, labeler "failed to start" at 200+ clips.
   she can see changed, and a CSP is only news if it broke something.
 - 2026-08-09 — v0.0.96: dropped the webview's shell grant entirely. No tester
   text, same reason.
+- 2026-08-09 — v0.0.108: library search was already built; fixed filenames
+  and the silent 200-row cap. FOURTH stale item. My own test failed on my own
+  comment — it asserted a phrase was absent from the function and the comment
+  explaining the change quoted it. Scoped the assertion to the statement.
 - 2026-08-09 — v0.0.107: backup/undo was already built; fixed what was
   missing around it. Third stale queue item, so the remaining ROADMAP entries
   are worth verifying before trusting them.

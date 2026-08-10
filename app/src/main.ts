@@ -1736,10 +1736,19 @@ function librarySearchQuery(): string {
 
 function matchingClipsForQuery(query: string): LibraryClipIndexEntry[] {
   if (!query) return [];
-  return library.clipIndex.filter((c) =>
-    c.keywords.some((kw) => kw.toLowerCase().includes(query))
+  // Filenames count. The name was already in the index and only the keywords
+  // were searched, so someone who knew a clip was IMG_0042.mov and wanted to
+  // see what Spotted had put on it got nothing back.
+  return library.clipIndex.filter(
+    (c) =>
+      c.name.toLowerCase().includes(query) ||
+      c.keywords.some((kw) => kw.toLowerCase().includes(query)),
   );
 }
+
+/** How many search results the panel will draw. The header reports the true
+ *  total and says when it is showing fewer. */
+const CLIP_SEARCH_LIMIT = 200;
 
 function renderLibrarySidebar() {
   const list = libraryEl<HTMLUListElement>("library-people");
@@ -1896,27 +1905,38 @@ function renderLibraryClipSearchResults(query: string): void {
   const matches = matchingClipsForQuery(query);
   const header = document.createElement("div");
   header.className = "library-clip-search__header";
+  // "tagged with" was wrong the moment filenames became searchable, and the
+  // count used to be the full total over a list capped at 200 — so a common
+  // tag on a big library read as "847 clips" above a list of 200, with
+  // nothing saying the rest existed.
+  const shown = Math.min(matches.length, CLIP_SEARCH_LIMIT);
   header.textContent = matches.length === 0
-    ? `No clips tagged with "${query}".`
-    : `${matches.length} clip${matches.length === 1 ? "" : "s"} tagged with "${query}"`;
+    ? `Nothing matching "${query}".`
+    : matches.length > shown
+      ? `${matches.length} clips match "${query}" · showing the first ${shown}`
+      : `${matches.length} clip${matches.length === 1 ? "" : "s"} matching "${query}"`;
   panel.appendChild(header);
 
   if (matches.length === 0) {
     const hint = document.createElement("div");
     hint.className = "library-clip-search__hint";
-    hint.textContent = "Try a person's name, an activity (wedding, beach), or a batch tag.";
+    hint.textContent = "Try a person's name, an activity (wedding, beach), a batch tag, or a filename.";
     panel.appendChild(hint);
     return;
   }
 
   const list = document.createElement("ul");
   list.className = "library-clip-search__list";
-  for (const c of matches.slice(0, 200)) {
+  for (const c of matches.slice(0, CLIP_SEARCH_LIMIT)) {
     const li = document.createElement("li");
     li.className = "library-clip-search__row";
 
     const name = document.createElement("span");
-    name.className = "library-clip-search__name";
+    // Mark the filename when IT is why the clip matched, otherwise a
+    // filename hit shows a row whose chips highlight nothing and the user
+    // cannot tell why it is in the list.
+    name.className = "library-clip-search__name" +
+      (c.name.toLowerCase().includes(query) ? " is-match" : "");
     name.textContent = c.name;
     name.title = c.path;
 

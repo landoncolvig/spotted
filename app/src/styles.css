@@ -1183,6 +1183,12 @@ body {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* Matches the keyword chip's highlight, so "why is this row here" reads the
+   same whether the hit was a tag or the filename. */
+.library-clip-search__name.is-match {
+  color: var(--primary-hover);
+  font-weight: 500;
+}
 .library-clip-search__kws {
   display: flex;
   flex-wrap: wrap;
