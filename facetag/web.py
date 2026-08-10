@@ -252,7 +252,7 @@ def create_app(
               <div class="head">
                 <span class="cid">cluster {cid}</span>
                 <span class="cnt">{count} faces</span>
-                <button type="button" class="hide-btn" data-cluster="{cid}" title="Hide this cluster (not a person)">×</button>
+                <button type="button" class="hide-btn" tabindex="-1" data-cluster="{cid}" title="Hide this cluster (not a person). Keyboard: ⌘⌫ while naming it">×</button>
               </div>
               <img loading="lazy" src="/thumb/{cid}.jpg{thumb_qs}" alt="cluster {cid}">
               <input type="text" name="name-{cid}" placeholder="name…" value="{existing}" list="known-names" autocomplete="off">
@@ -711,7 +711,7 @@ _PAGE = r"""<!doctype html>
 <header>
   <div class="header-title">
     <h1>Name the people</h1>
-    <span class="meta">__COUNT__ clusters &middot; auto-saves<span class="kbd-hint"> &middot; <kbd>Tab</kbd> to advance</span></span>
+    <span class="meta">__COUNT__ clusters &middot; auto-saves<span class="kbd-hint"> &middot; <kbd>Enter</kbd> or <kbd>Tab</kbd> for the next name &middot; <kbd>⌘⌫</kbd> to hide</span></span>
   </div>
   <div class="actions">
     <button id="save">Done</button>
@@ -827,6 +827,54 @@ $("#save").addEventListener("click", save);
 window.addEventListener("keydown", (e) => {
   if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "s") {
     e.preventDefault(); save();
+  }
+});
+
+// Naming a few hundred clusters is the slowest thing anyone does in Spotted,
+// and it was all mouse. Tab was advertised in the header and did not even work
+// properly: the hide button sits before the input inside each card, so Tab
+// from one name landed on the NEXT card's "×" — two presses per card, the
+// first one parked on a control that discards the cluster if you hit Space.
+// The button is out of the tab order now, so Tab goes name to name, and Enter
+// does the same thing without leaving the home row.
+function nameInputs() {
+  return [...$$(".card")].filter(c => c.style.display !== "none")
+                         .map(c => c.querySelector("input"));
+}
+function focusRelative(from, step) {
+  const inputs = nameInputs();
+  const i = inputs.indexOf(from);
+  if (i === -1) return false;
+  const next = inputs[i + step];
+  if (!next) return false;
+  next.focus();
+  next.select();
+  // Keep the card visible; a focused element scrolled under the sticky header
+  // looks like nothing happened.
+  next.closest(".card").scrollIntoView({ block: "center", behavior: "smooth" });
+  return true;
+}
+document.addEventListener("keydown", (e) => {
+  const input = e.target;
+  if (input.tagName !== "INPUT" || input.classList.contains("filter")) return;
+  const card = input.closest(".card");
+  if (!card) return;
+
+  if (e.key === "Enter") {
+    // Enter also accepts a highlighted autocomplete suggestion, which is the
+    // behaviour we want: take the completion AND move on.
+    e.preventDefault();
+    clearTimeout(saveTimers.get(card.dataset.cluster));
+    saveOne(card);
+    if (!focusRelative(input, e.shiftKey ? -1 : 1)) input.blur();
+    return;
+  }
+  // The keyboard replacement for the "×" that just left the tab order.
+  if ((e.metaKey || e.ctrlKey) && (e.key === "Backspace" || e.key === "Delete")) {
+    e.preventDefault();
+    const after = nameInputs()[nameInputs().indexOf(input) + 1];
+    hideCard(card.dataset.cluster, card);
+    if (after) { after.focus(); after.select(); }
   }
 });
 

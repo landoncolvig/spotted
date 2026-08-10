@@ -213,7 +213,17 @@ blocked on her sample + REDCINE-X install.
       — the same cap-masquerading-as-the-whole-set defect as the review
       screen. A filename hit now highlights the filename, since it lights up
       no keyword chip and the row would otherwise appear unexplained.
-- [ ] **Keyboard-driven labeler.** Ranked #6.
+- [x] **Keyboard-driven labeler.** (v0.0.109) This one was NOT already built,
+      and it was worse than missing. The header advertised "Tab to advance"
+      while the hide button sits before the name field inside each card, so Tab
+      from one name landed on the NEXT card's "×" — two presses per card, the
+      first parked on a control that discards the cluster if you hit Space or
+      Enter. The button is out of the tab order now (still mouse-clickable),
+      Tab goes name to name as advertised, Enter does the same without leaving
+      the home row, Shift+Enter goes back, and ⌘⌫ replaces the button for the
+      keyboard. Enter flushes the pending debounced save first, or advancing
+      would lose the name just typed. Navigation skips cards the filter has
+      hidden.
 - [ ] **Bundle diet.** Ranked #8. 720MB and growing; drop transformers, slim
       the tokenizer.
 
@@ -265,6 +275,9 @@ portrait frames degrading detection, labeler "failed to start" at 200+ clips.
   she can see changed, and a CSP is only news if it broke something.
 - 2026-08-09 — v0.0.96: dropped the webview's shell grant entirely. No tester
   text, same reason.
+- 2026-08-09 — v0.0.109: keyboard labeler. First ROADMAP item in five that
+  was genuinely missing, and the advertised shortcut actively led somewhere
+  destructive.
 - 2026-08-09 — v0.0.108: library search was already built; fixed filenames
   and the silent 200-row cap. FOURTH stale item. My own test failed on my own
   comment — it asserted a phrase was absent from the function and the comment
